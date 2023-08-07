@@ -27,7 +27,7 @@ impl Cli {
             [
                 "release",
                 "--repo",
-                "vectordotdev/vector",
+                "Observo-Inc/vector",
                 "create",
                 &format!("v{version}"),
                 "--title",
