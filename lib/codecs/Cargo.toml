@@ -16,6 +16,7 @@ lookup = { package = "vector-lookup", path = "../vector-lookup", default-feature
 memchr = { version = "2", default-features = false }
 once_cell = { version = "1.17", default-features = false }
 ordered-float = { version = "3.7.0", default-features = false }
+parquet = {version = "39.0.0", default-feature = false}
 prost = { version = "0.11.8", default-features = false, features = ["std"] }
 regex = { version = "1.8.1", default-features = false, features = ["std", "perf"] }
 serde = { version = "1", default-features = false, features = ["derive"] }
