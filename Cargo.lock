@@ -6853,6 +6853,7 @@ dependencies = [
  "rand_chacha 0.2.2",
  "rand_core 0.5.1",
  "rand_hc",
+ "rand_pcg",
 ]
 
 [[package]]
@@ -6919,6 +6920,15 @@ name = "rand_hc"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca3129af7b92a17112d59ad498c6f81eaf463253766b90396d39ea7a39d6613c"
+dependencies = [
+ "rand_core 0.5.1",
+]
+
+[[package]]
+name = "rand_pcg"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16abd0c1b639e9eb4d7c50c0b8100b0d0f849be2349829c740fe8e6eb4816429"
 dependencies = [
  "rand_core 0.5.1",
 ]
@@ -8178,6 +8188,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "streaming_algorithms"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1da7eb91d37e0385c95d68eec4584731b3ec52cd073cfffc4c4f2bb31df6670f"
+dependencies = [
+ "rand 0.7.3",
+ "serde",
+ "twox-hash",
+]
+
+[[package]]
 name = "string_cache"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8375,6 +8396,15 @@ dependencies = [
  "cfg-if",
  "native-tls",
  "rustls-pemfile 1.0.1",
+]
+
+[[package]]
+name = "tdigest"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c45d225a08ebccf0e0c7d46db4066ea8ab05b29d3750ecc1a04f1675978bf3c8"
+dependencies = [
+ "ordered-float 2.10.0",
 ]
 
 [[package]]
@@ -9227,6 +9257,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
 dependencies = [
  "cfg-if",
+ "rand 0.8.5",
  "static_assertions",
 ]
 
@@ -9649,8 +9680,10 @@ dependencies = [
  "snap",
  "socket2 0.5.3",
  "stream-cancel",
+ "streaming_algorithms",
  "strip-ansi-escapes",
  "syslog",
+ "tdigest",
  "tempfile",
  "test-generator",
  "tikv-jemallocator",

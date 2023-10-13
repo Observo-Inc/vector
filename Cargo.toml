@@ -316,6 +316,9 @@ uuid = { version = "1", default-features = false, features = ["serde", "v4"] }
 warp = { version = "0.3.5", default-features = false }
 zstd = { version = "0.12.3", default-features = false }
 arr_macro = { version = "0.2.1" }
+streaming_algorithms = { version = "0.3.0" }
+tdigest = {  version = "0.2.3" }
+
 
 # depending on fork for bumped nix dependency
 # https://github.com/heim-rs/heim/pull/360
@@ -564,6 +567,7 @@ transforms-logs = [
   "transforms-route",
   "transforms-sample",
   "transforms-throttle",
+  "transforms-stream_analytics",
 ]
 transforms-metrics = [
   "transforms-aggregate",
@@ -587,6 +591,7 @@ transforms-reduce = []
 transforms-remap = []
 transforms-route = []
 transforms-sample = []
+transforms-stream_analytics = []
 transforms-tag_cardinality_limit = ["dep:bloom", "dep:hashbrown"]
 transforms-throttle = ["dep:governor"]
 

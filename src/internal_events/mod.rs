@@ -130,6 +130,10 @@ mod websocket;
 ))]
 mod file;
 mod windows;
+mod stream_analytics;
+
+#[cfg(feature = "transforms-stream_analytics")]
+pub(crate) use self::stream_analytics::*;
 
 #[cfg(feature = "sources-mongodb_metrics")]
 pub(crate) use mongodb_metrics::*;
