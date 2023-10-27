@@ -162,7 +162,7 @@ fn list_fixtures(proto: &str, suffix: &str) -> Vec<PathBuf> {
     let mut entries = fs::read_dir(path)
         .unwrap()
         .map(Result::unwrap)
-        .filter(|e| e.file_type().unwrap().is_file())
+        .filter(|e| e.file_type().unwrap().is_file() && !e.file_name().eq(".DS_Store"))
         .map(|e| e.path())
         .collect::<Vec<_>>();
     entries.sort();
