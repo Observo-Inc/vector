@@ -7,9 +7,9 @@ use crate::transforms::stream_analytics::{StreamAnalyticsCalculator, StreamAnaly
 
 #[derive(Clone, Debug)]
 pub struct TopN {
-    max_top_n_labels: u8,
+    max_top_n_labels: u16,
     max_top_n_values: u8,
-    current_label_count: u8,
+    current_label_count: u16,
     probability: f64,
     top_n: HashMap<String, Top<String, u32>>,
 }

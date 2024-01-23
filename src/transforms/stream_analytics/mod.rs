@@ -97,7 +97,7 @@ pub struct StreamAnalyticsConfig {
     #[derivative(Default(value = "default_processing_limit()"))]
     #[configurable(metadata(
     docs::additional_props_description = "The maximum size in bytes that will be processed for key or value.\
-    Max supported value is 1204 bytes. Default 256 bytes."
+    Max supported value is 1024 bytes. Default 256 bytes."
     ))]
     pub max_processing_limit: u16,
 
@@ -116,9 +116,9 @@ pub struct StreamAnalyticsConfig {
     #[configurable(metadata(
     docs::additional_props_description = "The maximum number of labels to consider for TopN. \
     Used only by top_n calculator. \
-    Max 64 labels are supported. Default 16 labels."
+    Max 1024 labels are supported. Default 16 labels."
     ))]
-    pub max_top_n_labels: u8,
+    pub max_top_n_labels: u16,
 
     /// The TopN values to consider per Key.
     /// Max 16 values are supported
@@ -127,7 +127,7 @@ pub struct StreamAnalyticsConfig {
     #[configurable(metadata(
     docs::additional_props_description = "The maximum number TopN values to consider per Key. \
     Used only by top_n calculator. \
-    Max 16 labels are supported. Default 5 values"
+    Max 32 labels are supported. Default 5 values"
     ))]
     pub max_top_n_values: u8,
 
@@ -228,7 +228,7 @@ const fn default_max_internal_state_buffer() -> u16 {
     2048
 }
 
-const fn default_max_top_n_labels() -> u8 {
+const fn default_max_top_n_labels() -> u16 {
     16
 }
 
@@ -391,7 +391,7 @@ pub struct StreamAnalyticsSanitisedConfig {
     flush_period: Duration,
     max_events: u64,
     max_internal_state_buffer: usize,
-    max_top_n_labels: u8,
+    max_top_n_labels: u16,
     max_top_n_values: u8,
     max_processing_limit: usize,
     error_rate: f64,
@@ -421,16 +421,16 @@ impl StreamAnalyticsSanitisedConfig {
             max_events: config.max_events,
             max_internal_state_buffer: config.max_internal_state_buffer as usize,
             max_top_n_labels: {
-                if config.max_top_n_labels > 64 {
-                    warn!(message = "max_top_n_labels value will be set to max allowed value = 64", IgnoredConfig = %config.max_top_n_labels, internal_log_rate_limit=true);
+                if config.max_top_n_labels > 1024 {
+                    warn!(message = "max_top_n_labels value will be set to max allowed value = 1024", IgnoredConfig = %config.max_top_n_labels, internal_log_rate_limit=true);
                 }
-                min(config.max_top_n_labels, 64)
+                min(config.max_top_n_labels, 1024)
             },
             max_top_n_values: {
-                if config.max_top_n_values > 16 {
-                    warn!(message = "max_top_n_values value will be set to max allowed value = 16", IgnoredConfig = %config.max_top_n_values, internal_log_rate_limit=true);
+                if config.max_top_n_values > 32 {
+                    warn!(message = "max_top_n_values value will be set to max allowed value = 32", IgnoredConfig = %config.max_top_n_values, internal_log_rate_limit=true);
                 }
-                min(config.max_top_n_values, 16)
+                min(config.max_top_n_values, 32)
             },
             max_processing_limit: {
                 if config.max_processing_limit > 1024 {
@@ -1061,6 +1061,7 @@ quantiles = [0.99]
 max_top_n_values = 8
 calculators = [ "top_n", "cardinality"]
 group_by = ["field_3", "field_4"]
+skip_fields = ["_ob", "time", "date"]
 combine_by_fields = {"combined_field" = ["field_1", "field_2"], "combined_field2" = ["field_1", "field_2.inside.leaf"] }
 "#,
         )
@@ -1072,6 +1073,7 @@ combine_by_fields = {"combined_field" = ["field_1", "field_2"], "combined_field2
 
             let mut e_1 = LogEvent::from("test message 1");
             e_1.insert("field_1", 1);
+            e_1.insert("_ob", 1);
             e_1.insert("time", "good times");
             e_1.insert("field_2", "1");
             e_1.insert("field_2.inside.leaf", "1");
@@ -1084,6 +1086,7 @@ combine_by_fields = {"combined_field" = ["field_1", "field_2"], "combined_field2
 
             let mut e_3 = LogEvent::from("test message 3");
             e_3.insert("field_1", 3);
+            e_3.insert("field_9._ob.source", 3);
             e_3.insert("field_2", "1");
 
             let mut e_4 = LogEvent::from("test message 4");
@@ -1119,6 +1122,7 @@ combine_by_fields = {"combined_field" = ["field_1", "field_2"], "combined_field2
             assert_eq!(output_1.get(".stats_summary").is_some(), true);
 
             assert_eq!(output_1.get("cardinality.time"), None);
+            assert_eq!(output_1.contains("cardinality.\"field_9._ob.source\""), true);
             assert_eq!(output_1.get("cardinality.date"), None);
             assert_eq!(output_1.get("top_n.time"), None);
             assert_eq!(output_1.get("top_n.date"), None);
@@ -1289,9 +1293,9 @@ max_events = 5
         let config = toml::from_str::<StreamAnalyticsConfig>(
             r#"
 max_events = 5
-max_top_n_labels = 128
+max_top_n_labels = 3280
 max_processing_limit = 2000
-max_top_n_values = 30
+max_top_n_values = 33
 "#,
         )
             .unwrap();
@@ -1306,8 +1310,8 @@ max_top_n_values = 30
         assert_eq!(sanitised_config.flush_period, Duration::from_millis(300000));
         assert_eq!(sanitised_config.quantiles, vec![0.5, 0.75, 0.9, 0.95, 0.99]);
         assert_eq!(sanitised_config.max_processing_limit, 1024);
-        assert_eq!(sanitised_config.max_top_n_labels, 64);
-        assert_eq!(sanitised_config.max_top_n_values, 16);
+        assert_eq!(sanitised_config.max_top_n_labels, 1024);
+        assert_eq!(sanitised_config.max_top_n_values, 32);
 
     }
 
