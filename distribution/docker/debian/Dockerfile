@@ -9,7 +9,7 @@ RUN mkdir -p /var/lib/vector
 
 FROM docker.io/debian:bullseye-slim
 
-RUN apt-get update && apt-get upgrade && apt-get install -y --no-install-recommends ca-certificates tzdata systemd && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata systemd && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /vector/bin/* /usr/bin/
 COPY --from=builder /vector/config/README.md /etc/vector/README.md

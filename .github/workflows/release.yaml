@@ -9,6 +9,6 @@ jobs:
   Release:
     uses: ./.github/workflows/publish.yaml
     with:
-      git_ref: ${{ github.ref_name }}.${{ github.ref }}
-      channel: release
+      git_ref: ${{ github.ref }}
+      channel: custom
     secrets: inherit
