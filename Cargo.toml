@@ -513,7 +513,7 @@ transforms-throttle = ["dep:governor"]
 
 # Sinks
 sinks = ["sinks-logs", "sinks-metrics"]
-sinks-logs = ["sinks-amqp", "sinks-appsignal", "sinks-aws_cloudwatch_logs", "sinks-aws_kinesis_firehose", "sinks-aws_kinesis_streams", "sinks-aws_s3", "sinks-aws_sqs", "sinks-axiom", "sinks-azure_blob", "sinks-azure_monitor_logs", "sinks-blackhole", "sinks-chronicle", "sinks-clickhouse", "sinks-console", "sinks-databend", "sinks-datadog_archives", "sinks-datadog_events", "sinks-datadog_logs", "sinks-datadog_traces", "sinks-elasticsearch", "sinks-file", "sinks-gcp", "sinks-honeycomb", "sinks-http", "sinks-humio", "sinks-influxdb", "sinks-kafka", "sinks-mezmo", "sinks-loki", "sinks-nats", "sinks-new_relic_logs", "sinks-new_relic", "sinks-papertrail", "sinks-pulsar", "sinks-redis", "sinks-sematext", "sinks-socket", "sinks-splunk_hec", "sinks-vector", "sinks-webhdfs", "sinks-websocket"]
+sinks-logs = ["sinks-amqp", "sinks-appsignal", "sinks-aws_cloudwatch_logs", "sinks-aws_kinesis_firehose", "sinks-aws_kinesis_streams", "sinks-aws_s3", "sinks-aws_sqs", "sinks-axiom", "sinks-azure_blob", "sinks-azure_monitor_logs", "sinks-azure_sentinel_logs", "sinks-blackhole", "sinks-chronicle", "sinks-clickhouse", "sinks-console", "sinks-databend", "sinks-datadog_archives", "sinks-datadog_events", "sinks-datadog_logs", "sinks-datadog_traces", "sinks-elasticsearch", "sinks-file", "sinks-gcp", "sinks-honeycomb", "sinks-http", "sinks-humio", "sinks-influxdb", "sinks-kafka", "sinks-mezmo", "sinks-loki", "sinks-nats", "sinks-new_relic_logs", "sinks-new_relic", "sinks-papertrail", "sinks-pulsar", "sinks-redis", "sinks-sematext", "sinks-socket", "sinks-splunk_hec", "sinks-vector", "sinks-webhdfs", "sinks-websocket"]
 sinks-metrics = ["sinks-appsignal", "sinks-aws_cloudwatch_metrics", "sinks-blackhole", "sinks-console", "sinks-datadog_metrics", "sinks-humio", "sinks-influxdb", "sinks-kafka", "sinks-prometheus", "sinks-sematext", "sinks-statsd", "sinks-vector", "sinks-splunk_hec"]
 
 sinks-amqp = ["lapin"]
@@ -527,6 +527,7 @@ sinks-aws_sqs = ["aws-core", "dep:aws-sdk-sqs"]
 sinks-axiom = ["sinks-elasticsearch"]
 sinks-azure_blob = ["dep:azure_core", "dep:azure_identity", "dep:azure_storage", "dep:azure_storage_blobs"]
 sinks-azure_monitor_logs = []
+sinks-azure_sentinel_logs = []
 sinks-blackhole = []
 sinks-chronicle = []
 sinks-clickhouse = []
