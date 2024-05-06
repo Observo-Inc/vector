@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use bytes::Bytes;
 use chrono::Utc;
 use codecs::{
@@ -58,14 +59,15 @@ fn azure_blob_build_request_without_compression() {
         container_name,
         blob_time_format,
         blob_append_uuid,
-        encoder: (
+        encoder: Arc::new((
             Default::default(),
             Encoder::<Framer>::new(
                 NewlineDelimitedEncoder::new().into(),
                 TextSerializerConfig::default().build().into(),
             ),
-        ),
+        )),
         compression,
+        blob_extension: None,
     };
 
     let (metadata, request_metadata_builder, _events) =
@@ -103,14 +105,15 @@ fn azure_blob_build_request_with_compression() {
         container_name,
         blob_time_format,
         blob_append_uuid,
-        encoder: (
+        encoder: Arc::new((
             Default::default(),
             Encoder::<Framer>::new(
                 NewlineDelimitedEncoder::new().into(),
                 TextSerializerConfig::default().build().into(),
             ),
-        ),
+        )),
         compression,
+        blob_extension: None,
     };
     let (metadata, request_metadata_builder, _events) =
         request_options.split_input((key, vec![log]));
@@ -147,14 +150,15 @@ fn azure_blob_build_request_with_time_format() {
         container_name,
         blob_time_format,
         blob_append_uuid,
-        encoder: (
+        encoder: Arc::new((
             Default::default(),
             Encoder::<Framer>::new(
                 NewlineDelimitedEncoder::new().into(),
                 TextSerializerConfig::default().build().into(),
             ),
-        ),
+        )),
         compression,
+        blob_extension: None,
     };
 
     let (metadata, request_metadata_builder, _events) =
@@ -195,14 +199,15 @@ fn azure_blob_build_request_with_uuid() {
         container_name,
         blob_time_format,
         blob_append_uuid,
-        encoder: (
+        encoder: Arc::new((
             Default::default(),
             Encoder::<Framer>::new(
                 NewlineDelimitedEncoder::new().into(),
                 TextSerializerConfig::default().build().into(),
             ),
-        ),
+        )),
         compression,
+        blob_extension: None,
     };
 
     let (metadata, request_metadata_builder, _events) =

@@ -1,16 +1,16 @@
+use std::sync::Arc;
 use bytes::Bytes;
 use chrono::Utc;
-use codecs::encoding::Framer;
 use uuid::Uuid;
 use vector_common::request_metadata::RequestMetadata;
 use vector_core::ByteSizeOf;
 
 use crate::{
-    codecs::{Encoder, Transformer},
     event::{Event, Finalizable},
     sinks::{
         azure_common::config::{AzureBlobMetadata, AzureBlobRequest},
         util::{
+            encoding::Encoder,
             metadata::RequestMetadataBuilder, request_builder::EncodeResult, Compression,
             RequestBuilder,
         },
@@ -22,14 +22,15 @@ pub struct AzureBlobRequestOptions {
     pub container_name: String,
     pub blob_time_format: String,
     pub blob_append_uuid: bool,
-    pub encoder: (Transformer, Encoder<Framer>),
+    pub encoder: Arc<dyn Encoder<Vec<Event>> + Send + Sync>,
     pub compression: Compression,
+    pub blob_extension: Option<String>,
 }
 
 impl RequestBuilder<(String, Vec<Event>)> for AzureBlobRequestOptions {
     type Metadata = AzureBlobMetadata;
     type Events = Vec<Event>;
-    type Encoder = (Transformer, Encoder<Framer>);
+    type Encoder = Arc<dyn Encoder<Vec<Event>> + Send + Sync>;
     type Payload = Bytes;
     type Request = AzureBlobRequest;
     type Error = std::io::Error;
@@ -74,7 +75,14 @@ impl RequestBuilder<(String, Vec<Event>)> for AzureBlobRequestOptions {
                 .unwrap_or_else(|| formatted_ts.to_string())
         };
 
-        let extension = self.compression.extension();
+        let mut content_type = self.compression.content_type();
+        let extension = if self.blob_extension.is_some()
+            && self.blob_extension.clone().unwrap() == "parquet"  {
+            content_type = "parquet";
+            self.blob_extension.clone().unwrap()
+        } else {
+            self.compression.extension().to_string()
+        };
         azure_metadata.partition_key = format!(
             "{}{}.{}",
             azure_metadata.partition_key, blob_name, extension
@@ -93,7 +101,7 @@ impl RequestBuilder<(String, Vec<Event>)> for AzureBlobRequestOptions {
         AzureBlobRequest {
             blob_data,
             content_encoding: self.compression.content_encoding(),
-            content_type: self.compression.content_type(),
+            content_type: content_type,
             metadata: azure_metadata,
             request_metadata,
         }
