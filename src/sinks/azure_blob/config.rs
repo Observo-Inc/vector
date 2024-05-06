@@ -5,6 +5,7 @@ use codecs::{encoding::Framer, JsonSerializerConfig, NewlineDelimitedEncoderConf
 use tower::ServiceBuilder;
 use vector_common::sensitive_string::SensitiveString;
 use vector_config::configurable_component;
+use vector_core::event::Event;
 
 use super::request_builder::AzureBlobRequestOptions;
 use crate::{
@@ -218,15 +219,24 @@ impl AzureBlobSinkConfig {
             .unwrap_or(DEFAULT_FILENAME_APPEND_UUID);
 
         let transformer = self.encoding.transformer();
-        let (framer, serializer) = self.encoding.build(SinkType::MessageBased)?;
-        let encoder = Encoder::<Framer>::new(framer, serializer);
+        let mut blob_extension = self.compression.extension();
+        let encoder = if let Some(serializer) = self.encoding.build_batched()? {
+            blob_extension = "parquet";
+            Arc::new((transformer, serializer))
+                as Arc<dyn crate::sinks::util::encoding::Encoder<Vec<Event>> + Send + Sync>
+        } else {
+            let (framer, serializer) = self.encoding.build(SinkType::MessageBased)?;
+            let encoder = Encoder::<Framer>::new(framer, serializer);
+            Arc::new((transformer, encoder)) as _
+        };
 
         let request_options = AzureBlobRequestOptions {
             container_name: self.container_name.clone(),
             blob_time_format,
             blob_append_uuid,
-            encoder: (transformer, encoder),
+            encoder,
             compression: self.compression,
+            blob_extension: Some(blob_extension.to_string()),
         };
 
         let sink = AzureBlobSink::new(
