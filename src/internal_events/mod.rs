@@ -131,9 +131,13 @@ mod websocket;
 mod file;
 mod windows;
 mod stream_analytics;
+mod hash_replace;
 
 #[cfg(feature = "transforms-stream_analytics")]
 pub(crate) use self::stream_analytics::*;
+
+#[cfg(feature = "transforms-hash_replace")]
+pub(crate) use self::hash_replace::*;
 
 #[cfg(feature = "sources-mongodb_metrics")]
 pub(crate) use mongodb_metrics::*;

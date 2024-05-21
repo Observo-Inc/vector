@@ -81,6 +81,7 @@ block-buffer,https://github.com/RustCrypto/utils,MIT OR Apache-2.0,RustCrypto De
 block-padding,https://github.com/RustCrypto/utils,MIT OR Apache-2.0,RustCrypto Developers
 blocking,https://github.com/smol-rs/blocking,Apache-2.0 OR MIT,Stjepan Glavina <stjepang@gmail.com>
 bloom,https://github.com/nicklan/bloom-rs,GPL-2.0,Nick Lanham <nick@afternight.org>
+bloomy,https://docs.rs/bloomy/,MIT,"Aleksandr Bezobchuk <aleks.bezobchuk@gmail.com>, Alexis Sellier <self@cloudhead.io>"
 bollard,https://github.com/fussybeaver/bollard,Apache-2.0,Bollard contributors
 borsh,https://github.com/near/borsh-rs,MIT OR Apache-2.0,Near Inc <hello@near.org>
 borsh-derive,https://github.com/nearprotocol/borsh,Apache-2.0,Near Inc <hello@nearprotocol.com>
@@ -484,6 +485,7 @@ spin,https://github.com/mvdnes/spin-rs,MIT,"Mathijs van de Nes <git@mathijs.vd-n
 spki,https://github.com/RustCrypto/formats/tree/master/spki,Apache-2.0 OR MIT,RustCrypto Developers
 static_assertions,https://github.com/nvzqz/static-assertions-rs,MIT OR Apache-2.0,Nikolai Vazquez
 str-buf,https://github.com/DoumanAsh/str-buf,BSL-1.0,Douman <douman@gmx.se>
+streaming_algorithms,https://github.com/alecmocatta/streaming_algorithms,MIT OR Apache-2.0,Frank Denis
 stream-cancel,https://github.com/jonhoo/stream-cancel,MIT OR Apache-2.0,Jon Gjengset <jon@thesquareplanet.com>
 stringprep,https://github.com/sfackler/rust-stringprep,MIT OR Apache-2.0,Steven Fackler <sfackler@gmail.com>
 strip-ansi-escapes,https://github.com/luser/strip-ansi-escapes,Apache-2.0 OR MIT,Ted Mielczarek <ted@mielczarek.org>
@@ -501,6 +503,7 @@ syslog_loose,https://github.com/FungusHumungus/syslog-loose,MIT,Stephen Wakely <
 take_mut,https://github.com/Sgeo/take_mut,MIT,Sgeo <sgeoster@gmail.com>
 tap,https://github.com/myrrlyn/tap,MIT,"Elliott Linder <elliott.darfink@gmail.com>, myrrlyn <self@myrrlyn.dev>"
 tcp-stream,https://github.com/amqp-rs/tcp-stream,BSD-2-Clause,Marc-Antoine Perennou <Marc-Antoine@Perennou.com>
+tdigest,https://github.com/MnO2/t-digest,Apache-2.0,Paul Meng
 tempfile,https://github.com/Stebalien/tempfile,MIT OR Apache-2.0,"Steven Allen <steven@stebalien.com>, The Rust Project Developers, Ashley Mannix <ashleymannix@live.com.au>, Jason White <me@jasonwhite.io>"
 term,https://github.com/Stebalien/term,MIT OR Apache-2.0,"The Rust Project Developers, Steven Allen"
 termcolor,https://github.com/BurntSushi/termcolor,Unlicense OR MIT,Andrew Gallant <jamslam@gmail.com>
@@ -609,6 +612,7 @@ woothee,https://github.com/woothee/woothee-rust,Apache-2.0,hhatto <hhatto.jp@gma
 wyz,https://github.com/myrrlyn/wyz,MIT,myrrlyn <self@myrrlyn.dev>
 xml-rs,https://github.com/netvl/xml-rs,MIT,Vladimir Matveev <vmatveev@citrine.cc>
 xmlparser,https://github.com/RazrFalcon/xmlparser,MIT OR Apache-2.0,Evgeniy Reizner <razrfalcon@gmail.com>
+xxhash-rust,https://github.com/DoumanAsh/xxhash-rust,BSL-1.0,Douman <douman@gmx.se>
 yaml-rust,https://github.com/chyh1990/yaml-rust,MIT OR Apache-2.0,Yuheng Chen <yuhengchen@sensetime.com>
 zerocopy,https://fuchsia.googlesource.com/fuchsia/+/HEAD/src/lib/zerocopy,BSD-2-Clause,Joshua Liebow-Feeser <joshlf@google.com>
 zerocopy-derive,https://github.com/google/zerocopy,BSD-2-Clause,Joshua Liebow-Feeser <joshlf@google.com>

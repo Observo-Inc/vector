@@ -32,6 +32,8 @@ pub mod throttle;
 
 #[cfg(feature = "transforms-stream_analytics")]
 pub mod stream_analytics;
+#[cfg(feature = "transforms-hash_replace")]
+pub mod hash_replace;
 
 pub use vector_core::transform::{
     FunctionTransform, OutputBuffer, SyncTransform, TaskTransform, Transform, TransformOutputs,

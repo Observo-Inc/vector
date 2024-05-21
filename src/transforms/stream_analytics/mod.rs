@@ -602,7 +602,7 @@ impl StreamAnalytics {
         let mut combined_values: Vec<(String, String)> = Vec::new();
         'combine_loop: for (field_name, combined_by) in &self.sanitised_config.combine_by_fields {
             let mut combined_value: Vec<String> = Vec::new();
-            for combine_by_field in combined_by {
+            for combine_by_field in combined_by.iter() {
                 let Some(val) = log_event.get(combine_by_field.as_str()) else {
                     continue 'combine_loop
                 };
