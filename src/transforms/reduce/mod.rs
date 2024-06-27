@@ -189,6 +189,14 @@ impl TransformConfig for ReduceConfig {
                             Kind::undefined()
                         }
                     }
+                    MergeStrategy::ConcatSquashNewline => {
+                        // can only produce bytes (or undefined)
+                        if input_kind.contains_any_defined() {
+                            Kind::bytes()
+                        } else {
+                            Kind::undefined()
+                        }
+                    }
                     MergeStrategy::ShortestArray | MergeStrategy::LongestArray => {
                         if let Some(array) = input_kind.as_array() {
                             Kind::array(array.clone())
@@ -629,6 +637,69 @@ merge_strategies.baz = "max"
             let output_1 = out.recv().await.unwrap().into_log();
             assert_eq!(output_1["message"], "test message 1".into());
             assert_eq!(output_1["foo"], "first foo second foo".into());
+            assert_eq!(
+                output_1["bar"],
+                Value::Array(vec!["first bar".into(), 2.into(), "third bar".into()]),
+            );
+            assert_eq!(output_1["baz"], 3.into());
+            assert_eq!(output_1.metadata(), &metadata);
+
+            drop(tx);
+            topology.stop().await;
+            assert_eq!(out.recv().await, None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn reduce_merge_strategies_new() {
+        let reduce_config = toml::from_str::<ReduceConfig>(
+            r#"
+group_by = [ "request_id" ]
+
+merge_strategies.foo = "concat_squash_newline"
+merge_strategies.bar = "array"
+merge_strategies.baz = "max"
+merge_strategies.request_id = "concat_squash_newline"
+
+[ends_when]
+  type = "vrl"
+  source = "exists(.test_end)"
+"#,
+        )
+        .unwrap();
+
+        assert_transform_compliance(async move {
+            let (tx, rx) = mpsc::channel(1);
+            let (topology, mut out) = create_topology(ReceiverStream::new(rx), reduce_config).await;
+
+            let mut e_1 = LogEvent::from("test message 1");
+            e_1.insert("foo", "first foo");
+            e_1.insert("bar", "first bar");
+            e_1.insert("baz", 2);
+            e_1.insert("request_id", "1");
+            let metadata = e_1.metadata().clone();
+            tx.send(e_1.into()).await.unwrap();
+
+            let mut e_2 = LogEvent::from("test message 2");
+            e_2.insert("foo", "second foo");
+            e_2.insert("bar", 2);
+            e_2.insert("baz", "not number");
+            e_2.insert("request_id", "1");
+            tx.send(e_2.into()).await.unwrap();
+
+            let mut e_3 = LogEvent::from("test message 3");
+            e_3.insert("foo", 10);
+            e_3.insert("bar", "third bar");
+            e_3.insert("baz", 3);
+            e_3.insert("request_id", "1");
+            e_3.insert("test_end", "yep");
+            tx.send(e_3.into()).await.unwrap();
+
+            let output_1 = out.recv().await.unwrap().into_log();
+            assert_eq!(output_1["message"], "test message 1".into());
+            assert_eq!(output_1["foo"], "first foo\nsecond foo\n10".into());
+            assert_eq!(output_1["request_id"], "1".into());
             assert_eq!(
                 output_1["bar"],
                 Value::Array(vec!["first bar".into(), 2.into(), "third bar".into()]),
