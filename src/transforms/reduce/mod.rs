@@ -1,20 +1,24 @@
-use std::collections::BTreeMap;
 use std::{
     collections::{hash_map, HashMap},
     num::NonZeroUsize,
     pin::Pin,
     time::{Duration, Instant},
 };
+use std::collections::BTreeMap;
 
 use async_stream::stream;
 use futures::{stream, Stream, StreamExt};
 use indexmap::IndexMap;
+use serde_with::serde_as;
+use vrl::value::Kind;
+use vrl::value::kind::Collection;
+
 use lookup::lookup_v2::parse_target_path;
 use lookup::PathPrefix;
-use serde_with::serde_as;
+pub use merge_strategy::*;
 use vector_config::configurable_component;
+use vector_core::config::LogNamespace;
 
-use crate::config::OutputId;
 use crate::{
     conditions::{AnyCondition, Condition},
     config::{DataType, Input, TransformConfig, TransformContext, TransformOutput},
@@ -23,14 +27,10 @@ use crate::{
     schema,
     transforms::{TaskTransform, Transform},
 };
+use crate::config::OutputId;
+use crate::event::Value;
 
 mod merge_strategy;
-
-use crate::event::Value;
-pub use merge_strategy::*;
-use vector_core::config::LogNamespace;
-use vrl::value::kind::Collection;
-use vrl::value::Kind;
 
 /// Configuration for the `reduce` transform.
 #[serde_as]
@@ -163,6 +163,10 @@ impl TransformConfig for ReduceConfig {
                         }
                     }
                     MergeStrategy::Array => {
+                        let unknown_kind = input_kind.clone();
+                        Kind::array(Collection::empty().with_unknown(unknown_kind))
+                    }
+                    MergeStrategy::ArraySquash => {
                         let unknown_kind = input_kind.clone();
                         Kind::array(Collection::empty().with_unknown(unknown_kind))
                     }
@@ -485,11 +489,13 @@ mod test {
     use tokio_stream::wrappers::ReceiverStream;
     use vrl::value::Kind;
 
-    use super::*;
+    use lookup::owned_value_path;
+
     use crate::event::{LogEvent, Value};
     use crate::test_util::components::assert_transform_compliance;
     use crate::transforms::test::create_topology;
-    use lookup::owned_value_path;
+
+    use super::*;
 
     #[test]
     fn generate_config() {
@@ -652,7 +658,7 @@ merge_strategies.baz = "max"
     }
 
     #[tokio::test]
-    async fn reduce_merge_strategies_new() {
+    async fn reduce_merge_strategies_concat_squash() {
         let reduce_config = toml::from_str::<ReduceConfig>(
             r#"
 group_by = [ "request_id" ]
@@ -712,6 +718,71 @@ merge_strategies.request_id = "concat_squash_newline"
             assert_eq!(out.recv().await, None);
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn reduce_merge_strategies_array_squash() {
+        let reduce_config = toml::from_str::<ReduceConfig>(
+            r#"
+group_by = [ "request_id" ]
+
+merge_strategies.foo = "array_squash"
+merge_strategies.bar = "array"
+merge_strategies.baz = "max"
+merge_strategies.request_id = "array_squash"
+
+[ends_when]
+  type = "vrl"
+  source = "exists(.test_end)"
+"#,
+        )
+            .unwrap();
+
+        assert_transform_compliance(async move {
+            let (tx, rx) = mpsc::channel(1);
+            let (topology, mut out) = create_topology(ReceiverStream::new(rx), reduce_config).await;
+
+            let mut e_1 = LogEvent::from("test message 1");
+            e_1.insert("foo", "first foo");
+            e_1.insert("bar", "first bar");
+            e_1.insert("baz", 2);
+            e_1.insert("request_id", "1");
+            let metadata = e_1.metadata().clone();
+            tx.send(e_1.into()).await.unwrap();
+
+            let mut e_2 = LogEvent::from("test message 2");
+            e_2.insert("foo", "second foo");
+            e_2.insert("bar", 2);
+            e_2.insert("baz", "not number");
+            e_2.insert("request_id", "1");
+            tx.send(e_2.into()).await.unwrap();
+
+            let mut e_3 = LogEvent::from("test message 3");
+            e_3.insert("foo", 10);
+            e_3.insert("bar", "third bar");
+            e_3.insert("baz", 3);
+            e_3.insert("request_id", "1");
+            e_3.insert("test_end", "yep");
+            tx.send(e_3.into()).await.unwrap();
+
+            let output_1 = out.recv().await.unwrap().into_log();
+            assert_eq!(output_1["message"], "test message 1".into());
+            assert_eq!(output_1["foo"],
+                       Value::Array(vec!["first foo".into(), "second foo".into(), 10.into()])
+            );
+            assert_eq!(output_1["request_id"], Value::Array(vec!["1".into()]));
+            assert_eq!(
+                output_1["bar"],
+                Value::Array(vec!["first bar".into(), 2.into(), "third bar".into()]),
+            );
+            assert_eq!(output_1["baz"], 3.into());
+            assert_eq!(output_1.metadata(), &metadata);
+
+            drop(tx);
+            topology.stop().await;
+            assert_eq!(out.recv().await, None);
+        })
+            .await;
     }
 
     #[tokio::test]
