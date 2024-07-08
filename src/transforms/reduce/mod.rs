@@ -102,6 +102,23 @@ pub struct ReduceConfig {
     /// If this condition resolves to `true` for an event, the previous transaction is flushed
     /// (without this event) and a new transaction is started.
     pub starts_when: Option<AnyCondition>,
+
+    /// A map of data type names to custom merge strategies.
+    ///
+    /// For each data type specified, the given strategy is used for combining events rather than
+    /// the default behavior.
+    ///
+    /// The default behavior is as follows:
+    ///
+    /// - The first value of a string field is kept and subsequent values are discarded.
+    /// - For timestamp fields the first is kept and a new field `[field-name]_end` is added with
+    ///   the last received timestamp value.
+    /// - Numeric values are summed.
+    #[serde(default)]
+    #[configurable(metadata(
+        docs::additional_props_description = "An individual data type merge strategy."
+    ))]
+    pub default_merge_strategies: Option<IndexMap<String, MergeStrategy>>,
 }
 
 const fn default_expire_after_ms() -> Duration {
@@ -258,7 +275,8 @@ impl ReduceState {
         }
     }
 
-    fn add_event(&mut self, e: LogEvent, strategies: &IndexMap<String, MergeStrategy>) {
+    fn add_event(&mut self, e: LogEvent, strategies: &IndexMap<String, MergeStrategy>
+                 , default_strategies: &Option<IndexMap<String, MergeStrategy>>) {
         let (value, metadata) = e.into_parts();
         self.metadata.merge(metadata);
 
@@ -282,7 +300,22 @@ impl ReduceState {
                             }
                         }
                     } else {
-                        entry.insert(v.clone().into());
+                        if let Some(default_strategies) = default_strategies {
+                            if let Some(strat) = default_strategies.get(v.kind_str()) {
+                                match get_value_merger(v, strat) {
+                                    Ok(m) => {
+                                        entry.insert(m);
+                                    }
+                                    Err(error) => {
+                                        warn!(message = "Failed to merge value.", %error);
+                                    }
+                                }
+                            } else {
+                                entry.insert(v.clone().into());
+                            }
+                        } else {
+                            entry.insert(v.clone().into());
+                        }
                     }
                 }
                 hash_map::Entry::Occupied(mut entry) => {
@@ -313,6 +346,7 @@ pub struct Reduce {
     flush_period: Duration,
     group_by: Vec<String>,
     merge_strategies: IndexMap<String, MergeStrategy>,
+    default_merge_strategies: Option<IndexMap<String, MergeStrategy>>,
     reduce_merge_states: HashMap<Discriminant, ReduceState>,
     ends_when: Option<Condition>,
     starts_when: Option<Condition>,
@@ -346,6 +380,7 @@ impl Reduce {
             flush_period: config.flush_period_ms,
             group_by,
             merge_strategies: config.merge_strategies.clone(),
+            default_merge_strategies: config.default_merge_strategies.clone(),
             reduce_merge_states: HashMap::new(),
             ends_when,
             starts_when,
@@ -379,11 +414,11 @@ impl Reduce {
         match self.reduce_merge_states.entry(discriminant) {
             hash_map::Entry::Vacant(entry) => {
                 let mut state = ReduceState::new();
-                state.add_event(event, &self.merge_strategies);
+                state.add_event(event, &self.merge_strategies, &self.default_merge_strategies);
                 entry.insert(state);
             }
             hash_map::Entry::Occupied(mut entry) => {
-                entry.get_mut().add_event(event, &self.merge_strategies);
+                entry.get_mut().add_event(event, &self.merge_strategies, &self.default_merge_strategies);
             }
         }
     }
@@ -422,12 +457,12 @@ impl Reduce {
         } else if ends_here {
             output.push(match self.reduce_merge_states.remove(&discriminant) {
                 Some(mut state) => {
-                    state.add_event(event, &self.merge_strategies);
+                    state.add_event(event, &self.merge_strategies, &self.default_merge_strategies);
                     state.flush().into()
                 }
                 None => {
                     let mut state = ReduceState::new();
-                    state.add_event(event, &self.merge_strategies);
+                    state.add_event(event, &self.merge_strategies, &self.default_merge_strategies);
                     state.flush().into()
                 }
             })
@@ -658,6 +693,81 @@ merge_strategies.baz = "max"
     }
 
     #[tokio::test]
+    async fn reduce_merge_default_strategies() {
+        let reduce_config = toml::from_str::<ReduceConfig>(
+            r#"
+group_by = [ "request_id" ]
+
+merge_strategies.foo = "concat"
+merge_strategies.bar = "array"
+merge_strategies.baz = "max"
+
+default_merge_strategies.string = "concat_squash_newline"
+default_merge_strategies.integer = "array"
+
+[ends_when]
+  type = "vrl"
+  source = "exists(.test_end)"
+"#,
+        )
+            .unwrap();
+
+        assert_transform_compliance(async move {
+            let (tx, rx) = mpsc::channel(1);
+            let (topology, mut out) = create_topology(ReceiverStream::new(rx), reduce_config).await;
+
+            let mut e_1 = LogEvent::from("test message 1");
+            e_1.insert("foo", "first foo");
+            e_1.insert("bar", "first bar");
+            e_1.insert("foobar", "foobar");
+            e_1.insert("baz", 2);
+            e_1.insert("numbaz", 2);
+            e_1.insert("request_id", "1");
+            let metadata = e_1.metadata().clone();
+            tx.send(e_1.into()).await.unwrap();
+
+            let mut e_2 = LogEvent::from("test message 2");
+            e_2.insert("foo", "second foo");
+            e_2.insert("bar", 2);
+            e_2.insert("foobar", "foobar");
+            e_2.insert("baz", "not number");
+            e_2.insert("numbaz", 3);
+            e_2.insert("request_id", "1");
+            tx.send(e_2.into()).await.unwrap();
+
+            let mut e_3 = LogEvent::from("test message 3");
+            e_3.insert("foo", 10);
+            e_3.insert("bar", "third bar");
+            e_3.insert("foobar", "foobar");
+            e_3.insert("baz", 3);
+            e_3.insert("numbaz", 4);
+            e_3.insert("request_id", "1");
+            e_3.insert("test_end", "yep");
+            tx.send(e_3.into()).await.unwrap();
+
+            let output_1 = out.recv().await.unwrap().into_log();
+            assert_eq!(output_1["message"], "test message 1\ntest message 2\ntest message 3".into());
+            assert_eq!(output_1["foo"], "first foo second foo".into());
+            assert_eq!(
+                output_1["bar"],
+                Value::Array(vec!["first bar".into(), 2.into(), "third bar".into()]),
+            );
+            assert_eq!(output_1["foobar"], "foobar".into());
+            assert_eq!(
+                output_1["numbaz"],
+                Value::Array(vec![2.into(), 3.into(), 4.into()]),
+            );
+            assert_eq!(output_1["baz"], 3.into());
+            assert_eq!(output_1.metadata(), &metadata);
+
+            drop(tx);
+            topology.stop().await;
+            assert_eq!(out.recv().await, None);
+        })
+            .await;
+    }
+
+    #[tokio::test]
     async fn reduce_merge_strategies_concat_squash() {
         let reduce_config = toml::from_str::<ReduceConfig>(
             r#"
@@ -666,7 +776,7 @@ group_by = [ "request_id" ]
 merge_strategies.foo = "concat_squash_newline"
 merge_strategies.bar = "array"
 merge_strategies.baz = "max"
-merge_strategies.request_id = "concat_squash_newline"
+merge_strategies.foobar = "concat_squash_newline"
 
 [ends_when]
   type = "vrl"
@@ -682,6 +792,7 @@ merge_strategies.request_id = "concat_squash_newline"
             let mut e_1 = LogEvent::from("test message 1");
             e_1.insert("foo", "first foo");
             e_1.insert("bar", "first bar");
+            e_1.insert("foobar", "foobar");
             e_1.insert("baz", 2);
             e_1.insert("request_id", "1");
             let metadata = e_1.metadata().clone();
@@ -690,6 +801,7 @@ merge_strategies.request_id = "concat_squash_newline"
             let mut e_2 = LogEvent::from("test message 2");
             e_2.insert("foo", "second foo");
             e_2.insert("bar", 2);
+            e_2.insert("foobar", "foobar");
             e_2.insert("baz", "not number");
             e_2.insert("request_id", "1");
             tx.send(e_2.into()).await.unwrap();
@@ -697,6 +809,7 @@ merge_strategies.request_id = "concat_squash_newline"
             let mut e_3 = LogEvent::from("test message 3");
             e_3.insert("foo", 10);
             e_3.insert("bar", "third bar");
+            e_3.insert("foobar", "foobar");
             e_3.insert("baz", 3);
             e_3.insert("request_id", "1");
             e_3.insert("test_end", "yep");
@@ -705,7 +818,7 @@ merge_strategies.request_id = "concat_squash_newline"
             let output_1 = out.recv().await.unwrap().into_log();
             assert_eq!(output_1["message"], "test message 1".into());
             assert_eq!(output_1["foo"], "first foo\nsecond foo\n10".into());
-            assert_eq!(output_1["request_id"], "1".into());
+            assert_eq!(output_1["foobar"], "foobar".into());
             assert_eq!(
                 output_1["bar"],
                 Value::Array(vec!["first bar".into(), 2.into(), "third bar".into()]),
@@ -729,7 +842,7 @@ group_by = [ "request_id" ]
 merge_strategies.foo = "array_squash"
 merge_strategies.bar = "array"
 merge_strategies.baz = "max"
-merge_strategies.request_id = "array_squash"
+merge_strategies.foobar = "array_squash"
 
 [ends_when]
   type = "vrl"
@@ -745,6 +858,7 @@ merge_strategies.request_id = "array_squash"
             let mut e_1 = LogEvent::from("test message 1");
             e_1.insert("foo", "first foo");
             e_1.insert("bar", "first bar");
+            e_1.insert("foobar", "foobar");
             e_1.insert("baz", 2);
             e_1.insert("request_id", "1");
             let metadata = e_1.metadata().clone();
@@ -753,6 +867,7 @@ merge_strategies.request_id = "array_squash"
             let mut e_2 = LogEvent::from("test message 2");
             e_2.insert("foo", "second foo");
             e_2.insert("bar", 2);
+            e_2.insert("foobar", "foobar");
             e_2.insert("baz", "not number");
             e_2.insert("request_id", "1");
             tx.send(e_2.into()).await.unwrap();
@@ -760,6 +875,7 @@ merge_strategies.request_id = "array_squash"
             let mut e_3 = LogEvent::from("test message 3");
             e_3.insert("foo", 10);
             e_3.insert("bar", "third bar");
+            e_3.insert("foobar", "foobar");
             e_3.insert("baz", 3);
             e_3.insert("request_id", "1");
             e_3.insert("test_end", "yep");
@@ -770,7 +886,7 @@ merge_strategies.request_id = "array_squash"
             assert_eq!(output_1["foo"],
                        Value::Array(vec!["first foo".into(), "second foo".into(), 10.into()])
             );
-            assert_eq!(output_1["request_id"], Value::Array(vec!["1".into()]));
+            assert_eq!(output_1["foobar"], Value::Array(vec!["foobar".into()]));
             assert_eq!(
                 output_1["bar"],
                 Value::Array(vec!["first bar".into(), 2.into(), "third bar".into()]),
