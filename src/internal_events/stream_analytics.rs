@@ -1,9 +1,9 @@
-use vector_core::internal_event::InternalEvent;
 use metrics::counter;
 
 use vector_common::internal_event::{
     error_stage, error_type,
 };
+use vector_core::internal_event::InternalEvent;
 
 #[derive(Debug)]
 pub struct StreamAnalyticsFieldProcessedTotal {
@@ -52,6 +52,34 @@ impl InternalEvent for StreamAnalyticsResets {
         counter!(
             "stream_analytics_resets_total", 1,
             "calculator" => self.calculator.to_lowercase(),
+        );
+    }
+
+    // fn name(&self) -> Option<&'static str> {
+    //     Some(self.calculator.as_str())
+    // }
+}
+
+#[derive(Debug)]
+pub struct StreamAnalyticsError {
+    pub error: String,
+    pub reason: String,
+}
+
+impl InternalEvent for StreamAnalyticsError {
+    fn emit(self) {
+        error!(
+            message = ?self.reason,
+            error = ?self.error,
+            error_type = error_type::ENCODER_FAILED,
+            stage = error_stage::PROCESSING,
+            internal_log_rate_limit = true
+        );
+        counter!(
+            "component_errors_total", 1,
+            "error_type" => error_type::ENCODER_FAILED,
+            "stage" => error_stage::PROCESSING,
+            "message" => self.error,
         );
     }
 

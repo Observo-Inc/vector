@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, HashMap};
-use ordered_float::NotNan;
-use streaming_algorithms::{HyperLogLog};
-use vector_core::event::{LogEvent, Value};
-use crate::transforms::stream_analytics::{StreamAnalyticsCalculator, StreamAnalyticsPerEventState, StreamAnalyticsSanitisedConfig};
 
+use ordered_float::NotNan;
+use streaming_algorithms::HyperLogLog;
+
+use vector_core::event::{LogEvent, Value};
+
+use crate::transforms::stream_analytics::{StreamAnalyticsCalculator, StreamAnalyticsPerEventState, StreamAnalyticsSanitisedConfig};
 
 #[derive(Clone, Debug)]
 pub struct Cardinality {
@@ -38,8 +40,10 @@ impl StreamAnalyticsCalculator for Cardinality {
     fn publish_stat(&mut self, log: &mut LogEvent) -> Result<(), String> {
         let mut keyed_topn_stream = BTreeMap::new();
         for (key, value) in self.cardinality.drain() {
-            keyed_topn_stream.insert(key.to_string()
-                                     ,Value::Float(NotNan::new(value.len()).expect("Cardinality can't be a NAN.")) );
+            keyed_topn_stream.insert(key.to_string(),
+                                     Value::Float(NotNan::new(value.len())
+                                         .or::<NotNan<f64>>(Ok(NotNan::from(0)))
+                                         .expect("Cardinality can't be a NAN.")));
         }
         log.insert("cardinality", Value::Object(keyed_topn_stream));
         Ok(())

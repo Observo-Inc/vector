@@ -1,8 +1,11 @@
 use std::collections::{BTreeMap, HashMap};
+
 use ordered_float::NotNan;
 use tdigest::TDigest;
+
 use vector_core::EstimatedJsonEncodedSizeOf;
 use vector_core::event::{LogEvent, Value};
+
 use crate::transforms::stream_analytics::{StreamAnalyticsCalculator, StreamAnalyticsPerEventState, StreamAnalyticsSanitisedConfig};
 
 #[derive(Clone, Debug)]
@@ -88,10 +91,12 @@ impl StreamAnalyticsCalculator for SizeQuantile {
             for quantile in self.quantiles.iter() {
                 size_quants.push(Value::Float(
                     NotNan::new(value.raw_size_estimator.estimate_quantile(*quantile))
+                        .or::<NotNan<f64>>(Ok(NotNan::from(0)))
                         .expect("Raw size estimator can't be NaN.")));
 
                 percent_quants.push(Value::Float(
                     NotNan::new(value.percentage_size_estimator.estimate_quantile(*quantile))
+                        .or::<NotNan<f64>>(Ok(NotNan::from(0)))
                         .expect("Percentage size estimator can't be NaN.")));
             }
 
