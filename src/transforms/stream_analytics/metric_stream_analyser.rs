@@ -26,17 +26,24 @@ impl MetricStreamAnalyser {
     }
     pub(crate) fn metric_iterator<'a>(event: &'a Event) -> Box<dyn Iterator<Item=(String, Value)> + 'a> {
         let metric = event.as_metric();
-        let tags_k_v = metric
-            .tags().unwrap()
-            .iter_all()
-            .map(|(tag_key, tag_value)| {
-                (tag_key.to_string(), Value::from(tag_value.unwrap()))
-            });
-        Box::new(tags_k_v)
+        if let Some(metric_tags) = metric.tags() {
+            let tags_k_v = metric_tags.iter_all()
+                .map(|(tag_key, tag_value)| {
+                    (tag_key.to_string(), Value::from(tag_value.unwrap_or_else(|| "")))
+                });
+            return Box::new(tags_k_v);
+        } else {
+            let empty_iter: Vec<(String, Value)> = Vec::new();
+            return Box::new(empty_iter.into_iter());
+        }
     }
 }
 
 impl EventStreamAnalyser<Vec<TagValueSet>> for MetricStreamAnalyser {
+    fn get_event_type(&self) -> String {
+        "METRIC".to_string()
+    }
+
     fn get_supported_calculators(&self) -> HashSet<Calculator> {
         self.supported_calculators.clone()
     }
@@ -51,11 +58,20 @@ impl EventStreamAnalyser<Vec<TagValueSet>> for MetricStreamAnalyser {
         let metric = event.as_metric();
         let mut key: Vec<TagValueSet> = Vec::new();
         key.push(TagValueSet::Single(TagValue::from("metric_name".to_string() + "__" + metric.name())));
-        metric.tags().unwrap().iter_sets()
-            .filter(|(tag_key, _tag_value_set)| group_by.contains(&tag_key.to_string()))
-            .for_each(|(_tag_key, tag_value_set)| {
-                key.push(tag_value_set.clone());
-            });
+        group_by.iter().for_each(|group_by_tag_key| {
+            if let Some(metric_tags) = metric.tags() {
+                let tag_value_set = metric_tags.get_tag_set(group_by_tag_key)
+                    .unwrap_or_else(|| &TagValueSet::Single(TagValue::Bare));
+                if tag_value_set.len() == 1 {
+                    key.push(TagValueSet::Single(TagValue::from(tag_value_set.as_single().unwrap_or_else(|| ""))));
+                } else {
+                    key.push(tag_value_set.clone());
+                }
+            } else {
+                key.push(TagValueSet::Single(TagValue::Bare));
+            }
+        });
+
         key
     }
 
@@ -63,17 +79,21 @@ impl EventStreamAnalyser<Vec<TagValueSet>> for MetricStreamAnalyser {
         let metric = event.as_metric();
         let mut grp_map: BTreeMap<String, Value> = BTreeMap::new();
         grp_map.insert("metric_name".to_string(), Value::from(metric.name()));
-        metric.tags().unwrap().iter_all()
-            .filter(|(tag_key, _tag_value_set)| group_by.contains(&tag_key.to_string()))
-            .for_each(|(tag_key, tag_value_set)| {
-                let key = tag_key.to_string();
-                if !grp_map.contains_key(&key) {
-                    grp_map.insert(key.clone(), Value::from(Vec::<String>::new()));
-                }
-                grp_map.get_mut(&key).expect("Tag key can't be missing.")
-                    .as_array_mut().expect("Tag value can't be Null.")
-                    .push(Value::from(tag_value_set.unwrap().to_string()))
-            });
+        group_by.iter().for_each(|group_by_tag_key| {
+            if let Some(metric_tags) = metric.tags() {
+                let tag_value_set = metric_tags.get_tag_set(group_by_tag_key)
+                    .unwrap_or_else(|| &TagValueSet::Single(TagValue::Bare));
+                let null = Value::Null.to_string();
+                let tag_val_str = if tag_value_set.len() == 1 {
+                    tag_value_set.as_single().unwrap_or_else(|| null.as_str()).to_string()
+                } else {
+                    tag_value_set.to_string()
+                };
+                grp_map.insert(group_by_tag_key.clone(), Value::from(tag_val_str));
+            } else {
+                grp_map.insert(group_by_tag_key.clone(), Value::Null);
+            }
+        });
 
         Value::from(grp_map)
     }

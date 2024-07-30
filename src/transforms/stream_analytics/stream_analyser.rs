@@ -97,6 +97,7 @@ impl<K: std::hash::Hash + Eq + Clone> StreamAnalyserState<K> {
 
 
 pub(crate) trait EventStreamAnalyser<K: std::hash::Hash + Eq + Clone>: Debug + Send + Sync {
+    fn get_event_type(&self) -> String;
     fn get_supported_calculators(&self) -> HashSet<Calculator>;
     fn should_process(&mut self, event: &Event) -> bool;
     fn get_group_by_key(&self, event: &Event, group_by: &Vec<String>) -> K;
@@ -235,6 +236,7 @@ impl<K: std::hash::Hash + Eq + Clone> StreamAnalyser<K> {
                 stats_summary.insert("events_processed".to_string(), Value::from(event_count));
                 log.insert("stats_summary", Value::Object(stats_summary));
                 log.insert("group_by", grouped_by.clone());
+                log.insert("event_type", self.event_stream_analyser.get_event_type());
 
                 for stream_analytics_calculator in calculators.iter_mut() {
                     match stream_analytics_calculator.publish_stat(&mut log) {

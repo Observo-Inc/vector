@@ -276,7 +276,7 @@ combine_by_fields = {"combined_field" = ["field_1", "field_2"], "combined_field2
             };
 
             let output_1 = out.recv().await.unwrap().into_log();
-            println!("output_1 = {}", output_1.as_map().unwrap().to_value().into_json().unwrap());
+            // println!("output_1 = {}", output_1.as_map().unwrap().to_value().into_json().unwrap());
 
             assert_eq!(output_1.get(".size_quantiles").is_some(), false);
             assert_eq!(output_1.get(".top_n").is_some(), true);
@@ -379,7 +379,7 @@ combine_by_fields = {"combined_field" = ["field_1", "field_2"], "combined_field2
             };
 
             let output_1 = out.recv().await.unwrap().into_log();
-            println!("output_1 = {}", output_1.as_map().unwrap().to_value().into_json().unwrap());
+            // println!("output_1 = {}", output_1.as_map().unwrap().to_value().into_json().unwrap());
 
             assert_eq!(output_1.get(".size_quantiles").is_some(), false);
             assert_eq!(output_1.get(".top_n").is_some(), true);
@@ -827,6 +827,163 @@ max_top_n_values = 33
     }
 
     #[tokio::test]
+    async fn ssa_metric_group_by_fields() {
+        let config = toml::from_str::<StreamAnalyticsConfig>(
+            r#"
+    max_events = 12
+    group_by = ["some_tag"]
+    quantiles = [0.99]
+    "#,
+        )
+            .unwrap();
+
+        assert_transform_compliance(async move {
+            let (tx, rx) = mpsc::channel(1);
+            let (topology, mut out) = create_topology(ReceiverStream::new(rx), config).await;
+
+            // 1st set is skipped to build in top_n metric set
+            for event in get_test_metrics() {
+                tx.send(event).await.unwrap();
+            };
+            tx.send(Event::from(Metric::new(
+                "counter_noop",
+                MetricKind::Absolute,
+                MetricValue::Counter { value: 1.0 },
+            ))).await.unwrap();
+
+
+            // in total this test should process only 6 events
+            for event in get_test_metrics() {
+                tx.send(event).await.unwrap();
+            };
+
+            let mut output: HashMap<String, LogEvent> = HashMap::new();
+            for _i in 0..6 {
+                let out_log = out.recv().await.unwrap().into_log();
+                // println!("{:?}", out_log);
+                output.insert(out_log.get("group_by.metric_name").unwrap().to_string_lossy().to_string(), out_log);
+            }
+            // println!("{:?}", output);
+
+            output.iter().for_each(|(_metric_name, log)| {
+                assert_eq!(log.get(".size_quantiles").is_some(), false);
+                assert_eq!(log.get(".top_n").is_some(), true);
+                assert_eq!(log.get(".cardinality").is_some(), true);
+                assert_eq!(log.get(".stats_summary").is_some(), true);
+                assert_eq!(log.get("stats_summary.events_processed").unwrap().to_string_lossy(), "2");
+
+                assert!(log["cardinality.host"].as_float().unwrap().as_ref() - 1.0 <= 0.005);
+                assert!(log["cardinality.some_tag"].as_float().unwrap().as_ref() - 1.0 <= 0.005);
+                assert!(log["cardinality.set_tag"].as_float().unwrap().as_ref() - 3.0 <= 0.005);
+
+                assert_eq!(log.get("top_n.host").unwrap().to_string_lossy(), "{\"localhost\":2}");
+                assert_eq!(log.get("top_n.some_tag").unwrap().to_string_lossy(), "{\"some_value\":2}");
+                assert_eq!(log.get("top_n.set_tag").unwrap().to_string_lossy(), "{\"tag_v1\":1,\"tag_v2\":1,\"tag_v3\":1}");
+
+                assert_eq!(log.get("group_by.metric_name").is_some(), true);
+                assert_eq!(log.get("group_by.some_tag").is_some(), true);
+                assert_eq!(log.get("group_by.some_tag").unwrap().to_string_lossy(), "some_value");
+            });
+
+            assert_eq!(output.len(), 6);
+
+            vec!["counter", "gauge", "set", "distro", "histo", "summary"].iter().for_each(|metric_name| {
+                assert_eq!(output.contains_key(*metric_name), true);
+            });
+
+            drop(tx);
+            topology.stop().await;
+            assert_eq!(out.recv().await, None);
+        })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn ssa_metric_group_by_set_fields() {
+        let config = toml::from_str::<StreamAnalyticsConfig>(
+            r#"
+    max_events = 12
+    group_by = ["some_tag", "set_tag"]
+    quantiles = [0.99]
+    "#,
+        )
+            .unwrap();
+
+        assert_transform_compliance(async move {
+            let (tx, rx) = mpsc::channel(1);
+            let (topology, mut out) = create_topology(ReceiverStream::new(rx), config).await;
+
+            // 1st set is skipped to build in top_n metric set
+            for event in get_test_metrics() {
+                tx.send(event).await.unwrap();
+            };
+            tx.send(Event::from(Metric::new(
+                "counter_noop",
+                MetricKind::Absolute,
+                MetricValue::Counter { value: 1.0 },
+            ))).await.unwrap();
+
+
+            // in total this test should process only 6 events
+            for event in get_test_metrics() {
+                tx.send(event).await.unwrap();
+            };
+
+            let mut output: HashMap<String, LogEvent> = HashMap::new();
+            for _i in 0..12 {
+                let out_log = out.recv().await.unwrap().into_log();
+                // println!("{:?}", out_log);
+                output.insert(out_log.get("group_by.metric_name").unwrap().to_string_lossy().to_string() +
+                                  out_log.get("cardinality.set_tag").is_some().to_string().as_str(), out_log);
+            }
+            // println!("{:?}", output);
+
+            let mut tag_set_counter = 0;
+            output.iter().for_each(|(_metric_name, log)| {
+                assert_eq!(log.get(".size_quantiles").is_some(), false);
+                assert_eq!(log.get(".top_n").is_some(), true);
+                assert_eq!(log.get(".cardinality").is_some(), true);
+                assert_eq!(log.get(".stats_summary").is_some(), true);
+                assert_eq!(log.get("stats_summary.events_processed").unwrap().to_string_lossy(), "1");
+
+                assert!(log["cardinality.host"].as_float().unwrap().as_ref() - 1.0 <= 0.005);
+                assert!(log["cardinality.some_tag"].as_float().unwrap().as_ref() - 1.0 <= 0.005);
+
+                assert_eq!(log.get("top_n.host").unwrap().to_string_lossy(), "{\"localhost\":1}");
+                assert_eq!(log.get("top_n.some_tag").unwrap().to_string_lossy(), "{\"some_value\":1}");
+
+                if log.get("top_n.set_tag").is_some() {
+                    tag_set_counter += 1;
+                    assert_eq!(log.get("group_by.set_tag").unwrap().to_string_lossy(), "\"tag_v1\", \"tag_v2\", \"tag_v3\"");
+                    assert!(log["cardinality.set_tag"].as_float().unwrap().as_ref() - 3.0 <= 0.005);
+                    assert_eq!(log.get("top_n.set_tag").unwrap().to_string_lossy(), "{\"tag_v1\":1,\"tag_v2\":1,\"tag_v3\":1}");
+                } else {
+                    assert_eq!(log.get("group_by.set_tag").unwrap().to_string_lossy(), "null");
+                }
+
+                assert_eq!(log.get("group_by.metric_name").is_some(), true);
+                assert_eq!(log.get("group_by.some_tag").is_some(), true);
+                assert_eq!(log.get("group_by.set_tag").is_some(), true);
+                assert_eq!(log.get("group_by.some_tag").unwrap().to_string_lossy(), "some_value");
+            });
+
+            assert_eq!(tag_set_counter, 6);
+            assert_eq!(output.len(), 12);
+
+            vec!["countertrue", "gaugetrue", "settrue", "distrotrue", "histotrue", "summarytrue",
+                 "counterfalse", "gaugefalse", "setfalse", "distrofalse", "histofalse", "summaryfalse"]
+                .iter().for_each(|metric_name| {
+                assert_eq!(output.contains_key(*metric_name), true);
+            });
+
+            drop(tx);
+            topology.stop().await;
+            assert_eq!(out.recv().await, None);
+        })
+            .await;
+    }
+
+    #[tokio::test]
     async fn ssa_metric_for_limited_top_metric() {
         let config = toml::from_str::<StreamAnalyticsConfig>(
             r#"
@@ -876,7 +1033,7 @@ max_top_n_values = 33
             let mut output: HashMap<String, LogEvent> = HashMap::new();
             for _i in 0..2 {
                 let out_log = out.recv().await.unwrap().into_log();
-                println!("{:?}", out_log);
+                // println!("{:?}", out_log);
                 output.insert(out_log.get("group_by.metric_name").unwrap().to_string_lossy().to_string(), out_log);
             }
             // println!("{:?}", output);
@@ -906,6 +1063,156 @@ max_top_n_values = 33
             vec!["set", "distro", "histo", "summary"].iter().for_each(|metric_name| {
                 assert_eq!(output.contains_key(*metric_name), false);
             });
+
+            drop(tx);
+            topology.stop().await;
+            assert_eq!(out.recv().await, None);
+        })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn ssa_metric_n_logs_group_by_fields() {
+        let config = toml::from_str::<StreamAnalyticsConfig>(
+            r#"
+    max_events = 12
+    group_by = ["some_tag", "field_2"]
+    skip_fields = ["_ob", "time", "date"]
+    quantiles = [0.99]
+    flush_period_ms = 5000
+    "#,
+        )
+            .unwrap();
+
+        assert_transform_compliance(async move {
+            let (tx, rx) = mpsc::channel(1);
+            let (topology, mut out) = create_topology(ReceiverStream::new(rx), config).await;
+
+            // 1st set is skipped to build in top_n metric set
+            for event in get_test_metrics() {
+                tx.send(event).await.unwrap();
+            };
+            tx.send(Event::from(Metric::new(
+                "counter_noop",
+                MetricKind::Absolute,
+                MetricValue::Counter { value: 1.0 },
+            ))).await.unwrap();
+
+
+            // in total this test should process only 6 events
+            for event in get_test_metrics() {
+                tx.send(event).await.unwrap();
+            };
+
+            let mut output: HashMap<String, LogEvent> = HashMap::new();
+            for _i in 0..6 {
+                let out_log = out.recv().await.unwrap().into_log();
+                // println!("{:?}", out_log);
+                output.insert(out_log.get("group_by.metric_name").unwrap().to_string_lossy().to_string(), out_log);
+            }
+            // println!("{:?}", output);
+
+            output.iter().for_each(|(_metric_name, log)| {
+                assert_eq!(log.get(".size_quantiles").is_some(), false);
+                assert_eq!(log.get(".top_n").is_some(), true);
+                assert_eq!(log.get(".cardinality").is_some(), true);
+                assert_eq!(log.get(".stats_summary").is_some(), true);
+                assert_eq!(log.get("stats_summary.events_processed").unwrap().to_string_lossy(), "2");
+                assert_eq!(log.get("event_type").unwrap().to_string_lossy(), "METRIC");
+
+                assert!(log["cardinality.host"].as_float().unwrap().as_ref() - 1.0 <= 0.005);
+                assert!(log["cardinality.some_tag"].as_float().unwrap().as_ref() - 1.0 <= 0.005);
+                assert!(log["cardinality.set_tag"].as_float().unwrap().as_ref() - 3.0 <= 0.005);
+
+                assert_eq!(log.get("top_n.host").unwrap().to_string_lossy(), "{\"localhost\":2}");
+                assert_eq!(log.get("top_n.some_tag").unwrap().to_string_lossy(), "{\"some_value\":2}");
+                assert_eq!(log.get("top_n.set_tag").unwrap().to_string_lossy(), "{\"tag_v1\":1,\"tag_v2\":1,\"tag_v3\":1}");
+
+                assert_eq!(log.get("group_by.metric_name").is_some(), true);
+                assert_eq!(log.get("group_by.some_tag").is_some(), true);
+                assert_eq!(log.get("group_by.some_tag").unwrap().to_string_lossy(), "some_value");
+            });
+
+            assert_eq!(output.len(), 6);
+
+            vec!["counter", "gauge", "set", "distro", "histo", "summary"].iter().for_each(|metric_name| {
+                assert_eq!(output.contains_key(*metric_name), true);
+            });
+
+
+            // write logs
+            let mut e_1 = LogEvent::from("test message 1");
+            e_1.insert("field_1", 1);
+            e_1.insert("time", "good times");
+            e_1.insert("field_2", "1");
+
+            let mut e_2 = LogEvent::from("test message 2");
+            e_2.insert("field_1", 2);
+            e_2.insert("field_2", "1");
+            e_1.insert("date", "good dates");
+
+            let mut e_3 = LogEvent::from("test message 3");
+            e_3.insert("field_1", 3);
+            e_3.insert("field_2", "1");
+
+            let mut e_4 = LogEvent::from("test message 4");
+            e_4.insert("field_1", 4);
+            e_4.insert("field_2", "2");
+            e_4.insert("field_3", "yep");
+
+            let mut e_5 = LogEvent::from("test message 5");
+            e_5.insert("field_1", 5);
+            e_5.insert("field_2", "2");
+            e_5.insert("field_4", "value1");
+
+            let mut e_6 = LogEvent::from("test message 6");
+            e_6.insert("field_1", 6);
+            e_6.insert("field_2", "2");
+            e_6.insert("field_4", "value1");
+
+            for event in vec![e_1.clone().into(), e_2.clone().into(), e_3.clone().into(), e_4.clone().into(), e_5.clone().into(), e_6.clone().into(),
+                              e_1.into(), e_2.into(), e_3.into(), e_4.into(), e_5.into(), e_6.into()] {
+                tx.send(event).await.unwrap();
+            };
+
+            for _i in 0..2 {
+                let output_log = out.recv().await.unwrap().into_log();
+
+                assert_eq!(output_log.get(".size_quantiles").is_some(), true);
+                assert_eq!(output_log.get(".top_n").is_some(), true);
+                assert_eq!(output_log.get(".cardinality").is_some(), true);
+                assert_eq!(output_log.get(".stats_summary").is_some(), true);
+                assert_eq!(output_log.get("event_type").unwrap().to_string_lossy(), "LOG");
+
+
+                assert_eq!(output_log.get("cardinality.time"), None);
+                assert_eq!(output_log.get("cardinality.date"), None);
+                assert_eq!(output_log.get("top_n.time"), None);
+                assert_eq!(output_log.get("top_n.date"), None);
+                assert_eq!(output_log.get("stats_summary.events_processed").unwrap().to_string_lossy(), "6");
+
+                if output_log.get("group_by.field_2").unwrap().to_string_lossy() == "1" {
+                    assert!(output_log["cardinality.field_1"].as_float().unwrap().as_ref() - 3.0 <= 0.005);
+                    assert!(output_log["cardinality.field_2"].as_float().unwrap().as_ref() - 1.0 <= 0.005);
+                    assert_eq!(output_log.get("cardinality.field_3").is_some(), false);
+                    assert_eq!(output_log.get("cardinality.field_4").is_some(), false);
+
+                    assert_eq!(output_log.get("top_n.field_1").unwrap().to_string_lossy(), "{\"1\":2,\"2\":2,\"3\":2}");
+                    assert_eq!(output_log.get("top_n.field_2").unwrap().to_string_lossy(), "{\"1\":6}");
+                    assert_eq!(output_log.get("top_n.field_3").is_some(), false);
+                    assert_eq!(output_log.get("top_n.field_4").is_some(), false);
+                } else {
+                    assert!(output_log["cardinality.field_1"].as_float().unwrap().as_ref() - 3.0 <= 0.005);
+                    assert!(output_log["cardinality.field_2"].as_float().unwrap().as_ref() - 1.0 <= 0.005);
+                    assert!(output_log["cardinality.field_3"].as_float().unwrap().as_ref() - 1.0 <= 0.005);
+                    assert!(output_log["cardinality.field_4"].as_float().unwrap().as_ref() - 1.0 <= 0.005);
+
+                    assert_eq!(output_log.get("top_n.field_1").unwrap().to_string_lossy(), "{\"4\":2,\"5\":2,\"6\":2}");
+                    assert_eq!(output_log.get("top_n.field_2").unwrap().to_string_lossy(), "{\"2\":6}");
+                    assert_eq!(output_log.get("top_n.field_3").unwrap().to_string_lossy(), "{\"yep\":2}");
+                    assert_eq!(output_log.get("top_n.field_4").unwrap().to_string_lossy(), "{\"value1\":4}");
+                }
+            }
 
             drop(tx);
             topology.stop().await;

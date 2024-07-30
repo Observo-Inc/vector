@@ -27,6 +27,10 @@ impl LogStreamAnalyser {
 }
 
 impl EventStreamAnalyser<Discriminant> for LogStreamAnalyser {
+    fn get_event_type(&self) -> String {
+        "LOG".to_string()
+    }
+
     fn get_supported_calculators(&self) -> HashSet<Calculator> {
         self.supported_calculators.clone()
     }
