@@ -171,6 +171,9 @@ fn decoder_framing_to_encoding_framer(framing: &decoding::FramingConfig) -> enco
         decoding::FramingConfig::NewlineDelimited { .. } => {
             encoding::FramingConfig::NewlineDelimited
         }
+        decoding::FramingConfig::Netflow { .. } => {
+            todo!()
+        }
         // TODO: There's no equivalent octet counting framer for encoding... although
         // there's no particular reason that would make it hard to write.
         decoding::FramingConfig::OctetCounting { .. } => todo!(),
