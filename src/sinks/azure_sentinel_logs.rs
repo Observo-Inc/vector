@@ -1,5 +1,3 @@
-use std::io::Write;
-use std::sync::Arc;
 use azure_core::auth::TokenCredential;
 use azure_identity::{AutoRefreshingTokenCredential, ClientSecretCredential, TokenCredentialOptions};
 use bytes::{BufMut, Bytes, BytesMut};
@@ -16,11 +14,16 @@ use lookup::{OwnedValuePath, PathPrefix};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use std::io::Write;
+use std::ops::Deref;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use vector_common::sensitive_string::SensitiveString;
 use vector_config::configurable_component;
 use vector_core::schema;
 use vrl::value::Kind;
 
+use crate::sinks::util::Compression;
 use crate::{
     codecs::Transformer,
     config::{log_schema, AcknowledgementsConfig, Input, SinkConfig, SinkContext},
@@ -36,7 +39,6 @@ use crate::{
     },
     tls::{TlsConfig, TlsSettings},
 };
-use crate::sinks::util::Compression;
 
 /// Configuration for the `azure_sentinel_logs` sink.
 #[configurable_component(sink("azure_sentinel_logs"))]
@@ -235,11 +237,107 @@ impl SinkConfig for AzureSentinelLogsConfig {
 }
 
 #[derive(Clone)]
+struct TokenProvider {
+    tenant_id: String,
+    client_id: String,
+    client_secret: SensitiveString,
+    authority_host: String,
+    token_provider: Arc<RwLock<AutoRefreshingTokenCredential>>,
+}
+
+impl TokenProvider {
+    fn new(
+        tenant_id: String,
+        client_id: String,
+        client_secret: SensitiveString,
+        authority_host: String,
+    ) -> Self {
+        let credential_provider = TokenProvider::create_credential_provider(
+            tenant_id.clone(),
+            client_id.clone(),
+            client_secret.clone(),
+            authority_host.clone(),
+        );
+
+        debug!(message = format!("TokenProvider {:p} created.", &credential_provider), internal_log_rate_limit=true);
+
+        TokenProvider {
+            tenant_id,
+            client_id,
+            client_secret,
+            authority_host,
+            token_provider: Arc::new(RwLock::new(credential_provider)),
+        }
+    }
+
+    fn create_credential_provider(
+        tenant_id: String,
+        client_id: String,
+        client_secret: SensitiveString,
+        authority_host: String,
+    ) -> AutoRefreshingTokenCredential {
+        debug!(message = "Creating credential provider", %client_id, internal_log_rate_limit=true);
+        let creds = Arc::new(ClientSecretCredential::new(
+            azure_core::new_http_client(),
+            tenant_id.into(),
+            client_id.into(),
+            client_secret.into(),
+            TokenCredentialOptions::new(authority_host.into()),
+        ));
+
+        let credential_provider = AutoRefreshingTokenCredential::new(creds.clone());
+        credential_provider
+    }
+
+    async fn get_token(&self) -> Result<String, String> {
+        // Try to get the token using the existing credential provider
+        {
+            let read_only_token_provider = self.token_provider.read().await;
+            match read_only_token_provider.get_token(AZURE_SENTINEL_RESOURCE).await {
+                Ok(token_response) => {
+                    debug!(message = format!("Got a token from the sentinel service using TokenProvider {:p}.", read_only_token_provider.deref())
+                    , internal_log_rate_limit=true);
+                    return Ok(token_response.token.secret().to_string());
+                }
+                Err(error) => {
+                    warn!(message = format!("Failed to get bearer token. Recreating TokenProvider {:p}", read_only_token_provider.deref())
+                    , %error, internal_log_rate_limit=true);
+                    // Drop the read lock before acquiring the write lock
+                }
+            }
+        }
+
+        // Acquire a write lock to replace the credential provider
+        debug!(message = "Acquiring write lock.", internal_log_rate_limit=true);
+        let mut token_provider = self.token_provider.write().await;
+        debug!(message = "Acquired write lock.", internal_log_rate_limit=true);
+
+        // Use `create_credential_provider()` to replace the old token provider with a new one
+        let new_provider = TokenProvider::create_credential_provider(
+            self.tenant_id.clone(),
+            self.client_id.clone(),
+            self.client_secret.clone(),
+            self.authority_host.clone(),
+        );
+
+        debug!(message = format!("New TokenProvider {:p} created.", &new_provider)
+        , internal_log_rate_limit=true);
+
+        *token_provider = new_provider;
+
+        // Return the error message after replacement
+        // When error is returned, HTTP retry will be triggered
+        Err("Failed to get bearer token. Recreated token provider.".to_string())
+    }
+}
+
+
+#[derive(Clone)]
 struct AzureSentinelLogsSink {
     uri: Uri,
     time_generated_key: Option<OwnedValuePath>,
     transformer: Transformer,
-    token_provider: Arc<AutoRefreshingTokenCredential>,
+    token_provider: TokenProvider,
     default_headers: HeaderMap,
     compression: Compression,
 }
@@ -320,18 +418,16 @@ impl AzureSentinelLogsSink {
         let authority_host = config.authority_host.clone()
             .or(Some(AZURE_DEFAULT_AUTHORITY_HOST.to_string())).unwrap();
 
-        let creds = Arc::new(ClientSecretCredential::new(
-            azure_core::new_http_client(),
-            config.tenant_id.clone().into(),
-            config.client_id.clone().into(),
-            config.client_secret.clone().into(),
-            TokenCredentialOptions::new(authority_host.into())
-        ));
-        let auto_creds = Arc::new(AutoRefreshingTokenCredential::new(creds.clone()));
+        let token_provider = TokenProvider::new(
+            config.tenant_id.clone(),
+            config.client_id.clone(),
+            config.client_secret.clone(),
+            authority_host,
+        );
         Ok(AzureSentinelLogsSink {
             uri,
             transformer: config.encoding.clone(),
-            token_provider: auto_creds,
+            token_provider,
             default_headers,
             time_generated_key,
             compression: config.compression,
@@ -382,14 +478,11 @@ impl AzureSentinelLogsSink {
     }
 
     async fn build_authorization_header_value(&self) -> crate::Result<String> {
-        let bearer_token = self.token_provider
-            .get_token(AZURE_SENTINEL_RESOURCE)
-            .await
-            .map_err(|error| format!("Failed to get bearer token: {}", error))?;
+        let bearer_token = self.token_provider.get_token().await?;
 
         let auth_header = format!(
             "Bearer {}",
-            bearer_token.token.secret()
+            bearer_token
         );
         Ok(auth_header)
     }
