@@ -3,6 +3,8 @@ name: Test Suite
 on:
   pull_request_review:
     types: [submitted]
+  push:
+    branches: [master]
   workflow_dispatch:    
 
 env:
