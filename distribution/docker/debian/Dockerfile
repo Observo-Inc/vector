@@ -1,4 +1,4 @@
-FROM docker.io/debian:12.7-slim AS builder
+FROM docker.io/debian:12.8-slim AS builder
 
 WORKDIR /vector
 
@@ -7,7 +7,7 @@ RUN tar -xvf vector-*-"$(uname -m)"-unknown-linux-*.tar.gz --strip-components=2
 
 RUN mkdir -p /var/lib/vector
 
-FROM docker.io/debian:12.7-slim
+FROM docker.io/debian:12.8-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata systemd && rm -rf /var/lib/apt/lists/*
 
