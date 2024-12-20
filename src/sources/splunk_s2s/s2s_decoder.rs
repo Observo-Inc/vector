@@ -3,7 +3,7 @@ use codecs::StreamDecodingError;
 use indexmap::IndexMap;
 use regex::Regex;
 use snafu::Snafu;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::{fmt, io};
 use tokio_util::codec::Decoder;
 use vector_core::event::{LogEvent, Value};
@@ -17,7 +17,7 @@ pub(crate) struct S2SDecoder {
     _allowed: bool,
     _fwd_token: String,
     _tokens: HashSet<String>,
-    parsed_frames: Vec<(S2SEventFrame, usize)>,
+    parsed_frames: VecDeque<(S2SEventFrame, usize)>,
     _ack: bool,
 }
 
@@ -29,7 +29,7 @@ impl Decoder for S2SDecoder {
         if self.parsed_frames.is_empty() {
             match self.handle_connection(buf) {
                 Ok(frames) => {
-                    self.parsed_frames = frames;
+                    self.parsed_frames.append(&mut VecDeque::from(frames));
                 }
                 Err(err) => {
                     debug!("[Warning] Ignoring decode error: {:?}", err);
@@ -37,7 +37,7 @@ impl Decoder for S2SDecoder {
                 }
             }
         }
-        match self.parsed_frames.pop() {
+        match self.parsed_frames.pop_front() {
             None => {
                 Ok(None)
             }
@@ -60,7 +60,7 @@ impl S2SDecoder {
             _allowed: false,
             _fwd_token: String::from(""),
             _tokens: HashSet::new(),
-            parsed_frames: vec![],
+            parsed_frames: VecDeque::new(),
             _ack: false,
         }
     }
