@@ -438,7 +438,7 @@ enrichment-tables-geoip = ["dep:maxminddb"]
 
 # Sources
 sources = ["sources-logs", "sources-metrics"]
-sources-logs = ["sources-amqp", "sources-aws_kinesis_firehose", "sources-aws_s3", "sources-aws_sqs", "sources-datadog_agent", "sources-demo_logs", "sources-docker_logs", "sources-exec", "sources-file", "sources-fluent", "sources-gcp_pubsub", "sources-heroku_logs", "sources-http_server", "sources-http_client", "sources-internal_logs", "sources-journald", "sources-kafka", "sources-kubernetes_logs", "sources-logstash", "sources-nats", "sources-opentelemetry", "sources-file-descriptor", "sources-redis", "sources-socket", "sources-splunk_hec", "sources-stdin", "sources-syslog", "sources-vector"]
+sources-logs = ["sources-amqp", "sources-aws_kinesis_firehose", "sources-aws_s3", "sources-aws_sqs", "sources-datadog_agent", "sources-demo_logs", "sources-docker_logs", "sources-exec", "sources-file", "sources-fluent", "sources-gcp_pubsub", "sources-heroku_logs", "sources-http_server", "sources-http_client", "sources-internal_logs", "sources-journald", "sources-kafka", "sources-kubernetes_logs", "sources-logstash", "sources-splunk_s2s", "sources-nats", "sources-opentelemetry", "sources-file-descriptor", "sources-redis", "sources-socket", "sources-splunk_hec", "sources-stdin", "sources-syslog", "sources-vector"]
 sources-metrics = ["sources-apache_metrics", "sources-aws_ecs_metrics", "sources-eventstoredb_metrics", "sources-host_metrics", "sources-internal_metrics", "sources-mongodb_metrics", "sources-nginx_metrics", "sources-postgresql_metrics", "sources-prometheus", "sources-statsd", "sources-vector"]
 
 sources-amqp = ["lapin"]
@@ -467,6 +467,7 @@ sources-journald = []
 sources-kafka = ["dep:rdkafka"]
 sources-kubernetes_logs = ["dep:file-source", "kubernetes", "transforms-reduce"]
 sources-logstash = ["sources-utils-net-tcp", "tokio-util/net"]
+sources-splunk_s2s = ["sources-utils-net-tcp", "tokio-util/net"]
 sources-mongodb_metrics = ["dep:mongodb"]
 sources-nats = ["dep:nats", "dep:nkeys"]
 sources-nginx_metrics = ["dep:nom"]
