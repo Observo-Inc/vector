@@ -42,6 +42,10 @@ impl Decoder for S2SDecoder {
                 Ok(None)
             }
             Some(frame) => {
+                if frame.0.should_skip() {
+                    debug!("Skipping frame {:?}", frame);
+                    return Ok(None)
+                }
                 trace!("Handling frame {:?}", frame);
                 Ok(Some(frame))
             }
@@ -1494,30 +1498,50 @@ impl fmt::Display for S2SEventFrame {
 }
 
 impl S2SEventFrame {
+    pub(crate) fn should_skip(&self) -> bool {
+        if self.sourcetype == "fwdinfo" {
+            return true;
+        }
+
+        if self.payload_type == PayloadType::LogEmptyPacket {
+            return true
+        }
+
+        return false
+    }
+
     pub(crate) fn get_log_event(&self) -> LogEvent {
         let source_value = Value::from(self.source.clone());
         let source_type_value = Value::from(self.sourcetype.clone());
         let host_value = Value::from(self.host.clone());
         let timestamp_value = Value::from(self.time);
         let message_value = Value::from(self.raw.clone());
-        let fields_value = Value::from(
-            self.fields.clone().into_iter()
+        let mut map: HashMap<String,String> = HashMap::new();
+        for (key,value) in ALLOW_LISTED_CTRL_FIELDS {
+            if self.control_fields.contains_key(*key) {
+                map.insert(value.to_string(), self.control_fields[key.clone()].clone());
+            }
+        }
+        for (key,value) in ALLOW_LISTED_FIELDS {
+            if self.fields.contains_key(*key) {
+                map.insert(value.to_string(), self.fields[key.clone()].join(""));
+            }
+        }
+
+        let metadata_value = Value::from(
+            map.clone().into_iter()
                 .map(|(key, value)| (key, Value::from(value)))
                 .collect::<BTreeMap<_, _>>()
         );
-        let control_fields_value = Value::from(
-            self.control_fields.clone().into_iter()
-                .map(|(key, value)| (key, Value::from(value)))
-                .collect::<BTreeMap<_, _>>()
-        );
+
+
         let mut log = BTreeMap::new();
         log.insert("source".to_string(), source_value);
         log.insert("sourcetype".to_string(), source_type_value);
         log.insert("host".to_string(), host_value);
         log.insert("event_timestamp".to_string(), timestamp_value);
         log.insert("message".to_string(), message_value);
-        log.insert("fields".to_string(), fields_value);
-        log.insert("control_fields".to_string(), control_fields_value);
+        log.insert("metadata".to_string(), metadata_value);
         LogEvent::from(log)
     }
     fn _read_uint32_be(&mut self, offset: i32) -> Result<u32, String> {
@@ -1557,6 +1581,12 @@ const THREE: u32 = 3;
 const ZLIB_MAGIC_NUMBERS_0: u8 = 120;
 const ZLIB_MAGIC_NUMBERS_1: u8 = 156;
 const FWD_HEADER_MIN_LENGTH: usize = 400;
+
+// List of tuples where each tuple contains:
+// - The actual key to look for in the control fields / fields.
+// - The corresponding modified key to use in the resulting map.
+const ALLOW_LISTED_FIELDS: &[(&str, &str)] = &[("index", "index")];
+const ALLOW_LISTED_CTRL_FIELDS: &[(&str, &str)] = &[("_path", "path")];
 
 const PREDEFINED_KV_STRINGS: [&str; 50] = [
     "_subsecond", "date_second", "date_minute", "date_hour",
