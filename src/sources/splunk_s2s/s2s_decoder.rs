@@ -5,6 +5,7 @@ use regex::Regex;
 use snafu::Snafu;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::{fmt, io};
+use std::str::FromStr;
 use tokio_util::codec::Decoder;
 use vector_core::event::{LogEvent, Value};
 
@@ -246,6 +247,7 @@ struct S2SDecoderState {
     tokens: HashSet<String>,
     pending_to_ack: Vec<i32>,
     prev_line: HashMap<i32, String>,
+    time_zone: Option<TimeZone>,
 }
 
 impl S2SDecoderState {
@@ -262,6 +264,7 @@ impl S2SDecoderState {
             fwd_info: None,
             pending_to_ack: Vec::new(),
             prev_line: HashMap::new(),
+            time_zone: None
         }
     }
 
@@ -296,6 +299,7 @@ impl S2SDecoderState {
         }
 
         event.command = Some(Command::ReadEvent);
+        event.time_zone = self.time_zone.clone();
 
         // GET CHANNEL ID
         let channel_id = self.read_leb128_i32(buffer, offset);
@@ -380,8 +384,8 @@ impl S2SDecoderState {
                             Ok(value) => {
                                 t = value;
                             }
-                            Err(_) => {
-                                return Err(S2SDecoderError::GenericError { message: String::from("failed in read_uint32_be") });
+                            Err(err) => {
+                                return Err(err)
                             }
                         }
                     }
@@ -389,8 +393,8 @@ impl S2SDecoderState {
                         Ok(value) => {
                             value
                         }
-                        Err(_err) => {
-                            return Err(S2SDecoderError::GenericError { message: String::from("failed in read_uint32_be") });
+                        Err(err) => {
+                            return Err(err)
                         }
                     };
 
@@ -495,6 +499,9 @@ impl S2SDecoderState {
                     if field_action.value() & THREE > 0 {
                         let start = offset.offset as usize;
                         let end = start + size as usize;
+                        if end > buffer.len() {
+                            return Err(S2SDecoderError::InSufficientData);
+                        }
                         value = String::from_utf8_lossy(&buffer[start..end]).to_string();
                     }
                     offset.advance(size);
@@ -816,6 +823,9 @@ impl S2SDecoderState {
         event.sourcetype = channel.metadata.get("sourcetype").cloned().unwrap_or("default_sourcetype".to_string());
 
         self.channel.insert(channel.channel_id, channel);
+        if offset.offset > buffer.len() as i32 {
+            return None;
+        }
         buffer.advance(offset.offset as usize);
         return Some(event);
     }
@@ -837,10 +847,147 @@ impl S2SDecoderState {
         self.build_channel_data(buffer, offset, s)
     }
 
-    fn read_time_zone(&mut self, buffer: &mut BytesMut, offset: &mut Offset) {
+    fn read_time_zone(&mut self, buffer: &mut BytesMut, offset: &mut Offset) -> Option<S2SDecoderError> {
+        let timezone_format_str_len = 35;
+        let char_c_ascii = 67;
+        let char_y_ascii = 89;
+        let char_space_ascii = 32;
+        let char_at_ascii = 64; // @
         offset.advance(1);
         let size = self.read_leb128_i32(buffer, offset);
-        offset.advance(size);
+        let end = offset.offset + size;
+        if end > buffer.len() as i32 {
+            return Some(S2SDecoderError::InSufficientData)
+        }
+        let header_string = self.read_str(buffer, offset.offset, timezone_format_str_len);
+        offset.advance(timezone_format_str_len);
+
+        if !header_string.starts_with("### SERIALIZED TIMEZONE FORMAT 1.0") {
+            return Some(S2SDecoderError::InSufficientData)
+        }
+
+        if buffer[offset.offset as usize] == char_c_ascii {
+            while buffer[offset.offset as usize] != char_y_ascii {
+                offset.advance(1);
+            }
+        }
+
+        let mut timezone_info: Vec<TimeZone> = Vec::new();
+
+        while buffer[offset.offset as usize] == char_y_ascii {
+            offset.advance(1);
+            let timezone_offset = self.time_zone_util_function(buffer, offset, char_space_ascii, true);
+            let mut  timezone_type= String::from("Standard"); // standard time
+            if buffer[offset.offset as usize] == 89 {
+                timezone_type = String::from("DST"); // daylight savings time
+            }
+            offset.advance(1);
+            let mut timezone_transition_type = String::from("UT");
+            if buffer[offset.offset as usize] == 83 {
+                timezone_transition_type = String::from("Standard");
+            } else if buffer[offset.offset as usize] == 87 {
+                timezone_transition_type = String::from("Wall");
+            }
+            offset.advance(2);
+            let mut timezone_abbr = String::from("");
+            while buffer[offset.offset as usize] != 89 && buffer[offset.offset as usize] != 64 {
+                let start = offset.offset as usize;
+                let end = start + 2usize;
+                let x = String::from_utf8_lossy(&buffer[start..end]);
+                let y = u32::from_str_radix(&x, 16);
+                match y {
+                    Ok(r) => {
+                        if r >= 32 && r <= 126 {
+                            let c = char::from_u32(r);
+                            if c.is_none() {
+                                return Some(S2SDecoderError::InSufficientData)
+                            }
+                            timezone_abbr = format!("{}{}",timezone_abbr,c.unwrap());
+                        } else {
+                            return Some(S2SDecoderError::InSufficientData)
+                        }
+                    }
+                    Err(_e) => {
+                        return Some(S2SDecoderError::InSufficientData)
+                    }
+                }
+
+                offset.advance(3);
+            }
+            timezone_info.push(TimeZone {
+                offset: timezone_offset,
+                abbreviation: timezone_abbr,
+                timezone_type,
+                transition_type: timezone_transition_type,
+                since:None
+            })
+        }
+
+        let mut final_timezone_info: Vec<TimeZone> = Vec::new();
+        while buffer[offset.offset as usize] == char_at_ascii {
+            offset.advance(1);
+
+            let r = i32::from_str(&self.time_zone_util_function(buffer, offset, 32, true));
+            let i = i32::from_str(&self.time_zone_util_function(buffer, offset, 10, true));
+
+            let mut r_value = -1;
+            let mut i_value:i32 = -1;
+
+            match r {
+                Ok(r) => {
+                    r_value = r;
+                    debug!("[read_time_zone] r: {}", r);
+                }
+                Err(e) => {
+                    debug!("[read_time_zone] r error: {}", e);
+                }
+            }
+
+            match i {
+                Ok(i) => {
+                    i_value = i;
+                    debug!("[read_time_zone] i_value: {}", i_value);
+                }
+                Err(e) => {
+                    debug!("[read_time_zone] i_error: {}", e);
+                }
+            }
+
+            let timezone = timezone_info.get(i_value as usize).unwrap();
+            let mut timezone_clone = timezone.clone();
+            timezone_clone.since = Some(r_value);
+            final_timezone_info.push(timezone_clone);
+        }
+
+        if final_timezone_info.len() == 0 && timezone_info.len() != 0 {
+            let timezone = timezone_info.get(0usize).unwrap();
+            let mut timezone_clone = timezone.clone();
+            timezone_clone.since = Some(-1);
+            final_timezone_info.push(timezone_clone);
+        }
+
+        let timezone = final_timezone_info.get(0usize).unwrap();
+        debug!("[read_time_zone] final_timezone_info: {:?}", final_timezone_info);
+        self.time_zone = Some(timezone.clone());
+        offset.advance(end - offset.offset);
+
+        return None;
+    }
+
+    fn time_zone_util_function(&mut self, buffer: &mut BytesMut, offset: &mut Offset, r : u8, flag: bool) -> String {
+        let mut i = offset.offset;
+
+        while (i as usize) < buffer.len() && buffer[i as usize] != r {
+            i = i+1;
+        }
+        let start = offset.offset as usize;
+        let end = i as usize;
+        let str = String::from_utf8_lossy(&buffer[start..end]).to_string();
+        if flag {
+            offset.advance(i-offset.offset+1);
+        }
+        return str;
+
     }
 
     fn abandon_channel(&mut self, buffer: &mut BytesMut, offset: &mut Offset) -> Result<S2SEventFrame, S2SDecoderError> {
@@ -1196,13 +1343,13 @@ impl S2SDecoderState {
         }
     }
 
-    fn read_uint32_be(&mut self, buffer: &mut BytesMut, offset: i32) -> Result<u32, String> {
+    fn read_uint32_be(&mut self, buffer: &mut BytesMut, offset: i32) -> Result<u32, S2SDecoderError> {
         // let buffer = buffer;
         // Extract 4 bytes starting from the given offset
         let start = offset;
         let end = offset + 4;
         if end as usize >= buffer.len() {
-            return Err(format!("Insufficient bytes to read u32 at offset {}: required {} but got {}", offset, 4, buffer.len() - start as usize));
+            return Err(S2SDecoderError::InSufficientData);
         }
         let bytes = &buffer[start as usize..end as usize];
         // Convert the 4 bytes to a 32-bit integer using big-endian ordering
@@ -1405,7 +1552,10 @@ pub(crate) struct S2SEventFrame {
     capabilities_map: Option<HashMap<String, String>>,
 
     // fwd_info fields
-    fwd_info: Option<FwdInfo>
+    fwd_info: Option<FwdInfo>,
+
+    // uf timezone
+    time_zone: Option<TimeZone>
 }
 
 impl Default for S2SEventFrame {
@@ -1439,6 +1589,7 @@ impl Default for S2SEventFrame {
             header_buffer: None,
             fwd_header: None,
             fwd_info: None,
+            time_zone: None,
         }
     }
 }
@@ -1503,8 +1654,18 @@ impl S2SEventFrame {
             return true;
         }
 
+        if let Some(sourcetype) = self.fields.get("sourcetype") {
+            if sourcetype.get(0).map(|value| value == "sourcetype::fwdinfo").unwrap_or(false) {
+                return true;
+            }
+        }
+
         if self.payload_type == PayloadType::LogEmptyPacket {
             return true
+        }
+
+        if self.payload_type == PayloadType::Unknown && self.header_buffer.is_none() {
+            return true;
         }
 
         return false
@@ -1514,7 +1675,6 @@ impl S2SEventFrame {
         let source_value = Value::from(self.source.clone());
         let source_type_value = Value::from(self.sourcetype.clone());
         let host_value = Value::from(self.host.clone());
-        let timestamp_value = Value::from(self.time);
         let message_value = Value::from(self.raw.clone());
         let mut map: HashMap<String,String> = HashMap::new();
         for (key,value) in ALLOW_LISTED_CTRL_FIELDS {
@@ -1527,6 +1687,7 @@ impl S2SEventFrame {
                 map.insert(value.to_string(), self.fields[key.clone()].join(""));
             }
         }
+        map.insert("event_timestamp".to_string(), format!("{}", self.time));
 
         let metadata_value = Value::from(
             map.clone().into_iter()
@@ -1539,7 +1700,6 @@ impl S2SEventFrame {
         log.insert("source".to_string(), source_value);
         log.insert("sourcetype".to_string(), source_type_value);
         log.insert("host".to_string(), host_value);
-        log.insert("event_timestamp".to_string(), timestamp_value);
         log.insert("message".to_string(), message_value);
         log.insert("metadata".to_string(), metadata_value);
         LogEvent::from(log)
@@ -1944,4 +2104,23 @@ fn to_precision(n: f64, precision: usize) -> f64 {
     let precision = std::cmp::min(precision, 100); // Ensure precision doesn't exceed 100
     let formatted = format!("{:.*}", precision, n);  // Format the number to the required precision
     formatted.parse().unwrap_or(0.0) // Parse it back to f64, default to 0.0 on error
+}
+
+#[derive(Clone,Debug)]
+struct TimeZone {
+    offset: String,
+    abbreviation: String,
+    timezone_type: String,
+    transition_type: String,
+    since : Option<i32>,
+}
+
+impl fmt::Display for TimeZone {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "TimeZone {{ offset: {}, abbreviation: {}, timezone_type: {}, transition_type: {} }}",
+            self.offset, self.abbreviation, self.timezone_type, self.transition_type
+        )
+    }
 }
