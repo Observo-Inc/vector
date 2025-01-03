@@ -3,9 +3,10 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use bytes::Bytes;
+use chrono::Utc;
 use codecs::BytesDeserializerConfig;
 use lookup::lookup_v2::parse_value_path;
-use lookup::{event_path, owned_value_path, path};
+use lookup::{metadata_path, owned_value_path, path, OwnedValuePath, PathPrefix};
 use smallvec::{smallvec, SmallVec};
 use vector_config::configurable_component;
 use vector_core::{
@@ -134,6 +135,7 @@ impl SourceConfig for SplunkS2SConfig {
         let log_namespace = cx.log_namespace(self.log_namespace);
         let source = SplunkS2SSource {
             timestamp_converter: types::Conversion::Timestamp(cx.globals.timezone()),
+            legacy_host_key_path: parse_value_path(log_schema().host_key()).ok(),
             log_namespace,
         };
         let shutdown_secs = Duration::from_secs(30);
@@ -183,6 +185,7 @@ impl SourceConfig for SplunkS2SConfig {
 struct SplunkS2SSource {
     timestamp_converter: types::Conversion,
     log_namespace: LogNamespace,
+    legacy_host_key_path: Option<OwnedValuePath>,
 }
 
 impl TcpSource for SplunkS2SSource {
@@ -195,8 +198,8 @@ impl TcpSource for SplunkS2SSource {
         S2SDecoder::new()
     }
 
-    fn handle_events(&self, events: &mut [Event], _host: SocketAddr) {
-        let _now = chrono::Utc::now();
+    fn handle_events(&self, events: &mut [Event], host: SocketAddr) {
+        let now = Utc::now();
         for event in events {
             let log = event.as_mut_log();
 
@@ -207,12 +210,41 @@ impl TcpSource for SplunkS2SSource {
                 Bytes::from_static(SplunkS2SConfig::NAME.as_bytes()),
             );
 
-            let _log_timestamp = log.get(event_path!("@timestamp")).and_then(|timestamp| {
+            let legacy_host_key = self
+                .legacy_host_key_path
+                .as_ref()
+                .map(LegacyKey::InsertIfEmpty);
+
+            self.log_namespace.insert_source_metadata(
+                SplunkS2SConfig::NAME,
+                log,
+                legacy_host_key,
+                path!("host"),
+                host.ip().to_string(),
+            );
+
+            let log_timestamp = log.get("metadata.event_timestamp").and_then(|timestamp| {
                 self.timestamp_converter
                     .convert::<Value>(timestamp.coerce_to_bytes())
                     .ok()
             });
 
+            match self.log_namespace {
+                LogNamespace::Vector => {
+                    if let Some(timestamp) = log_timestamp {
+                        log.insert(metadata_path!(SplunkS2SConfig::NAME, "timestamp"), timestamp);
+                    }
+                    log.insert(metadata_path!("vector", "ingest_timestamp"), now);
+                }
+                LogNamespace::Legacy => {
+                    if let Some(timestamp_key) = log_schema().timestamp_key() {
+                        log.insert(
+                            (PathPrefix::Event, timestamp_key),
+                            log_timestamp.unwrap_or_else(|| Value::from(now)),
+                        );
+                    }
+                }
+            }
         }
     }
 
