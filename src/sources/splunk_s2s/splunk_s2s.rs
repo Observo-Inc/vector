@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -17,7 +17,7 @@ use vrl::value::kind::Collection;
 use vrl::value::Kind;
 
 use super::super::util::net::{SocketListenAddr, TcpSource, TcpSourceAck, TcpSourceAcker};
-use crate::sources::splunk_s2s::s2s_decoder::{S2SDecoder, S2SDecoderError, S2SEventFrame};
+use crate::sources::splunk_s2s::s2s_decoder::{Command, S2SDecoder, S2SDecoderError, S2SEventFrame};
 use crate::{
     config::{
         log_schema, DataType, GenerateConfig, Resource, SourceAcknowledgementsConfig, SourceConfig,
@@ -255,20 +255,96 @@ impl TcpSource for SplunkS2SSource {
 
 struct SplunkS2SAcker {
     handshake_buffer: Option<Vec<u8>>,
+    ack_buffer: Option<Vec<u8>>,
 }
 
 impl SplunkS2SAcker {
     fn new(frames: &[S2SEventFrame]) -> Self {
         let mut handshake_buffer: Option<Vec<u8>> = None;
+        let mut ack_buffer: Vec<u8> = Vec::new();
         for s2s_frame in frames {
             if s2s_frame.header_buffer.is_some() {
                 handshake_buffer = s2s_frame.header_buffer.clone();
+                return Self {
+                    handshake_buffer,
+                    ack_buffer: Some(ack_buffer),
+                }
+            }
+        }
+
+        let mut ack_event_ids: BTreeSet<i32> = BTreeSet::new();
+        for s2s_frame in frames {
+            if s2s_frame.ack && s2s_frame.__s2s_id.is_some() {
+                ack_event_ids.insert(s2s_frame.__s2s_id.unwrap());
+            }
+        }
+        debug!("Event ids: {:?}", ack_event_ids.clone());
+        if !ack_event_ids.is_empty() {
+            if ack_event_ids.len() > 1 {
+                ack_buffer.push(Command::AckRange as u8);
+                match SplunkS2SAcker::write_leb128(&mut ack_buffer, *ack_event_ids.first().unwrap()) {
+                    Ok(_) => {
+                        trace!("Ack write for range of start event completed {}", *ack_event_ids.first().unwrap());
+                    }
+                    Err(err) => {
+                        error!("Ack write for range of events buffer error: {}", err);
+                    }
+                }
+                match SplunkS2SAcker::write_leb128(&mut ack_buffer, *ack_event_ids.last().unwrap()) {
+                    Ok(_) => {
+                        trace!("Ack write for range of end event completed {}", *ack_event_ids.last().unwrap());
+                    }
+                    Err(err) => {
+                        error!("Ack write for range of events buffer error: {}", err);
+                    }
+                }
+            } else {
+                ack_buffer.push(Command::Ack as u8);
+                match SplunkS2SAcker::write_leb128(&mut ack_buffer, *ack_event_ids.first().unwrap()) {
+                    Ok(_) => {
+                        trace!("Ack write for single event completed {}", *ack_event_ids.first().unwrap());
+                    }
+                    Err(err) => {
+                        error!("Ack write for single event buffer error: {}", err);
+                    }
+                }
+            }
+        }
+        debug!("Sending ack buffer {}", hex::encode(&ack_buffer));
+        Self {
+            handshake_buffer,
+            ack_buffer: Some(ack_buffer),
+        }
+    }
+
+    fn write_leb128(buf: &mut Vec<u8>, value: i32) -> Result<(), &'static str> {
+        let mut bytes_written = 0;
+        let mut remaining = value;
+
+        loop {
+            if bytes_written > 5 {  // i32 needs max 5 bytes in LEB128
+                return Err("LEB128 value too large");
+            }
+
+            let mut byte = (remaining & 0x7f) as u8;
+            remaining >>= 7;
+
+            // Check if more bytes are needed
+            if (remaining != 0 && remaining != -1) ||
+                (remaining == -1 && (byte & 0x40) == 0) ||
+                (remaining == 0 && (byte & 0x40) != 0) {
+                byte |= 0x80;
+            }
+
+            buf.push(byte);
+            bytes_written += 1;
+
+            if (remaining == 0 && (byte & 0x40) == 0) ||
+                (remaining == -1 && (byte & 0x40) != 0) {
                 break;
             }
         }
-        Self {
-            handshake_buffer,
-        }
+        Ok(())
     }
 }
 
@@ -276,6 +352,9 @@ impl TcpSourceAcker for SplunkS2SAcker {
     fn build_ack(self, _ack: TcpSourceAck) -> Option<Bytes> {
         if self.handshake_buffer.is_some() {
             return Some(Bytes::from(self.handshake_buffer.unwrap()))
+        }
+        if self.ack_buffer.is_some() {
+            return Some(Bytes::from(self.ack_buffer.unwrap()))
         }
         None
     }

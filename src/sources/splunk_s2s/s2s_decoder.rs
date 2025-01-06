@@ -4,8 +4,8 @@ use indexmap::IndexMap;
 use regex::Regex;
 use snafu::Snafu;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::{fmt, io};
 use std::str::FromStr;
+use std::{fmt, io};
 use tokio_util::codec::Decoder;
 use vector_core::event::{LogEvent, Value};
 
@@ -245,7 +245,6 @@ struct S2SDecoderState {
     allowed: bool,
     fwd_token: String,
     tokens: HashSet<String>,
-    pending_to_ack: Vec<i32>,
     prev_line: HashMap<i32, String>,
     time_zone: Option<TimeZone>,
 }
@@ -262,7 +261,6 @@ impl S2SDecoderState {
             tokens: HashSet::new(),
             fwd_token: String::new(),
             fwd_info: None,
-            pending_to_ack: Vec::new(),
             prev_line: HashMap::new(),
             time_zone: None
         }
@@ -298,6 +296,8 @@ impl S2SDecoderState {
             return Err(S2SDecoderError::UnexpectedOpCode { opcode: command_code });
         }
 
+        event.ack = self.ack;
+        debug!("Marking event to be acked as {}", self.ack);
         event.command = Some(Command::ReadEvent);
         event.time_zone = self.time_zone.clone();
 
@@ -684,12 +684,6 @@ impl S2SDecoderState {
             s2s_event.channel = None;
         } else if s2s_event.is_broken {
             // set timezone
-        }
-
-        if self.ack & (s2s_event.__s2s_id.is_some()) {
-            // push ack
-            debug!("[read_event] should ack id: {:?}", s2s_event.__s2s_id);
-            self.pending_to_ack.push(s2s_event.__s2s_id.unwrap());
         }
 
         s2s_event.version = Some(String::from("v4"));
@@ -1152,6 +1146,10 @@ impl S2SDecoderState {
         }
         let capabilities = capabilities_option.unwrap().as_str().clone();
         let capabilities_map = self.parse_raw_string(capabilities, ";");
+        let ack_capability = capabilities_map.get("ack");
+        if ack_capability.is_some() {
+            self.ack = ack_capability.unwrap() == "1";
+        }
 
         offset.offset;
         legacy_s2s_event.capabilities_map = Some(capabilities_map);
@@ -1536,7 +1534,7 @@ pub(crate) struct S2SEventFrame {
     breaker_fields: Vec<String>,
     control_fields: HashMap<String, String>,
     fin: bool,
-    __s2s_id: Option<i32>, // should move to option
+    pub(crate) __s2s_id: Option<i32>, // should move to option
     num_fields: i32,
     command: Option<Command>,
     index: String,
@@ -1546,6 +1544,7 @@ pub(crate) struct S2SEventFrame {
 
     // header fields
     pub(crate) header_buffer: Option<Vec<u8>>,
+    pub(crate) ack: bool,
     fwd_header: Option<FwdHeader>,
 
     // fwd_capabilities fields
@@ -1587,6 +1586,7 @@ impl Default for S2SEventFrame {
             version: None,
             capabilities_map:None,
             header_buffer: None,
+            ack: false,
             fwd_header: None,
             fwd_info: None,
             time_zone: None,
@@ -1994,7 +1994,7 @@ impl From<io::Error> for S2SDecoderError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)] // Ensure each variant is stored as a `u8` in memory
-enum Command {
+pub(crate) enum Command {
     CloneChannel = 0xF8,
     Compressed = 0xF9,
     AckRange = 0xFA,
