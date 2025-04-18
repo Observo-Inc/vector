@@ -11,7 +11,7 @@
 
 use std::io;
 
-use snap::raw::Encoder;
+use snap::raw::{Encoder, Decoder};
 
 pub struct SnappyEncoder<W: io::Write> {
     writer: W,
@@ -59,6 +59,50 @@ impl<W: io::Write + std::fmt::Debug> std::fmt::Debug for SnappyEncoder<W> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SnappyEncoder")
             .field("inner", &self.get_ref())
+            .finish()
+    }
+}
+
+pub struct SnappyDecoder<R: io::Read> {
+    reader: R,
+    buffer: Vec<u8>,
+    decoded: bool,
+}
+
+impl<R: io::Read> SnappyDecoder<R> {
+    pub const fn new(reader: R) -> Self {
+        Self {
+            reader: reader,
+            buffer: Vec::new(),
+            decoded: false,
+        }
+    }
+}
+
+impl<R: io::Read> io::Read for SnappyDecoder<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if !self.decoded {
+            let mut decoder = Decoder::new();
+            let mut compressed = Vec::new();
+            self.reader.read_to_end(&mut compressed)?;
+            self.buffer = decoder.decompress_vec(&compressed)?;
+            self.decoded = true;
+        }
+
+        if self.buffer.is_empty() {
+            return Ok(0);
+        }
+        let len = std::cmp::min(buf.len(), self.buffer.len());
+        buf[..len].copy_from_slice(&self.buffer[..len]);
+        self.buffer.drain(..len);
+
+        Ok(len)
+    }
+}
+
+impl<R: io::Read + std::fmt::Debug> std::fmt::Debug for SnappyDecoder<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SnappyDecoder")
             .finish()
     }
 }

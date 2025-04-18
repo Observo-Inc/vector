@@ -562,7 +562,8 @@ impl SinkConfig for ElasticsearchConfig {
                 let service = ElasticsearchService::new(
                     client.clone(),
                     http_request_builder,
-                    self.rejection_report.clone());
+                    self.rejection_report.clone(),
+                    self.compression.clone());
 
                 (endpoint, service)
             })

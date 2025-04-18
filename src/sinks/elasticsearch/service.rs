@@ -22,7 +22,7 @@ use crate::{
     sinks::util::{
         auth::Auth,
         http::{HttpBatchService, RequestConfig},
-        Compression, ElementCount,
+        Compression, ElementCount, Decompressor,
     },
 };
 
@@ -73,6 +73,7 @@ pub struct ElasticsearchService {
         ElasticsearchRequest,
     >,
     rej_rpt: RejectionReport,
+    compression: Compression,
 }
 
 impl ElasticsearchService {
@@ -80,6 +81,7 @@ impl ElasticsearchService {
         http_client: HttpClient<Body>,
         http_request_builder: HttpRequestBuilder,
         rej_rpt: RejectionReport,
+        compression: Compression,
     ) -> ElasticsearchService {
         let http_request_builder = Arc::new(http_request_builder);
         let batch_service = HttpBatchService::new(http_client, move |req| {
@@ -88,7 +90,7 @@ impl ElasticsearchService {
                 Box::pin(async move { request_builder.build_request(req).await });
             future
         });
-        ElasticsearchService { batch_service, rej_rpt }
+        ElasticsearchService { batch_service, rej_rpt, compression }
     }
 }
 
@@ -190,8 +192,8 @@ impl Service<ElasticsearchRequest> for ElasticsearchService {
     fn call(&mut self, mut req: ElasticsearchRequest) -> Self::Future {
         let mut http_service = self.batch_service.clone();
         let rej_rpt = self.rej_rpt.clone();
-        let req_for_rpt = if self.rej_rpt.needs_request() {
-            Some(req.clone())
+        let req_for_rpt = if rej_rpt.needs_request() {
+            Some((req.clone(), self.compression.clone()))
         } else {
             None
         };
@@ -216,18 +218,24 @@ impl Service<ElasticsearchRequest> for ElasticsearchService {
 // telemetry. Ref: #15886
 fn emit_bad_response_error(
     response: &Response<Bytes>,
-    request: Option<ElasticsearchRequest>,
+    request: Option<(ElasticsearchRequest, Compression)>,
     rej_rpt: RejectionReport,
 ) {
     let error_code = format!("http_response_{}", response.status().as_u16());
 
     match (rej_rpt, request) {
-        (RejectionReport::RequestResponse, Some(req)) => {
+        (RejectionReport::RequestResponse, Some((req, comp))) => {
+            let decomp = Decompressor::from(comp);
+            let req_data = match decomp.decompress(req.payload) {
+                Ok(data) => data,
+                Err(err) => format!("- decompression failed({comp}): '{err}' -").into()
+            };
+
             error!(
                 message = "Request contained errors.",
                 error_code = error_code,
                 response = ?response,
-                request = ?req.payload,
+                request = %String::from_utf8_lossy(&req_data),
             );
         }
         (RejectionReport::Drop, _) => {
@@ -248,7 +256,7 @@ fn emit_bad_response_error(
 
 fn get_event_status(
     response: &Response<Bytes>,
-    request: Option<ElasticsearchRequest>,
+    request: Option<(ElasticsearchRequest, Compression)>,
     rej_rpt: RejectionReport,
 ) -> EventStatus {
     let status = response.status();

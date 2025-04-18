@@ -66,3 +66,28 @@ impl<W: io::Write + std::fmt::Debug> std::fmt::Debug for ZstdEncoder<W> {
 /// 1. There is no sharing references to zstd encoder. `Write` requires unique reference, and `finish` moves the instance itself.
 /// 2. Sharing only internal writer, which implements `Sync`
 unsafe impl<W: io::Write + Sync> Sync for ZstdEncoder<W> {}
+
+pub struct ZstdDecoder<R: io::Read> {
+    inner: zstd::Decoder<'static, io::BufReader<R>>,
+}
+
+impl<R: io::Read> ZstdDecoder<R> {
+    pub fn new(reader: R) -> io::Result<Self> {
+        let decoder = zstd::Decoder::new(reader)?;
+        Ok(Self { inner: decoder })
+    }
+}
+
+impl<R: io::Read> io::Read for ZstdDecoder<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        #[allow(clippy::disallowed_methods)] // Caller handles the result of `read`.
+        self.inner.read(buf)
+    }
+}
+
+impl<R: io::Read + std::fmt::Debug> std::fmt::Debug for ZstdDecoder<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ZstdDecoder")
+            .finish()
+    }
+}
