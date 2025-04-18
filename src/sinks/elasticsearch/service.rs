@@ -15,7 +15,7 @@ use vector_lib::{
     request_metadata::{GroupedCountByteSize, MetaDescriptive, RequestMetadata},
 };
 
-use super::{ElasticsearchCommon, ElasticsearchConfig};
+use super::{ElasticsearchCommon, ElasticsearchConfig, RejectionReport};
 use crate::{
     event::{EventFinalizers, EventStatus, Finalizable},
     http::HttpClient,
@@ -72,12 +72,14 @@ pub struct ElasticsearchService {
         BoxFuture<'static, Result<http::Request<Bytes>, crate::Error>>,
         ElasticsearchRequest,
     >,
+    rej_rpt: RejectionReport,
 }
 
 impl ElasticsearchService {
     pub fn new(
         http_client: HttpClient<Body>,
         http_request_builder: HttpRequestBuilder,
+        rej_rpt: RejectionReport,
     ) -> ElasticsearchService {
         let http_request_builder = Arc::new(http_request_builder);
         let batch_service = HttpBatchService::new(http_client, move |req| {
@@ -86,7 +88,7 @@ impl ElasticsearchService {
                 Box::pin(async move { request_builder.build_request(req).await });
             future
         });
-        ElasticsearchService { batch_service }
+        ElasticsearchService { batch_service, rej_rpt }
     }
 }
 
@@ -187,13 +189,19 @@ impl Service<ElasticsearchRequest> for ElasticsearchService {
     // Emission of internal events for errors and dropped events is handled upstream by the caller.
     fn call(&mut self, mut req: ElasticsearchRequest) -> Self::Future {
         let mut http_service = self.batch_service.clone();
+        let rej_rpt = self.rej_rpt.clone();
+        let req_for_rpt = if self.rej_rpt.needs_request() {
+            Some(req.clone())
+        } else {
+            None
+        };
         Box::pin(async move {
             http_service.ready().await?;
             let events_byte_size =
                 std::mem::take(req.metadata_mut()).into_events_estimated_json_encoded_byte_size();
             let http_response = http_service.call(req).await?;
 
-            let event_status = get_event_status(&http_response);
+            let event_status = get_event_status(&http_response, req_for_rpt, rej_rpt);
             Ok(ElasticsearchResponse {
                 event_status,
                 http_response,
@@ -206,31 +214,62 @@ impl Service<ElasticsearchRequest> for ElasticsearchService {
 // This event is not part of the event framework but is kept because some users were depending on it
 // to identify the number of errors returned by Elasticsearch. It can be dropped when we have better
 // telemetry. Ref: #15886
-fn emit_bad_response_error(response: &Response<Bytes>) {
+fn emit_bad_response_error(
+    response: &Response<Bytes>,
+    request: Option<ElasticsearchRequest>,
+    rej_rpt: RejectionReport,
+) {
     let error_code = format!("http_response_{}", response.status().as_u16());
 
-    error!(
-        message =  "Response contained errors.",
-        error_code = error_code,
-        response = ?response,
-    );
+    match (rej_rpt, request) {
+        (RejectionReport::RequestResponse, Some(req)) => {
+            error!(
+                message = "Request contained errors.",
+                error_code = error_code,
+                response = ?response,
+                request = ?req.payload,
+            );
+        }
+        (RejectionReport::Drop, _) => {
+            error!(
+                message = "Response contained errors.",
+                error_code = error_code,
+            );
+        }
+        _ => {
+            error!(
+                message = "Response contained errors.",
+                error_code = error_code,
+                response = ?response,
+            );
+        }
+    };
 }
 
-fn get_event_status(response: &Response<Bytes>) -> EventStatus {
+fn get_event_status(
+    response: &Response<Bytes>,
+    request: Option<ElasticsearchRequest>,
+    rej_rpt: RejectionReport,
+) -> EventStatus {
     let status = response.status();
     if status.is_success() {
         let body = String::from_utf8_lossy(response.body());
         if body.contains("\"errors\":true") {
-            emit_bad_response_error(response);
+            emit_bad_response_error(response, request, rej_rpt);
             EventStatus::Rejected
         } else {
             EventStatus::Delivered
         }
     } else if status.is_server_error() {
-        emit_bad_response_error(response);
+        let rej_rpt = if rej_rpt == RejectionReport::RequestResponse {
+            RejectionReport::Response
+        } else {
+            rej_rpt
+        };
+        emit_bad_response_error(response, None, rej_rpt);
         EventStatus::Errored
     } else {
-        emit_bad_response_error(response);
+        emit_bad_response_error(response, request, rej_rpt);
         EventStatus::Rejected
     }
 }

@@ -77,6 +77,38 @@ impl Default for ElasticsearchMode {
     }
 }
 
+/// Elasticsearch rejection reporting mode.
+#[configurable_component]
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub enum RejectionReport {
+    /// Do not print rejection response
+    #[serde(alias = "normal")]
+    Drop,
+
+    /// Report entire response, the response may be large and likely not too useful
+    Response,
+
+    /// Report entire request and response may be huge, with smaller batch-sizes this
+    /// can be useful to debug issues
+    RequestResponse,
+}
+
+impl Default for RejectionReport {
+    fn default() -> Self {
+        Self::Drop
+    }
+}
+
+impl RejectionReport {
+    pub fn needs_request(&self) -> bool {
+        match self {
+            Self::RequestResponse => true,
+            _ => false,
+        }
+    }
+}
+
 /// Bulk API actions.
 #[configurable_component]
 #[derive(Clone, Copy, Debug, Derivative, Eq, Hash, PartialEq)]
