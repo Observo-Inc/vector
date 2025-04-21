@@ -289,7 +289,7 @@ fn emit_bad_response_error(
                 request = %String::from_utf8_lossy(&req_data),
             );
         }
-        (RejectionReport::Drop, _) => {
+        (RejectionReport::Stats, _) => {
             error!(
                 category = ES_REJ_RPT,
                 message = err_summary.msg,

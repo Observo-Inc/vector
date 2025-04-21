@@ -675,16 +675,16 @@ mod tests {
         "#,
         )
         .unwrap();
-        assert!(matches!(default.rejection_report, RejectionReport::Drop));
+        assert!(matches!(default.rejection_report, RejectionReport::Stats));
 
         let drop = toml::from_str::<ElasticsearchConfig>(
             r#"
             endpoints = [""]
-            rejection_report = "drop"
+            rejection_report = "stats"
         "#,
         )
         .unwrap();
-        assert!(matches!(drop.rejection_report, RejectionReport::Drop));
+        assert!(matches!(drop.rejection_report, RejectionReport::Stats));
 
         let response = toml::from_str::<ElasticsearchConfig>(
             r#"

@@ -82,9 +82,9 @@ impl Default for ElasticsearchMode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub enum RejectionReport {
-    /// Do not print rejection response
+    /// Do not print rejection response, only increment stats
     #[serde(alias = "normal")]
-    Drop,
+    Stats,
 
     /// Report entire response, the response may be large and likely not too useful
     Response,
@@ -96,7 +96,7 @@ pub enum RejectionReport {
 
 impl Default for RejectionReport {
     fn default() -> Self {
-        Self::Drop
+        Self::Stats
     }
 }
 
