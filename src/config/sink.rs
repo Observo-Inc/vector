@@ -249,6 +249,7 @@ pub struct SinkContext {
     /// Extra context data provided by the running app and shared across all components. This can be
     /// used to pass shared settings or other data from outside the components.
     pub extra_context: ExtraContext,
+    pub key: ComponentKey,
 }
 
 impl Default for SinkContext {
@@ -261,6 +262,7 @@ impl Default for SinkContext {
             app_name: crate::get_app_name().to_string(),
             app_name_slug: crate::get_slugified_app_name(),
             extra_context: Default::default(),
+            key: ComponentKey::from("test_sink"),
         }
     }
 }

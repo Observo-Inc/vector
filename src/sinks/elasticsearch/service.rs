@@ -3,6 +3,7 @@ use std::{
     task::{Context, Poll},
 };
 
+use std::format;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use http::{Response, Uri};
@@ -10,6 +11,7 @@ use hyper::{service::Service, Body, Request};
 use tower::ServiceExt;
 use vector_lib::stream::DriverResponse;
 use vector_lib::ByteSizeOf;
+use metrics::Counter;
 use vector_lib::{
     json_size::JsonSize,
     request_metadata::{GroupedCountByteSize, MetaDescriptive, RequestMetadata},
@@ -64,6 +66,12 @@ impl MetaDescriptive for ElasticsearchRequest {
 }
 
 #[derive(Clone)]
+pub struct Telemetry {
+    pub rejected: Counter,
+    pub indexed: Counter,
+}
+
+#[derive(Clone)]
 pub struct ElasticsearchService {
     // TODO: `HttpBatchService` has been deprecated for direct use in sinks.
     //       This sink should undergo a refactor to utilize the `HttpService`
@@ -74,6 +82,7 @@ pub struct ElasticsearchService {
     >,
     rej_rpt: RejectionReport,
     compression: Compression,
+    telemetry: Telemetry,
 }
 
 impl ElasticsearchService {
@@ -82,6 +91,7 @@ impl ElasticsearchService {
         http_request_builder: HttpRequestBuilder,
         rej_rpt: RejectionReport,
         compression: Compression,
+        telemetry: Telemetry,
     ) -> ElasticsearchService {
         let http_request_builder = Arc::new(http_request_builder);
         let batch_service = HttpBatchService::new(http_client, move |req| {
@@ -90,7 +100,7 @@ impl ElasticsearchService {
                 Box::pin(async move { request_builder.build_request(req).await });
             future
         });
-        ElasticsearchService { batch_service, rej_rpt, compression }
+        ElasticsearchService { batch_service, rej_rpt, compression, telemetry }
     }
 }
 
@@ -197,19 +207,56 @@ impl Service<ElasticsearchRequest> for ElasticsearchService {
         } else {
             None
         };
+        let telemetry = self.telemetry.clone();
         Box::pin(async move {
             http_service.ready().await?;
             let events_byte_size =
                 std::mem::take(req.metadata_mut()).into_events_estimated_json_encoded_byte_size();
             let http_response = http_service.call(req).await?;
 
-            let event_status = get_event_status(&http_response, req_for_rpt, rej_rpt);
+            let event_status = get_event_status(&http_response, req_for_rpt, rej_rpt, telemetry);
             Ok(ElasticsearchResponse {
                 event_status,
                 http_response,
                 events_byte_size,
             })
         })
+    }
+}
+
+const ES_REJ_RPT: &str = "es_rej_rpt";
+
+fn response_frag(key: &str, val_prefix: &str) -> String {
+    format!("\"{key}\":{val_prefix}")
+}
+
+#[derive(Debug, PartialEq)]
+struct ErrSummary {
+    error_code: String,
+    msg: String,
+    indexed: u64,
+    rejected: u64,
+}
+
+fn err_summary(response: &Response<Bytes>) -> ErrSummary {
+    let body = String::from_utf8_lossy(response.body());
+    let i =
+        body
+            .match_indices(response_frag("status", "201").as_str())
+            .count()
+            .try_into()
+            .unwrap();
+    let r =
+        body
+            .match_indices(response_frag("status", "400").as_str())
+            .count()
+            .try_into()
+            .unwrap();
+    ErrSummary {
+        error_code: format!("http_response_{}", response.status().as_u16()),
+        msg: format!("Request contained errors (indexed: {i}, rejected: {r})."),
+        indexed: i,
+        rejected: r
     }
 }
 
@@ -220,8 +267,11 @@ fn emit_bad_response_error(
     response: &Response<Bytes>,
     request: Option<(ElasticsearchRequest, Compression)>,
     rej_rpt: RejectionReport,
+    telemetry: Telemetry,
 ) {
-    let error_code = format!("http_response_{}", response.status().as_u16());
+    let err_summary = err_summary(response);
+    telemetry.indexed.increment(err_summary.indexed);
+    telemetry.rejected.increment(err_summary.rejected);
 
     match (rej_rpt, request) {
         (RejectionReport::RequestResponse, Some((req, comp))) => {
@@ -232,22 +282,25 @@ fn emit_bad_response_error(
             };
 
             error!(
-                message = "Request contained errors.",
-                error_code = error_code,
+                category = ES_REJ_RPT,
+                message = err_summary.msg,
+                error_code = err_summary.error_code,
                 response = ?response,
                 request = %String::from_utf8_lossy(&req_data),
             );
         }
         (RejectionReport::Drop, _) => {
             error!(
-                message = "Response contained errors.",
-                error_code = error_code,
+                category = ES_REJ_RPT,
+                message = err_summary.msg,
+                error_code = err_summary.error_code,
             );
         }
         _ => {
             error!(
-                message = "Response contained errors.",
-                error_code = error_code,
+                category = ES_REJ_RPT,
+                message = err_summary.msg,
+                error_code = err_summary.error_code,
                 response = ?response,
             );
         }
@@ -258,12 +311,13 @@ fn get_event_status(
     response: &Response<Bytes>,
     request: Option<(ElasticsearchRequest, Compression)>,
     rej_rpt: RejectionReport,
+    telemetry: Telemetry,
 ) -> EventStatus {
     let status = response.status();
     if status.is_success() {
         let body = String::from_utf8_lossy(response.body());
-        if body.contains("\"errors\":true") {
-            emit_bad_response_error(response, request, rej_rpt);
+        if body.contains(response_frag("errors", "true").as_str()) {
+            emit_bad_response_error(response, request, rej_rpt, telemetry);
             EventStatus::Rejected
         } else {
             EventStatus::Delivered
@@ -274,10 +328,46 @@ fn get_event_status(
         } else {
             rej_rpt
         };
-        emit_bad_response_error(response, None, rej_rpt);
+        emit_bad_response_error(response, None, rej_rpt, telemetry);
         EventStatus::Errored
     } else {
-        emit_bad_response_error(response, request, rej_rpt);
+        emit_bad_response_error(response, request, rej_rpt, telemetry);
         EventStatus::Rejected
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use std::{fs::File, io::Read};
+    use super::*;
+
+    fn contents(path: &str) -> Bytes {
+        let mut file = File::open(path).expect("Unable to open file");
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents).expect("Unable to read file");
+        Bytes::from(contents)
+    }
+
+    #[test]
+    fn test_error_summary() {
+        let res = Response::new(
+            contents("tests/data/elasticsearch_bulk.response.body.json"));
+
+        // <json file> | jq -c '.items | map(.index.status | "\(.)") | histo'
+        // {"201":259,"400":5}
+
+        let body = String::from_utf8_lossy(res.body());
+
+        // assert we detect error
+        assert!(body.contains(response_frag("errors", "true").as_str()));
+
+        assert_eq!(
+            err_summary(&res),
+            ErrSummary {
+                error_code: "http_response_200".into(),
+                msg: "Request contained errors (indexed: 259, rejected: 5).".to_string(),
+                indexed: 259,
+                rejected: 5})
     }
 }

@@ -16,7 +16,7 @@ use crate::{
         elasticsearch::{
             health::ElasticsearchHealthLogic,
             retry::ElasticsearchRetryLogic,
-            service::{ElasticsearchService, HttpRequestBuilder},
+            service::{ElasticsearchService, HttpRequestBuilder, Telemetry},
             sink::ElasticsearchSink,
             ElasticsearchApiVersion, ElasticsearchAuthConfig, ElasticsearchCommon,
             ElasticsearchCommonMode, ElasticsearchMode, RejectionReport, VersionType,
@@ -31,6 +31,9 @@ use crate::{
     tls::TlsConfig,
     transforms::metric_to_log::MetricToLogConfig,
 };
+
+use metrics::counter;
+
 use vector_lib::lookup::event_path;
 use vector_lib::lookup::lookup_v2::ConfigValuePath;
 use vector_lib::schema::Requirement;
@@ -558,12 +561,29 @@ impl SinkConfig for ElasticsearchConfig {
             .map(|common| {
                 let endpoint = common.base_url.clone();
 
+                let comp_id = cx.key.id().to_string();
+                let endpt_str = endpoint.to_string();
+
+                let telemetry = Telemetry{
+                    rejected: counter!(
+                        "es_rejected",
+                        "component_id" => comp_id.clone(),
+                        "end_pt" => endpt_str.clone(),
+                    ),
+                    indexed: counter!(
+                        "es_indexed",
+                        "component_id" => comp_id,
+                        "end_pt" => endpt_str,
+                    ),
+                };
+
                 let http_request_builder = HttpRequestBuilder::new(&common, self);
                 let service = ElasticsearchService::new(
                     client.clone(),
                     http_request_builder,
                     self.rejection_report.clone(),
-                    self.compression.clone());
+                    self.compression.clone(),
+                    telemetry);
 
                 (endpoint, service)
             })
