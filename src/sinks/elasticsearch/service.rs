@@ -67,6 +67,12 @@ impl MetaDescriptive for ElasticsearchRequest {
 
 #[derive(Clone)]
 pub struct Telemetry {
+    // #OBSERVO_STYLE_TELEMETRY# (diverges from upstream convention)
+    // The usual way (using emit!(...)) to emit metrics has high overhead. It dereferences global-state and requires
+    // more than 8 method calls to pull the labels out for every `emit!` invocation.
+    // We can't fix it for all of vector (for fear of merge-conflicts during upgrade) but we use a more efficient
+    // approach here.
+    // Config::build does that hard-work once and then we hold on to the counter and continue incrementing it.
     pub rejected: Counter,
     pub indexed: Counter,
 }

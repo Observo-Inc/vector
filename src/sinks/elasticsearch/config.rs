@@ -561,18 +561,15 @@ impl SinkConfig for ElasticsearchConfig {
             .map(|common| {
                 let endpoint = common.base_url.clone();
 
-                let comp_id = cx.key.id().to_string();
                 let endpt_str = endpoint.to_string();
 
                 let telemetry = Telemetry{
                     rejected: counter!(
                         "es_rejected",
-                        "component_id" => comp_id.clone(),
                         "end_pt" => endpt_str.clone(),
                     ),
                     indexed: counter!(
                         "es_indexed",
-                        "component_id" => comp_id,
                         "end_pt" => endpt_str,
                     ),
                 };
