@@ -2,6 +2,7 @@ use core::panic;
 use std::{io, sync::Arc};
 
 use bytes::{BufMut, BytesMut};
+use parquet::basic::{Compression, ZstdLevel};
 use parquet::{
     basic::{LogicalType, Repetition, Type as PhysicalType},
     column::writer::{ColumnWriter::*, ColumnWriterImpl},
@@ -13,7 +14,6 @@ use parquet::{
         types::{BasicTypeInfo, ColumnDescriptor, Type, TypePtr},
     },
 };
-use parquet::basic::{Compression, ZstdLevel};
 use serde::{Deserialize, Serialize};
 use snafu::*;
 use tokio_util::codec::Encoder;
@@ -28,6 +28,7 @@ use vector_core::{
 use crate::encoding::BuildError;
 
 const OBSERVO_RECORD: &str = "observo_record";
+const ACTUAL_VALUE_SIZE_LIMIT: usize = 128;
 
 fn get_observo_record_in_schema(parquet_serializer: &ParquetSerializerOptions) -> String {
     if !parquet_serializer.record_complete_event.unwrap_or(false) {
@@ -48,15 +49,17 @@ pub enum ParquetSerializerError {
         field: String,
     },
     #[snafu(display(
-        r#"Event contains a value with an invalid type. field = "{}" type = "{}" expected type = "{}""#,
+        r#"Event contains a value with an invalid type. field = "{}" type = "{}" expected type = "{}". Sample value = "{}""#,
         field,
         actual_type,
-        expected_type
+        expected_type,
+        actual_value,
     ))]
     InvalidValueType {
         field: String,
         actual_type: String,
         expected_type: String,
+        actual_value: String,
     },
     #[snafu(display("Failed to write. error: {}", error))]
     ParquetError {
@@ -77,6 +80,7 @@ impl ParquetSerializerError {
             field: desc.name().to_string(),
             actual_type: value.kind_str().to_string(),
             expected_type: expected.to_string(),
+            actual_value: value.to_string_lossy().chars().take(ACTUAL_VALUE_SIZE_LIMIT).collect(),
         }
     }
 }
@@ -482,6 +486,7 @@ impl<'a, T, F: Fn(&Value) -> Result<T, ParquetSerializerError>> Column<'a, T, F>
                         field: self.path(level),
                         actual_type: value.kind_str().to_string(),
                         expected_type: "object".to_string(),
+                        actual_value: value.to_string_lossy().chars().take(ACTUAL_VALUE_SIZE_LIMIT).collect(),
                     });
                 }
             };
@@ -540,6 +545,7 @@ impl<'a, T, F: Fn(&Value) -> Result<T, ParquetSerializerError>> Column<'a, T, F>
                                 field: self.path(level),
                                 actual_type: value.kind_str().to_string(),
                                 expected_type: "array".to_string(),
+                                actual_value: value.to_string_lossy().chars().take(ACTUAL_VALUE_SIZE_LIMIT).collect(),
                             });
                         }
                     }
@@ -585,6 +591,7 @@ impl<'a, T, F: Fn(&Value) -> Result<T, ParquetSerializerError>> Column<'a, T, F>
                                 field: self.path(level),
                                 actual_type: value.kind_str().to_string(),
                                 expected_type: "object".to_string(),
+                                actual_value: value.to_string_lossy().chars().take(ACTUAL_VALUE_SIZE_LIMIT).collect(),
                             });
                         }
                     }
@@ -731,6 +738,8 @@ mod tests {
         file::serialized_reader::SerializedFileReader,
         schema::parser::parse_message_type,
     };
+    use rand::distributions::Alphanumeric;
+    use rand::Rng;
     use similar_asserts::assert_eq;
     use std::panic;
     use std::{collections::HashSet, sync::Arc};
@@ -1571,6 +1580,87 @@ mod tests {
                 _ => panic!("Unexpected column"),
             },
         );
+    }
+
+    #[test]
+    fn test_bad_map() {
+        let message_type = r#"
+            message test {
+                optional group answers (MAP){
+                    repeated group key_value {
+                        required binary key (UTF8);
+                        optional boolean value;
+                    }
+                }
+            }
+            "#;
+
+        let events = vec![
+            log_event! {},
+            log_event! {"answers" => Value::Null},
+            log_event! {"answers" => btreemap!{}},
+            log_event! {"answers" => btreemap!{
+                "test1" => Value::Null,
+                "test2" => Value::Boolean(true),
+                "test3" => Value::Integer(42),
+            }},
+        ];
+
+        let schema = Arc::new(parse_message_type(message_type).unwrap());
+        let mut encoder = ParquetSerializer::new(schema);
+
+        let mut buffer = BytesMut::new();
+        match encoder.encode(events, &mut buffer) {
+            Ok(_) => { assert!(false, "Should have failed as value is not boolean."); },
+            Err(err) => {
+                assert_eq!(err.to_string(), "Event contains a value with an invalid type. field = \"value\" type = \"integer\" expected type = \"boolean\". Sample value = \"42\"");
+            }
+        };
+    }
+
+    #[test]
+    fn test_bad_map_trim_msg() {
+        let message_type = r#"
+            message test {
+                optional group answers (MAP){
+                    repeated group key_value {
+                        required binary key (UTF8);
+                        optional boolean value;
+                    }
+                }
+            }
+            "#;
+
+        let rand_str: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(152)
+            .map(char::from)
+            .collect();
+        let log_str: String = rand_str
+            .chars()
+            .take(128)
+            .collect();
+        let events = vec![
+            log_event! {},
+            log_event! {"answers" => Value::Null},
+            log_event! {"answers" => btreemap!{}},
+            log_event! {"answers" => btreemap!{
+                "test1" => Value::Null,
+                "test2" => Value::Boolean(true),
+                "test3" => Value::Bytes(rand_str.into()),
+            }},
+        ];
+
+        let schema = Arc::new(parse_message_type(message_type).unwrap());
+        let mut encoder = ParquetSerializer::new(schema);
+
+        let mut buffer = BytesMut::new();
+        match encoder.encode(events, &mut buffer) {
+            Ok(_) => { assert!(false, "Should have failed as value is not boolean."); },
+            Err(err) => {
+                assert_eq!(err.to_string(), format!("Event contains a value with an invalid type. field = \"value\" type = \"string\" expected type = \"boolean\". Sample value = \"{log_str}\""));
+            }
+        };
     }
 
     #[test]
