@@ -266,9 +266,6 @@ fn err_summary(response: &Response<Bytes>) -> ErrSummary {
     }
 }
 
-// This event is not part of the event framework but is kept because some users were depending on it
-// to identify the number of errors returned by Elasticsearch. It can be dropped when we have better
-// telemetry. Ref: #15886
 fn emit_bad_response_error(
     response: &Response<Bytes>,
     request: Option<(ElasticsearchRequest, Compression)>,
