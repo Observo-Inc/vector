@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use vector_lib::config::LegacyKey;
 
+use crate::transforms::sample::sample_provider::{ModuloSampleProvider, RandomSampleProvider, SampleProvider, SampleProviders};
 use crate::{
     conditions::Condition,
     event::Event,
@@ -20,7 +21,8 @@ pub struct Sample {
     group_by: Option<Template>,
     exclude: Option<Condition>,
     sample_rate_key: OptionalValuePath,
-    counter: HashMap<Option<String>, u64>,
+    counter: HashMap<Option<String>, SampleProviders>,
+    sample_random: bool,
 }
 
 impl Sample {
@@ -34,6 +36,7 @@ impl Sample {
         group_by: Option<Template>,
         exclude: Option<Condition>,
         sample_rate_key: OptionalValuePath,
+        sample_random: Option<bool>,
     ) -> Self {
         Self {
             name,
@@ -43,6 +46,7 @@ impl Sample {
             exclude,
             sample_rate_key,
             counter: HashMap::new(),
+            sample_random: sample_random.unwrap_or(false),
         }
     }
 }
@@ -104,19 +108,20 @@ impl FunctionTransform for Sample {
             Event::Metric(_) => panic!("component can never receive metric events"),
         });
 
-        let counter_value: u64 = *self.counter.entry(group_by_key.clone()).or_default();
+        let counter_value = self.counter.entry(group_by_key.clone()).or_insert_with(|| {
+            if self.sample_random {
+                return SampleProviders::Random(RandomSampleProvider::new(self.rate));
+            }
+            SampleProviders::Default(ModuloSampleProvider::new(self.rate))
+        });
 
         let num = if let Some(value) = value {
-            seahash::hash(value.as_bytes())
+            seahash::hash(value.as_bytes()) % self.rate
         } else {
-            counter_value
+            counter_value.next_u64()
         };
 
-        // reset counter for particular key, or default key if group_by option isn't provided
-        let increment: u64 = (counter_value + 1) % self.rate;
-        self.counter.insert(group_by_key.clone(), increment);
-
-        if num % self.rate == 0 {
+        if num == 0 {
             if let Some(path) = &self.sample_rate_key.path {
                 match event {
                     Event::Log(ref mut event) => {

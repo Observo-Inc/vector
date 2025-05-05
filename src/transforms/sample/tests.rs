@@ -1,6 +1,9 @@
+use crate::config::TransformConfig;
 use crate::template::Template;
 use crate::test_util::components::assert_transform_compliance;
 use crate::transforms::sample::config::SampleConfig;
+use crate::transforms::sample::sample_provider;
+use crate::transforms::sample::sample_provider::SampleProvider;
 use crate::transforms::test::create_topology;
 use crate::transforms::{FunctionTransform, OutputBuffer};
 use crate::{
@@ -13,6 +16,7 @@ use crate::{
     transforms::test::transform_one,
 };
 use approx::assert_relative_eq;
+use std::cmp::{max, min};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use vector_lib::lookup::lookup_v2::OptionalValuePath;
@@ -27,7 +31,9 @@ async fn emits_internal_events() {
             group_by: None,
             exclude: None,
             sample_rate_key: default_sample_rate_key(),
+            sample_random: None,
         };
+        assert_eq!(config.enable_concurrency(), false);
         let (tx, rx) = mpsc::channel(1);
         let (topology, mut out) = create_topology(ReceiverStream::new(rx), config).await;
 
@@ -58,6 +64,7 @@ fn hash_samples_at_roughly_the_configured_rate() {
             "na",
         )),
         default_sample_rate_key(),
+        None,
     );
     let total_passed = events
         .into_iter()
@@ -82,6 +89,7 @@ fn hash_samples_at_roughly_the_configured_rate() {
             "na",
         )),
         default_sample_rate_key(),
+        None,
     );
     let total_passed = events
         .into_iter()
@@ -109,6 +117,7 @@ fn hash_consistently_samples_the_same_events() {
             "na",
         )),
         default_sample_rate_key(),
+        None,
     );
 
     let first_run = events
@@ -146,6 +155,7 @@ fn always_passes_events_matching_pass_list() {
                 "important",
             )),
             default_sample_rate_key(),
+            None,
         );
         let iterations = 0..1000;
         let total_passed = iterations
@@ -173,6 +183,7 @@ fn handles_group_by() {
                 "na",
             )),
             default_sample_rate_key(),
+            None,
         );
         let iterations = 0..1000;
         let total_passed = iterations
@@ -197,6 +208,7 @@ fn handles_key_field() {
             None,
             Some(condition_contains("other_field", "foo")),
             default_sample_rate_key(),
+            None,
         );
         let iterations = 0..1000;
         let total_passed = iterations
@@ -220,6 +232,7 @@ fn sampler_adds_sampling_rate_to_event() {
             None,
             Some(condition_contains(&message_key, "na")),
             default_sample_rate_key(),
+            None,
         );
         let passing = events
             .into_iter()
@@ -236,6 +249,7 @@ fn sampler_adds_sampling_rate_to_event() {
             None,
             Some(condition_contains(&message_key, "na")),
             OptionalValuePath::from(owned_value_path!("custom_sample_rate")),
+            None,
         );
         let passing = events
             .into_iter()
@@ -253,6 +267,7 @@ fn sampler_adds_sampling_rate_to_event() {
             None,
             Some(condition_contains(&message_key, "na")),
             OptionalValuePath::from(owned_value_path!("")),
+            None,
         );
         let passing = events
             .into_iter()
@@ -269,6 +284,7 @@ fn sampler_adds_sampling_rate_to_event() {
             None,
             Some(condition_contains(&message_key, "na")),
             default_sample_rate_key(),
+            None,
         );
         let event = Event::Log(LogEvent::from("nananana"));
         let passing = transform_one(&mut sampler, event).unwrap();
@@ -288,6 +304,7 @@ fn handles_trace_event() {
         None,
         None,
         default_sample_rate_key(),
+        None,
     );
 
     let iterations = 0..2;
@@ -295,6 +312,167 @@ fn handles_trace_event() {
         .filter_map(|_| transform_one(&mut sampler, trace.clone()))
         .count();
     assert_eq!(total_passed, 1);
+}
+
+#[test]
+fn test_sample_provider() {
+    let mut provider = sample_provider::ModuloSampleProvider::new(10);
+    let mut min_val: u64 = 100;
+    let mut max_val: u64 = 0;
+    for i in 0..100 {
+        let sample_val = provider.next_u64();
+        assert_eq!(sample_val, i % 10);
+        min_val = min(min_val, sample_val);
+        max_val = max(max_val, sample_val);
+    }
+    assert_eq!(min_val, 0);
+    assert_eq!(max_val, 9);
+
+    min_val = 100;
+    max_val = 0;
+    provider = sample_provider::ModuloSampleProvider::new(17);
+    for i in 0..100 {
+        let sample_val = provider.next_u64();
+        assert_eq!(sample_val, i % 17);
+        min_val = min(min_val, sample_val);
+        max_val = max(max_val, sample_val);
+    }
+    assert_eq!(min_val, 0);
+    assert_eq!(max_val, 16);
+}
+#[test]
+fn test_random_sample_provider() {
+    let mut provider = sample_provider::RandomSampleProvider::new(7);
+    let limit = 10000;
+    let mut approx_sample_count = 0;
+    for _ in 0..limit {
+        let rand = provider.next_u64();
+        if rand == 0 {
+            approx_sample_count += 1;
+        }
+        assert!(rand < 7);
+    }
+    let ideal = 1.0f64 / 7.0f64;
+    let actual = approx_sample_count as f64 / limit as f64;
+    assert_relative_eq!(ideal, actual, epsilon = ideal * 0.05);
+}
+
+#[test]
+fn hash_samples_at_roughly_the_configured_rate_with_random_true() {
+    let num_events = 10000;
+
+    let events = random_events(num_events);
+    let mut sampler = Sample::new(
+        "sample".to_string(),
+        2,
+        log_schema().message_key().map(ToString::to_string),
+        None,
+        Some(condition_contains(
+            log_schema().message_key().unwrap().to_string().as_str(),
+            "na",
+        )),
+        default_sample_rate_key(),
+        Some(true),
+    );
+    let total_passed = events
+        .into_iter()
+        .filter_map(|event| {
+            let mut buf = OutputBuffer::with_capacity(1);
+            sampler.transform(&mut buf, event);
+            buf.into_events().next()
+        })
+        .count();
+    let ideal = 1.0f64 / 2.0f64;
+    let actual = total_passed as f64 / num_events as f64;
+    assert_relative_eq!(ideal, actual, epsilon = ideal * 0.5);
+
+    let events = random_events(num_events);
+    let mut sampler = Sample::new(
+        "sample".to_string(),
+        25,
+        log_schema().message_key().map(ToString::to_string),
+        None,
+        Some(condition_contains(
+            log_schema().message_key().unwrap().to_string().as_str(),
+            "na",
+        )),
+        default_sample_rate_key(),
+        None,
+    );
+    let total_passed = events
+        .into_iter()
+        .filter_map(|event| {
+            let mut buf = OutputBuffer::with_capacity(1);
+            sampler.transform(&mut buf, event);
+            buf.into_events().next()
+        })
+        .count();
+    let ideal = 1.0f64 / 25.0f64;
+    let actual = total_passed as f64 / num_events as f64;
+    assert_relative_eq!(ideal, actual, epsilon = ideal * 0.5);
+}
+
+#[test]
+fn hash_consistently_samples_the_same_events_with_random_true() {
+    let events = random_events(1000);
+    let mut sampler = Sample::new(
+        "sample".to_string(),
+        2,
+        log_schema().message_key().map(ToString::to_string),
+        None,
+        Some(condition_contains(
+            log_schema().message_key().unwrap().to_string().as_str(),
+            "na",
+        )),
+        default_sample_rate_key(),
+        Some(true),
+    );
+
+    let first_run = events
+        .clone()
+        .into_iter()
+        .filter_map(|event| {
+            let mut buf = OutputBuffer::with_capacity(1);
+            sampler.transform(&mut buf, event);
+            buf.into_events().next()
+        })
+        .collect::<Vec<_>>();
+    let second_run = events
+        .into_iter()
+        .filter_map(|event| {
+            let mut buf = OutputBuffer::with_capacity(1);
+            sampler.transform(&mut buf, event);
+            buf.into_events().next()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(first_run, second_run);
+}
+
+#[test]
+fn always_passes_events_matching_pass_list_with_random_true() {
+    for key_field in &[None, log_schema().message_key().map(ToString::to_string)] {
+        let event = Event::Log(LogEvent::from("i am important"));
+        let mut sampler = Sample::new(
+            "sample".to_string(),
+            0,
+            key_field.clone(),
+            None,
+            Some(condition_contains(
+                log_schema().message_key().unwrap().to_string().as_str(),
+                "important",
+            )),
+            default_sample_rate_key(),
+            Some(true),
+        );
+        let iterations = 0..1000;
+        let total_passed = iterations
+            .filter_map(|_| {
+                transform_one(&mut sampler, event.clone()).map(|result| assert_eq!(result, event))
+            })
+            .count();
+        assert_eq!(total_passed, 1000);
+    }
 }
 
 fn condition_contains(key: &str, needle: &str) -> Condition {

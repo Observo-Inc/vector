@@ -62,6 +62,9 @@ pub struct SampleConfig {
 
     /// A logical condition used to exclude events from sampling.
     pub exclude: Option<AnyCondition>,
+
+    /// When set, the events are sampled using random order.
+    pub sample_random: Option<bool>,
 }
 
 impl GenerateConfig for SampleConfig {
@@ -72,6 +75,7 @@ impl GenerateConfig for SampleConfig {
             group_by: None,
             exclude: None::<AnyCondition>,
             sample_rate_key: default_sample_rate_key(),
+            sample_random: None,
         })
         .unwrap()
     }
@@ -91,6 +95,7 @@ impl TransformConfig for SampleConfig {
                 .map(|condition| condition.build(&context.enrichment_tables))
                 .transpose()?,
             self.sample_rate_key.clone(),
+            self.sample_random,
         )))
     }
 

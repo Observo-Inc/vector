@@ -5,3 +5,4 @@ pub mod transform;
 
 #[cfg(all(test, feature = "transforms-sample"))]
 mod tests;
+mod sample_provider;
