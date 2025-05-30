@@ -100,7 +100,7 @@ impl TransformConfig for SampleConfig {
     }
 
     fn input(&self) -> Input {
-        Input::new(DataType::Log | DataType::Trace)
+        Input::all()
     }
 
     fn outputs(

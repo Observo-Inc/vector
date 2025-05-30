@@ -74,14 +74,19 @@ impl FunctionTransform for Sample {
                 Event::Log(event) => event
                     .parse_path_and_get_value(key_field.as_str())
                     .ok()
-                    .flatten(),
+                    .flatten()
+                    .map(|v| v.to_string_lossy().to_string()),
                 Event::Trace(event) => event
                     .parse_path_and_get_value(key_field.as_str())
                     .ok()
-                    .flatten(),
-                Event::Metric(_) => panic!("component can never receive metric events"),
+                    .flatten()
+                    .map(|v| v.to_string_lossy().to_string()),
+                Event::Metric(event) => {
+                    // warn!(message = "Metric doesn't support key_field sampling", internal_log_rate_limit = true);
+                    event.tag_value(key_field.as_str()).map(|v| v)
+                },
             })
-            .map(|v| v.to_string_lossy());
+            ;
 
         // Fetch actual field value if group_by option is set.
         let group_by_key = self.group_by.as_ref().and_then(|group_by| match &event {
@@ -105,7 +110,16 @@ impl FunctionTransform for Sample {
                     })
                 })
                 .ok(),
-            Event::Metric(_) => panic!("component can never receive metric events"),
+            Event::Metric(event) => group_by
+                .render_string(event)
+                .map_err(|error| {
+                    emit!(TemplateRenderingError {
+                        error,
+                        field: Some("group_by"),
+                        drop_event: false,
+                    })
+                })
+                .ok(),
         });
 
         let counter_value = self.counter.entry(group_by_key.clone()).or_insert_with(|| {
@@ -136,7 +150,9 @@ impl FunctionTransform for Sample {
                     Event::Trace(ref mut event) => {
                         event.insert(&OwnedTargetPath::event(path.clone()), self.rate.to_string());
                     }
-                    Event::Metric(_) => panic!("component can never receive metric events"),
+                    Event::Metric(ref mut event) => {
+                        event.replace_tag(path.to_string(), self.rate.to_string());
+                    }
                 };
             }
             output.push(event);
