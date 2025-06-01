@@ -12,9 +12,9 @@ pub use format::{
     CefSerializerConfig, CsvSerializer, CsvSerializerConfig, GelfSerializer, GelfSerializerConfig,
     JsonSerializer, JsonSerializerConfig, JsonSerializerOptions, LogfmtSerializer,
     LogfmtSerializerConfig, NativeJsonSerializer, NativeJsonSerializerConfig, NativeSerializer,
-    NativeSerializerConfig, ProtobufSerializer, ProtobufSerializerConfig,
-    ProtobufSerializerOptions, RawMessageSerializer, RawMessageSerializerConfig, TextSerializer,
-    TextSerializerConfig,
+    NativeSerializerConfig, ParquetSerializer, ParquetSerializerConfig, ParquetSerializerOptions,
+    ProtobufSerializer, ProtobufSerializerConfig, ProtobufSerializerOptions,
+    RawMessageSerializer, RawMessageSerializerConfig, TextSerializer, TextSerializerConfig,
 };
 pub use framing::{
     BoxedFramer, BoxedFramingError, BytesEncoder, BytesEncoderConfig, CharacterDelimitedEncoder,
@@ -256,6 +256,14 @@ pub enum SerializerConfig {
     /// could lead to the encoding emitting empty strings for the given event.
     RawMessage,
 
+    /// Encodes events in [Apache Parquet format][parquet].
+    ///
+    /// [parquet]: https://parquet.apache.org/
+    Parquet {
+        /// Apache Parquet-specific encoder options.
+        parquet: ParquetSerializerOptions,
+    },
+
     /// Plain text encoding.
     ///
     /// This encoding uses the `message` field of a log event. For metrics, it uses an
@@ -335,6 +343,7 @@ impl From<TextSerializerConfig> for SerializerConfig {
 
 impl SerializerConfig {
     /// Build the `Serializer` from this configuration.
+    /// Fails if serializer is batched.
     pub fn build(&self) -> Result<Serializer, Box<dyn std::error::Error + Send + Sync + 'static>> {
         match self {
             SerializerConfig::Avro { avro } => Ok(Serializer::Avro(
@@ -354,6 +363,36 @@ impl SerializerConfig {
                 Ok(Serializer::RawMessage(RawMessageSerializerConfig.build()))
             }
             SerializerConfig::Text(config) => Ok(Serializer::Text(config.build())),
+            SerializerConfig::Parquet { .. } => {
+                Err("Parquet serializer is not for single event encoding.".into())
+            }
+        }
+    }
+
+    /// Build the `BatchSerializer` from this configuration.
+    /// Returns `None` if the serializer is not batched.
+    pub fn build_batched(
+        &self,
+    ) -> Result<Option<BatchSerializer>, Box<dyn std::error::Error + Send + Sync + 'static>> {
+        match self {
+            SerializerConfig::Parquet { parquet } => Ok(Some(BatchSerializer::Parquet(
+                ParquetSerializerConfig::new(
+                    parquet.schema.clone(),
+                    parquet.record_complete_event.clone(),
+                    parquet.ignore_type_mismatch_for_optional.clone()
+                ).build()?,
+            ))),
+            SerializerConfig::Avro { .. }
+            | SerializerConfig::Cef(..)
+            | SerializerConfig::Csv(..)
+            | SerializerConfig::Gelf
+            | SerializerConfig::Json(..)
+            | SerializerConfig::Logfmt
+            | SerializerConfig::Protobuf(..)
+            | SerializerConfig::Native
+            | SerializerConfig::NativeJson
+            | SerializerConfig::RawMessage
+            | SerializerConfig::Text(..) => Ok(None),
         }
     }
 
@@ -383,6 +422,7 @@ impl SerializerConfig {
             | SerializerConfig::NativeJson
             | SerializerConfig::RawMessage
             | SerializerConfig::Text(_) => FramingConfig::NewlineDelimited,
+            SerializerConfig::Parquet { .. } => FramingConfig::Bytes,
             SerializerConfig::Gelf => {
                 FramingConfig::CharacterDelimited(CharacterDelimitedEncoderConfig::new(0))
             }
@@ -405,6 +445,13 @@ impl SerializerConfig {
             SerializerConfig::Protobuf(config) => config.input_type(),
             SerializerConfig::RawMessage => RawMessageSerializerConfig.input_type(),
             SerializerConfig::Text(config) => config.input_type(),
+            SerializerConfig::Parquet { parquet } => {
+                ParquetSerializerConfig::new(
+                    parquet.schema.clone(),
+                    parquet.record_complete_event.clone(),
+                    parquet.ignore_type_mismatch_for_optional.clone()
+                ).input_type()
+            }
         }
     }
 
@@ -424,6 +471,13 @@ impl SerializerConfig {
             SerializerConfig::Protobuf(config) => config.schema_requirement(),
             SerializerConfig::RawMessage => RawMessageSerializerConfig.schema_requirement(),
             SerializerConfig::Text(config) => config.schema_requirement(),
+            SerializerConfig::Parquet { parquet } => {
+                ParquetSerializerConfig::new(
+                    parquet.schema.clone(),
+                    parquet.record_complete_event.clone(),
+                    parquet.ignore_type_mismatch_for_optional.clone()
+                ).schema_requirement()
+            }
         }
     }
 }
@@ -578,6 +632,29 @@ impl tokio_util::codec::Encoder<Event> for Serializer {
             Serializer::Protobuf(serializer) => serializer.encode(event, buffer),
             Serializer::RawMessage(serializer) => serializer.encode(event, buffer),
             Serializer::Text(serializer) => serializer.encode(event, buffer),
+        }
+    }
+}
+
+/// Serialize structured batches of events as bytes.
+#[derive(Debug, Clone)]
+pub enum BatchSerializer {
+    /// Uses a `ParquetSerializer` for serialization.
+    Parquet(ParquetSerializer),
+}
+
+impl From<ParquetSerializer> for BatchSerializer {
+    fn from(serializer: ParquetSerializer) -> Self {
+        Self::Parquet(serializer)
+    }
+}
+
+impl tokio_util::codec::Encoder<Vec<Event>> for BatchSerializer {
+    type Error = vector_common::Error;
+
+    fn encode(&mut self, events: Vec<Event>, buffer: &mut BytesMut) -> Result<(), Self::Error> {
+        match self {
+            BatchSerializer::Parquet(serializer) => serializer.encode(events, buffer),
         }
     }
 }

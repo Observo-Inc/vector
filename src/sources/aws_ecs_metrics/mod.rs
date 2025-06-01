@@ -151,7 +151,8 @@ impl GenerateConfig for AwsEcsMetricsSourceConfig {
 impl SourceConfig for AwsEcsMetricsSourceConfig {
     async fn build(&self, cx: SourceContext) -> crate::Result<super::Source> {
         let namespace = Some(self.namespace.clone()).filter(|namespace| !namespace.is_empty());
-        let http_client = HttpClient::new(None, &cx.proxy)?;
+        let app_info = crate::app_info();
+        let http_client = HttpClient::new(None, &cx.proxy, &app_info)?;
 
         Ok(Box::pin(aws_ecs_metrics(
             http_client,

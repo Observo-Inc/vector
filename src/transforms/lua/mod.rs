@@ -61,6 +61,12 @@ pub struct LuaConfigV2 {
     config: v2::LuaConfig,
 }
 
+
+#[cfg(feature = "observo-lv3")]
+mod v3;
+#[cfg(feature = "observo-lv3")]
+use v3::LuaConfigV3;
+
 /// Configuration for the `lua` transform.
 #[configurable_component(transform(
     "lua",
@@ -74,6 +80,10 @@ pub enum LuaConfig {
 
     /// Configuration for version two.
     V2(LuaConfigV2),
+
+    #[cfg(feature = "observo-lv3")]
+    /// Configuration for version three.
+    V3(LuaConfigV3),
 }
 
 impl GenerateConfig for LuaConfig {
@@ -97,6 +107,11 @@ impl TransformConfig for LuaConfig {
         match self {
             LuaConfig::V1(v1) => v1.config.build(),
             LuaConfig::V2(v2) => v2.config.build(key),
+            #[cfg(feature = "observo-lv3")]
+            LuaConfig::V3(v3) => {
+                let config_paths = v2::default_config_paths();
+                v3.config.build(key, &config_paths)
+            },
         }
     }
 
@@ -104,6 +119,8 @@ impl TransformConfig for LuaConfig {
         match self {
             LuaConfig::V1(v1) => v1.config.input(),
             LuaConfig::V2(v2) => v2.config.input(),
+            #[cfg(feature = "observo-lv3")]
+            LuaConfig::V3(v3) => v3.config.input(),
         }
     }
 
@@ -116,6 +133,16 @@ impl TransformConfig for LuaConfig {
         match self {
             LuaConfig::V1(v1) => v1.config.outputs(input_definitions),
             LuaConfig::V2(v2) => v2.config.outputs(input_definitions),
+            #[cfg(feature = "observo-lv3")]
+            LuaConfig::V3(v3) => v3.config.outputs(input_definitions),
+        }
+    }
+
+    fn enable_concurrency(&self) -> bool {
+        match self {
+            #[cfg(feature = "observo-lv3")]
+            LuaConfig::V3(v3) => v3.config.enable_concurrency(),
+            _ => false,
         }
     }
 }

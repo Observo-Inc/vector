@@ -1,10 +1,10 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use serde_with::serde_as;
-use snafu::{ResultExt, Snafu};
-use vector_lib::codecs::MetricTagValues;
+use snafu::ResultExt;
+use vector_lib::lua_err::InvalidSourceSnafu;
+use vector_lib::{codecs::MetricTagValues, lua_err::*};
 use vector_lib::configurable::configurable_component;
-pub use vector_lib::event::lua;
 use vector_lib::transform::runtime_transform::{RuntimeTransform, Timer};
 
 use crate::config::{ComponentKey, OutputId};
@@ -17,35 +17,6 @@ use crate::{
     schema,
     transforms::Transform,
 };
-
-#[derive(Debug, Snafu)]
-pub enum BuildError {
-    #[snafu(display("Invalid \"search_dirs\": {}", source))]
-    InvalidSearchDirs { source: mlua::Error },
-    #[snafu(display("Cannot evaluate Lua code in \"source\": {}", source))]
-    InvalidSource { source: mlua::Error },
-
-    #[snafu(display("Cannot evaluate Lua code defining \"hooks.init\": {}", source))]
-    InvalidHooksInit { source: mlua::Error },
-    #[snafu(display("Cannot evaluate Lua code defining \"hooks.process\": {}", source))]
-    InvalidHooksProcess { source: mlua::Error },
-    #[snafu(display("Cannot evaluate Lua code defining \"hooks.shutdown\": {}", source))]
-    InvalidHooksShutdown { source: mlua::Error },
-    #[snafu(display("Cannot evaluate Lua code defining timer handler: {}", source))]
-    InvalidTimerHandler { source: mlua::Error },
-
-    #[snafu(display("Runtime error in \"hooks.init\" function: {}", source))]
-    RuntimeErrorHooksInit { source: mlua::Error },
-    #[snafu(display("Runtime error in \"hooks.process\" function: {}", source))]
-    RuntimeErrorHooksProcess { source: mlua::Error },
-    #[snafu(display("Runtime error in \"hooks.shutdown\" function: {}", source))]
-    RuntimeErrorHooksShutdown { source: mlua::Error },
-    #[snafu(display("Runtime error in timer handler: {}", source))]
-    RuntimeErrorTimerHandler { source: mlua::Error },
-
-    #[snafu(display("Cannot call GC in Lua runtime: {}", source))]
-    RuntimeErrorGc { source: mlua::Error },
-}
 
 /// Configuration for the version two of the `lua` transform.
 #[configurable_component]
@@ -88,7 +59,7 @@ pub struct LuaConfig {
     metric_tag_values: MetricTagValues,
 }
 
-fn default_config_paths() -> Vec<PathBuf> {
+pub(super) fn default_config_paths() -> Vec<PathBuf> {
     match CONFIG_PATHS.lock().ok() {
         Some(config_paths) => config_paths
             .clone()

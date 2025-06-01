@@ -6,12 +6,14 @@ pub use file_source;
 pub use vector_api_client as api_client;
 pub use vector_buffers as buffers;
 #[cfg(feature = "test")]
+pub use vector_core::inet_test_util;
+#[cfg(feature = "test")]
 pub use vector_common::event_test_util;
 pub use vector_common::{
     assert_event_data_eq, btreemap, byte_size_of, byte_size_of::ByteSizeOf, conversion,
     encode_logfmt, finalization, finalizer, id, impl_event_data_eq, internal_event, json_size,
     registered_event, request_metadata, sensitive_string, shutdown, trigger, Error, Result,
-    TimeZone,
+    TimeZone
 };
 pub use vector_config as configurable;
 pub use vector_config::impl_generate_config_from_default;
@@ -21,6 +23,7 @@ pub use vector_core::{
     buckets, default_data_dir, emit, event, fanout, ipallowlist, metric_tags, metrics, partition,
     quantiles, register, samples, schema, serde, sink, source, tcp, tls, transform,
     EstimatedJsonEncodedSizeOf,
+    http, sender
 };
 pub use vector_lookup as lookup;
 pub use vector_stream as stream;
@@ -30,6 +33,7 @@ pub use vrl;
 
 pub mod config {
     pub use vector_common::config::ComponentKey;
+    pub use vector_common::config::Resource;
     pub use vector_core::config::{
         clone_input_definitions, init_log_schema, init_telemetry, log_schema, proxy, telemetry,
         AcknowledgementsConfig, DataType, GlobalOptions, Input, LegacyKey, LogNamespace, LogSchema,
@@ -40,10 +44,17 @@ pub mod config {
 
 #[cfg(feature = "opentelemetry")]
 pub mod opentelemetry {
-    pub use opentelemetry_proto::{convert, proto};
+    pub use opentelemetry_proto::{common, logs, metrics, proto, spans};
 }
 
 #[cfg(feature = "prometheus")]
 pub mod prometheus {
     pub use prometheus_parser as parser;
 }
+
+pub use vector_common::{AppInfo, get_hostname};
+pub use vector_core::chkpts;
+pub use vector_common::net;
+
+#[cfg(feature = "lua")]
+pub use vector_core::lua_err;

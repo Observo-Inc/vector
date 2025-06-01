@@ -113,6 +113,12 @@ pub enum ConditionConfig {
 
     /// Matches an event with a [Datadog Search](https://docs.datadoghq.com/logs/explorer/search_syntax/) query.
     DatadogSearch(DatadogSearchConfig),
+    ///Always Pass
+    #[configurable(metadata(docs::hidden))]
+    AlwaysPass,
+    ///Always fail
+    #[configurable(metadata(docs::hidden))]
+    AlwaysFail,
 }
 
 impl ConditionConfig {
@@ -126,6 +132,8 @@ impl ConditionConfig {
             ConditionConfig::IsTrace => Ok(Condition::IsTrace),
             ConditionConfig::Vrl(x) => x.build(enrichment_tables),
             ConditionConfig::DatadogSearch(x) => x.build(enrichment_tables),
+            ConditionConfig::AlwaysPass => Ok(Condition::AlwaysPass),
+            ConditionConfig::AlwaysFail => Ok(Condition::AlwaysFail),
         }
     }
 }

@@ -2030,7 +2030,13 @@ mod integration_test {
         assert_eq!(total, expect_count);
     }
 
-    async fn consume_with_rebalance(rebalance_strategy: String) {
+    struct ConsumeCounts {
+        expected: usize,
+        actual: usize,
+        unique: usize,
+    }
+
+    async fn consume_with_rebalance(rebalance_strategy: String) -> ConsumeCounts {
         // 1. Send N events (if running against a pre-populated kafka topic, use send_count=0 and expect_count=expected number of messages; otherwise just set send_count)
         let send_count: usize = std::env::var("KAFKA_SEND_COUNT")
             .unwrap_or_else(|_| "125000".into())
@@ -2139,19 +2145,52 @@ mod integration_test {
             0,
             "The first set of consumers should consume and ack all messages."
         );
-        assert_eq!(total, expect_count);
+        fn get_msg<'a>(es: &'a Vec<Event>) -> HashSet<&'a Value> {
+            es
+                .iter()
+                .map(|e| e.as_log().parse_path_and_get_value("message").unwrap().unwrap())
+                .collect::<HashSet<&Value>>()
+        }
+
+        // https://issues.apache.org/jira/browse/KAFKA-14757 suggests that
+        // cooperative-sticky rebalancing causes consumption amplification
+        // The assertions need to be relaxed to accomodate this,
+        // So the helper returns counts and lets caller assert.
+
+        let mut uniq_events = get_msg(&events1);
+        uniq_events.extend(get_msg(&events2));
+        uniq_events.extend(get_msg(&events3));
+
+        ConsumeCounts {
+            expected: expect_count,
+            actual: total,
+            unique: uniq_events.len(),
+        }
     }
 
     #[tokio::test]
     async fn drains_acknowledgements_during_rebalance_default_assignments() {
         // the default, eager rebalance strategies generally result in more revocations
-        consume_with_rebalance("range,roundrobin".into()).await;
+        let ConsumeCounts{
+            expected,
+            actual,
+            unique: _
+        } = consume_with_rebalance("range,roundrobin".into()).await;
+        assert_eq!(expected, actual);
     }
+
     #[tokio::test]
     async fn drains_acknowledgements_during_rebalance_sticky_assignments() {
         // Cooperative rebalance strategies generally result in fewer revokes,
         // as only reassigned partitions are revoked
-        consume_with_rebalance("cooperative-sticky".into()).await;
+        let ConsumeCounts{
+            expected,
+            actual,
+            unique
+        } = consume_with_rebalance("cooperative-sticky".into()).await;
+        assert_eq!(unique, expected);
+        assert!(actual >= expected);
+
     }
 
     fn map_logs(events: EventArray) -> impl Iterator<Item = String> {

@@ -134,7 +134,7 @@ cipher,https://github.com/RustCrypto/traits,MIT OR Apache-2.0,RustCrypto Develop
 clap,https://github.com/clap-rs/clap,MIT OR Apache-2.0,The clap Authors
 clap_builder,https://github.com/clap-rs/clap,MIT OR Apache-2.0,The clap_builder Authors
 clap_derive,https://github.com/clap-rs/clap,MIT OR Apache-2.0,The clap_derive Authors
-clap_lex,https://github.com/clap-rs/clap,MIT OR Apache-2.0,The clap_lex Authors
+clap_lex,https://github.com/clap-rs/clap/tree/master/clap_lex,MIT OR Apache-2.0,The clap_lex Authors
 clipboard-win,https://github.com/DoumanAsh/clipboard-win,BSL-1.0,Douman <douman@gmx.se>
 cmac,https://github.com/RustCrypto/MACs,MIT OR Apache-2.0,RustCrypto Developers
 codespan-reporting,https://github.com/brendanzab/codespan,Apache-2.0,Brendan Zabarauskas <bjzaba@yahoo.com.au>
@@ -385,10 +385,6 @@ mongodb,https://github.com/mongodb/mongo-rust-driver,Apache-2.0,"Saghm Rossi <sa
 multer,https://github.com/rousan/multer-rs,MIT,Rousan Ali <hello@rousan.io>
 native-tls,https://github.com/sfackler/rust-native-tls,MIT OR Apache-2.0,Steven Fackler <sfackler@gmail.com>
 ndk-context,https://github.com/rust-windowing/android-ndk-rs,MIT OR Apache-2.0,The Rust Windowing contributors
-netlink-packet-core,https://github.com/rust-netlink/netlink-packet-core,MIT,Corentin Henry <corentinhenry@gmail.com>
-netlink-packet-sock-diag,https://github.com/rust-netlink/netlink-packet-sock-diag,MIT,"Flier Lu <flier.lu@gmail.com>, Corentin Henry <corentinhenry@gmail.com>"
-netlink-packet-utils,https://github.com/rust-netlink/netlink-packet-utils,MIT,Corentin Henry <corentinhenry@gmail.com>
-netlink-sys,https://github.com/rust-netlink/netlink-sys,MIT,Corentin Henry <corentinhenry@gmail.com>
 nibble_vec,https://github.com/michaelsproul/rust_nibble_vec,MIT,Michael Sproul <micsproul@gmail.com>
 nix,https://github.com/nix-rust/nix,MIT,The nix-rust Project Developers
 nkeys,https://github.com/wasmcloud/nkeys,Apache-2.0,wasmCloud Team
@@ -596,6 +592,7 @@ spki,https://github.com/RustCrypto/formats/tree/master/spki,Apache-2.0 OR MIT,Ru
 stable_deref_trait,https://github.com/storyyeller/stable_deref_trait,MIT OR Apache-2.0,Robert Grosse <n210241048576@gmail.com>
 static_assertions,https://github.com/nvzqz/static-assertions-rs,MIT OR Apache-2.0,Nikolai Vazquez
 static_assertions_next,https://github.com/scuffletv/static-assertions,MIT OR Apache-2.0,Nikolai Vazquez
+streaming_algorithms,https://github.com/alecmocatta/streaming_algorithms,MIT OR Apache-2.0,Frank Denis
 stream-cancel,https://github.com/jonhoo/stream-cancel,MIT OR Apache-2.0,Jon Gjengset <jon@thesquareplanet.com>
 stringprep,https://github.com/sfackler/rust-stringprep,MIT OR Apache-2.0,Steven Fackler <sfackler@gmail.com>
 strip-ansi-escapes,https://github.com/luser/strip-ansi-escapes,Apache-2.0 OR MIT,Ted Mielczarek <ted@mielczarek.org>
@@ -616,6 +613,7 @@ tagptr,https://github.com/oliver-giersch/tagptr,MIT OR Apache-2.0,Oliver Giersch
 take_mut,https://github.com/Sgeo/take_mut,MIT,Sgeo <sgeoster@gmail.com>
 tap,https://github.com/myrrlyn/tap,MIT,"Elliott Linder <elliott.darfink@gmail.com>, myrrlyn <self@myrrlyn.dev>"
 tcp-stream,https://github.com/amqp-rs/tcp-stream,BSD-2-Clause,Marc-Antoine Perennou <Marc-Antoine@Perennou.com>
+tdigest,https://github.com/MnO2/t-digest,Apache-2.0,Paul Meng
 tempfile,https://github.com/Stebalien/tempfile,MIT OR Apache-2.0,"Steven Allen <steven@stebalien.com>, The Rust Project Developers, Ashley Mannix <ashleymannix@live.com.au>, Jason White <me@jasonwhite.io>"
 term,https://github.com/Stebalien/term,MIT OR Apache-2.0,"The Rust Project Developers, Steven Allen"
 termcolor,https://github.com/BurntSushi/termcolor,Unlicense OR MIT,Andrew Gallant <jamslam@gmail.com>
@@ -637,7 +635,6 @@ tokio-postgres,https://github.com/sfackler/rust-postgres,MIT OR Apache-2.0,Steve
 tokio-retry,https://github.com/srijs/rust-tokio-retry,MIT,Sam Rijs <srijs@airpost.net>
 tokio-rustls,https://github.com/rustls/tokio-rustls,MIT OR Apache-2.0,The tokio-rustls Authors
 tokio-tungstenite,https://github.com/snapview/tokio-tungstenite,MIT,"Daniel Abramov <dabramov@snapview.de>, Alexey Galakhov <agalakhov@snapview.de>"
-tokio-websockets,https://github.com/Gelbpunkt/tokio-websockets,MIT,The tokio-websockets Authors
 toml,https://github.com/toml-rs/toml,MIT OR Apache-2.0,Alex Crichton <alex@alexcrichton.com>
 toml_edit,https://github.com/toml-rs/toml,MIT OR Apache-2.0,"Andronik Ordian <write@reusable.software>, Ed Page <eopage@gmail.com>"
 tonic,https://github.com/hyperium/tonic,MIT,Lucio Franco <luciofranco14@gmail.com>
@@ -654,7 +651,6 @@ triomphe,https://github.com/Manishearth/triomphe,MIT OR Apache-2.0,"Manish Goreg
 trust-dns-proto,https://github.com/bluejekyll/trust-dns,MIT OR Apache-2.0,Benjamin Fry <benjaminfry@me.com>
 trust-dns-resolver,https://github.com/bluejekyll/trust-dns,MIT OR Apache-2.0,Benjamin Fry <benjaminfry@me.com>
 try-lock,https://github.com/seanmonstar/try-lock,MIT,Sean McArthur <sean@seanmonstar.com>
-tryhard,https://github.com/EmbarkStudios/tryhard,MIT OR Apache-2.0,Embark <opensource@embark-studios.com>
 tungstenite,https://github.com/snapview/tungstenite-rs,MIT OR Apache-2.0,"Alexey Galakhov, Daniel Abramov"
 twox-hash,https://github.com/shepmaster/twox-hash,MIT,Jake Goulding <jake.goulding@gmail.com>
 typed-builder,https://github.com/idanarye/rust-typed-builder,MIT OR Apache-2.0,"IdanArye <idanarye@gmail.com>, Chris Morgan <me@chrismorgan.info>"
@@ -720,6 +716,7 @@ write16,https://github.com/hsivonen/write16,Apache-2.0 OR MIT,The write16 Author
 writeable,https://github.com/unicode-org/icu4x,Unicode-3.0,The ICU4X Project Developers
 wyz,https://github.com/myrrlyn/wyz,MIT,myrrlyn <self@myrrlyn.dev>
 xmlparser,https://github.com/RazrFalcon/xmlparser,MIT OR Apache-2.0,Yevhenii Reizner <razrfalcon@gmail.com>
+xxhash-rust,https://github.com/DoumanAsh/xxhash-rust,BSL-1.0,Douman <douman@gmx.se>
 yaml-rust,https://github.com/chyh1990/yaml-rust,MIT OR Apache-2.0,Yuheng Chen <yuhengchen@sensetime.com>
 yoke,https://github.com/unicode-org/icu4x,Unicode-3.0,Manish Goregaokar <manishsmail@gmail.com>
 yoke-derive,https://github.com/unicode-org/icu4x,Unicode-3.0,Manish Goregaokar <manishsmail@gmail.com>

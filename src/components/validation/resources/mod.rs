@@ -189,6 +189,9 @@ fn decoder_framing_to_encoding_framer(framing: &decoding::FramingConfig) -> enco
                 },
             })
         }
+        decoding::FramingConfig::Netflow { .. } => {
+            todo!()
+        }
         decoding::FramingConfig::LengthDelimited(config) => {
             encoding::FramingConfig::LengthDelimited(encoding::LengthDelimitedEncoderConfig {
                 length_delimited: config.length_delimited.clone(),
@@ -226,6 +229,7 @@ fn serializer_config_to_deserializer(
             })
         }
         SerializerConfig::RawMessage | SerializerConfig::Text(_) => DeserializerConfig::Bytes,
+        SerializerConfig::Parquet { .. } => todo!(),
     };
 
     deserializer_config.build()

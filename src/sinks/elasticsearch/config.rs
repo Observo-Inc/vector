@@ -16,10 +16,10 @@ use crate::{
         elasticsearch::{
             health::ElasticsearchHealthLogic,
             retry::ElasticsearchRetryLogic,
-            service::{ElasticsearchService, HttpRequestBuilder},
+            service::{ElasticsearchService, HttpRequestBuilder, Telemetry},
             sink::ElasticsearchSink,
             ElasticsearchApiVersion, ElasticsearchAuthConfig, ElasticsearchCommon,
-            ElasticsearchCommonMode, ElasticsearchMode, VersionType,
+            ElasticsearchCommonMode, ElasticsearchMode, RejectionReport, VersionType,
         },
         util::{
             http::RequestConfig, service::HealthConfig, BatchConfig, Compression,
@@ -31,6 +31,9 @@ use crate::{
     tls::TlsConfig,
     transforms::metric_to_log::MetricToLogConfig,
 };
+
+use metrics::counter;
+
 use vector_lib::lookup::event_path;
 use vector_lib::lookup::lookup_v2::ConfigValuePath;
 use vector_lib::schema::Requirement;
@@ -152,6 +155,10 @@ pub struct ElasticsearchConfig {
 
     #[serde(default)]
     #[configurable(derived)]
+    pub rejection_report: RejectionReport,
+
+    #[serde(default)]
+    #[configurable(derived)]
     pub compression: Compression,
 
     #[serde(skip_serializing_if = "crate::serde::is_default", default)]
@@ -240,6 +247,7 @@ impl Default for ElasticsearchConfig {
             id_key: None,
             pipeline: None,
             mode: Default::default(),
+            rejection_report: Default::default(),
             compression: Default::default(),
             encoding: Default::default(),
             batch: Default::default(),
@@ -540,8 +548,8 @@ impl SinkConfig for ElasticsearchConfig {
     async fn build(&self, cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
         let commons = ElasticsearchCommon::parse_many(self, cx.proxy()).await?;
         let common = commons[0].clone();
-
-        let client = HttpClient::new(common.tls_settings.clone(), cx.proxy())?;
+        let app_info = crate::app_info();
+        let client = HttpClient::new(common.tls_settings.clone(), cx.proxy(), &app_info)?;
 
         let request_limits = self.request.tower.into_settings();
 
@@ -553,8 +561,26 @@ impl SinkConfig for ElasticsearchConfig {
             .map(|common| {
                 let endpoint = common.base_url.clone();
 
+                let endpt_str = endpoint.to_string();
+
+                let telemetry = Telemetry{
+                    rejected: counter!(
+                        "es_rejected",
+                        "end_pt" => endpt_str.clone(),
+                    ),
+                    indexed: counter!(
+                        "es_indexed",
+                        "end_pt" => endpt_str,
+                    ),
+                };
+
                 let http_request_builder = HttpRequestBuilder::new(&common, self);
-                let service = ElasticsearchService::new(client.clone(), http_request_builder);
+                let service = ElasticsearchService::new(
+                    client.clone(),
+                    http_request_builder,
+                    self.rejection_report.clone(),
+                    self.compression.clone(),
+                    telemetry);
 
                 (endpoint, service)
             })
@@ -637,6 +663,46 @@ mod tests {
         assert!(matches!(config.mode, ElasticsearchMode::DataStream));
         assert!(config.data_stream.is_some());
     }
+
+    #[test]
+    fn parse_rejection_report() {
+        let default = toml::from_str::<ElasticsearchConfig>(
+            r#"
+            endpoints = [""]
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(default.rejection_report, RejectionReport::Stats));
+
+        let drop = toml::from_str::<ElasticsearchConfig>(
+            r#"
+            endpoints = [""]
+            rejection_report = "stats"
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(drop.rejection_report, RejectionReport::Stats));
+
+        let response = toml::from_str::<ElasticsearchConfig>(
+            r#"
+            endpoints = [""]
+            rejection_report = "response"
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(response.rejection_report, RejectionReport::Response));
+
+
+        let req_res = toml::from_str::<ElasticsearchConfig>(
+            r#"
+            endpoints = [""]
+            rejection_report = "request_response"
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(req_res.rejection_report, RejectionReport::RequestResponse));
+    }
+
 
     #[test]
     fn parse_distribution() {

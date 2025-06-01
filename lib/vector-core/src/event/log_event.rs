@@ -314,6 +314,14 @@ impl LogEvent {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)] // TargetPath is always a reference
+    pub fn into_attr<'a>(self, key: impl TargetPath<'a>) -> Option<Value> {
+        match key.prefix() {
+            PathPrefix::Event => Arc::unwrap_or_clone(self.inner).fields.remove(key.value_path(), false),
+            PathPrefix::Metadata => self.metadata.into_owned().value.remove(key.value_path(), false),
+        }
+    }
+
     /// Retrieves the value of a field based on it's meaning.
     /// This will first check if the value has previously been dropped. It is worth being
     /// aware that if the field has been dropped and then somehow re-added, we still fetch

@@ -28,6 +28,7 @@ use crate::{
 };
 
 pub mod sqs;
+mod sqs_message_parsers;
 
 /// Compression scheme for objects retrieved from S3.
 #[configurable_component]
@@ -338,7 +339,7 @@ async fn s3_object_decoder(
 // * key name (for file extension)
 //
 // It will use this information in this order
-fn determine_compression(
+pub fn determine_compression(
     content_encoding: Option<&str>,
     content_type: Option<&str>,
     key: &str,

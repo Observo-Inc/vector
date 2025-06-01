@@ -107,7 +107,8 @@ impl_generate_config_from_default!(NginxMetricsConfig);
 impl SourceConfig for NginxMetricsConfig {
     async fn build(&self, mut cx: SourceContext) -> crate::Result<super::Source> {
         let tls = TlsSettings::from_options(self.tls.as_ref())?;
-        let http_client = HttpClient::new(tls, &cx.proxy)?;
+        let app_info = crate::app_info();
+        let http_client = HttpClient::new(tls, &cx.proxy, &app_info)?;
 
         let namespace = Some(self.namespace.clone()).filter(|namespace| !namespace.is_empty());
         let mut sources = Vec::with_capacity(self.endpoints.len());

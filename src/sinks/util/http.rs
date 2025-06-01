@@ -820,7 +820,8 @@ mod test {
 
         let request = Bytes::from("hello");
         let proxy = ProxyConfig::default();
-        let client = HttpClient::new(None, &proxy).unwrap();
+        let app_info = crate::app_info();
+        let client = HttpClient::new(None, &proxy, &app_info).unwrap();
         let mut service = HttpBatchService::new(client, move |body: Bytes| {
             Box::pin(ready(
                 http::Request::post(&uri).body(body).map_err(Into::into),

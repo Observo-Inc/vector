@@ -339,7 +339,8 @@ async fn get_version(
         version: Option<Version>,
     }
 
-    let client = HttpClient::new(tls_settings.clone(), proxy_config)?;
+    let app_info = crate::app_info();
+    let client = HttpClient::new(tls_settings.clone(), proxy_config, &app_info)?;
     let response = get(
         base_url,
         auth,

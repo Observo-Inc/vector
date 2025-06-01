@@ -153,7 +153,8 @@ impl From<HttpMethod> for Method {
 impl HttpSinkConfig {
     fn build_http_client(&self, cx: &SinkContext) -> crate::Result<HttpClient> {
         let tls = TlsSettings::from_options(self.tls.as_ref())?;
-        Ok(HttpClient::new(tls, cx.proxy())?)
+        let app_info = crate::app_info();
+        Ok(HttpClient::new(tls, cx.proxy(), &app_info)?)
     }
 
     pub(super) fn build_encoder(&self) -> crate::Result<Encoder<Framer>> {

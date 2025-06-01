@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use bytes::Bytes;
 use chrono::Utc;
 use vector_lib::codecs::{
@@ -55,18 +56,20 @@ fn azure_blob_build_request_without_compression() {
         .partition(&log)
         .expect("key wasn't provided");
 
+    let encoder = Encoder::<Framer>::new(
+        NewlineDelimitedEncoder::default().into(),
+        TextSerializerConfig::default().build().into(),
+    );
+    let content_type = encoder.content_type();
+
     let request_options = AzureBlobRequestOptions {
         container_name,
         blob_time_format,
         blob_append_uuid,
-        encoder: (
-            Default::default(),
-            Encoder::<Framer>::new(
-                NewlineDelimitedEncoder::default().into(),
-                TextSerializerConfig::default().build().into(),
-            ),
-        ),
+        encoder: Arc::new((Default::default(), encoder)),
         compression,
+        blob_extension: None,
+        content_type: content_type,
     };
 
     let mut byte_size = GroupedCountByteSize::new_untagged();
@@ -103,18 +106,20 @@ fn azure_blob_build_request_with_compression() {
         .partition(&log)
         .expect("key wasn't provided");
 
+    let encoder = Encoder::<Framer>::new(
+        NewlineDelimitedEncoder::default().into(),
+        TextSerializerConfig::default().build().into(),
+    );
+    let content_type = encoder.content_type();
+
     let request_options = AzureBlobRequestOptions {
         container_name,
         blob_time_format,
         blob_append_uuid,
-        encoder: (
-            Default::default(),
-            Encoder::<Framer>::new(
-                NewlineDelimitedEncoder::default().into(),
-                TextSerializerConfig::default().build().into(),
-            ),
-        ),
+        encoder: Arc::new((Default::default(), encoder)),
         compression,
+        blob_extension: None,
+        content_type,
     };
 
     let mut byte_size = GroupedCountByteSize::new_untagged();
@@ -150,19 +155,20 @@ fn azure_blob_build_request_with_time_format() {
         .unwrap()
         .partition(&log)
         .expect("key wasn't provided");
+    let encoder = Encoder::<Framer>::new(
+        NewlineDelimitedEncoder::default().into(),
+        TextSerializerConfig::default().build().into(),
+    );
+    let content_type = encoder.content_type();
 
     let request_options = AzureBlobRequestOptions {
         container_name,
         blob_time_format,
         blob_append_uuid,
-        encoder: (
-            Default::default(),
-            Encoder::<Framer>::new(
-                NewlineDelimitedEncoder::default().into(),
-                TextSerializerConfig::default().build().into(),
-            ),
-        ),
+        encoder: Arc::new((Default::default(), encoder)),
         compression,
+        blob_extension: None,
+        content_type: content_type,
     };
 
     let mut byte_size = GroupedCountByteSize::new_untagged();
@@ -201,19 +207,20 @@ fn azure_blob_build_request_with_uuid() {
         .unwrap()
         .partition(&log)
         .expect("key wasn't provided");
+    let encoder = Encoder::<Framer>::new(
+        NewlineDelimitedEncoder::default().into(),
+        TextSerializerConfig::default().build().into(),
+    );
+    let content_type = encoder.content_type();
 
     let request_options = AzureBlobRequestOptions {
         container_name,
         blob_time_format,
         blob_append_uuid,
-        encoder: (
-            Default::default(),
-            Encoder::<Framer>::new(
-                NewlineDelimitedEncoder::default().into(),
-                TextSerializerConfig::default().build().into(),
-            ),
-        ),
+        encoder: Arc::new((Default::default(), encoder)),
         compression,
+        blob_extension: None,
+        content_type: content_type,
     };
 
     let mut byte_size = GroupedCountByteSize::new_untagged();

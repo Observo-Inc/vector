@@ -25,11 +25,14 @@ use vrl::value::Kind;
 use crate::{
     codecs::{Decoder, DecodingConfig},
     config::{SourceConfig, SourceContext, SourceOutput},
-    internal_events::{DemoLogsEventProcessed, EventsReceived, StreamClosedError},
+    internal_events::{DemoLogsEventProcessed,  EventsReceived, StreamClosedError},
     serde::{default_decoding, default_framing_message_based},
     shutdown::ShutdownSignal,
     SourceSender,
 };
+use chrono::Local;
+use csv::ReaderBuilder;
+use std::fs::File;
 
 /// Configuration for the `demo_logs` source.
 #[serde_as]
@@ -92,6 +95,26 @@ const fn default_count() -> usize {
 pub enum DemoLogsConfigError {
     #[snafu(display("A non-empty list of lines is required for the shuffle format"))]
     ShuffleDemoLogsItemsEmpty,
+    #[snafu(display("A non-empty sample log file is required for sample file format"))]
+    SampleFileDemoLogsEmpty,
+    #[snafu(display("Could not open sample file"))]
+    SampleFileOpenFailed {
+        message: String,
+    },
+    #[snafu(display("Could not read sample file"))]
+    SampleFileReadFailed {
+        message: String,
+    },
+    #[snafu(display("Not implemented"))]
+    NotImplemented,
+}
+
+#[derive(Clone, Debug, Derivative)]
+enum GenCtx {
+    TimeJoin {
+        data: Vec<(String, String)>,
+    },
+    None,
 }
 
 /// Output format configuration.
@@ -103,6 +126,17 @@ pub enum DemoLogsConfigError {
     docs::enum_tag_description = "The format of the randomly generated output."
 ))]
 pub enum OutputFormat {
+    /// Lines are chosen in round robin fashion from file (at path)
+    SampleFile {
+        /// File path to read lines from.
+        /// File must be a two column csv with time_prefix and time_suffix
+        #[configurable(metadata(docs::examples = "path_example()"))]
+        path: String,
+        /// Format of timestamp to inject.
+        #[configurable(metadata(docs::examples = "time_format_example()"))]
+        time_format: String,
+    },
+
     /// Lines are chosen at random from the list specified using `lines`.
     Shuffle {
         /// If `true`, each output line starts with an increasing sequence number, beginning with 0.
@@ -146,11 +180,57 @@ const fn lines_example() -> [&'static str; 2] {
     ["line1", "line2"]
 }
 
+const fn path_example() -> &'static str {
+    "/foo/bar/foobar.log"
+}
+
+const fn time_format_example() -> &'static str {
+    "%Y-%m-%d %H:%M:%S"
+}
+
 impl OutputFormat {
-    fn generate_line(&self, n: usize) -> String {
+    fn build_gen_ctx(&self) -> Result<GenCtx, DemoLogsConfigError> {
+        match self {
+            Self::SampleFile { path, .. } => {
+                let file = File::open(path)
+                    .map_err(|e| DemoLogsConfigError::SampleFileOpenFailed { message: e.to_string() })?;
+                let mut rdr = ReaderBuilder::new().from_reader(file);
+
+                let mut csv_lines = Vec::<(String, String)>::new();
+                for result in rdr.records() {
+                    let record = result
+                        .map_err(|e| DemoLogsConfigError::SampleFileReadFailed { message: e.to_string() })?;
+                    csv_lines.push((
+                        record.get(0).unwrap_or("").to_string(),
+                        record.get(1).unwrap_or("").to_string()));
+                }
+                if csv_lines.len() == 0 {
+                    return Err(DemoLogsConfigError::SampleFileDemoLogsEmpty);
+                }
+
+                Ok(GenCtx::TimeJoin { data: csv_lines })
+            },
+            _ => Ok(GenCtx::None),
+        }
+    }
+
+    fn generate_line(&self, n: usize, gen_ctx: &GenCtx) -> String {
         emit!(DemoLogsEventProcessed);
 
         match self {
+            Self::SampleFile { time_format, .. } => {
+                match gen_ctx {
+                    GenCtx::TimeJoin { data } => {
+                        let (time_prefix, time_suffix) = &data[n % data.len()];
+                        let now = Local::now();
+                        let timestamp = now.format(&time_format).to_string();
+                        format!("{}{}{}", time_prefix, timestamp, time_suffix)
+                    }
+                    GenCtx::None => {
+                        panic!("Sample-file format requires TimeJoin generator-context")
+                    }
+                }
+            },
             Self::Shuffle {
                 sequence,
                 ref lines,
@@ -219,6 +299,7 @@ async fn demo_logs_source(
     mut shutdown: ShutdownSignal,
     mut out: SourceSender,
     log_namespace: LogNamespace,
+    gen_ctx : GenCtx,
 ) -> Result<(), ()> {
     let interval: Option<Duration> = (interval != Duration::ZERO).then_some(interval);
     let mut interval = interval.map(time::interval);
@@ -236,7 +317,7 @@ async fn demo_logs_source(
         }
         bytes_received.emit(ByteSize(0));
 
-        let line = format.generate_line(n);
+        let line = format.generate_line(n, &gen_ctx);
 
         let mut stream = FramedRead::new(line.as_bytes(), decoder.clone());
         while let Some(next) = stream.next().await {
@@ -251,7 +332,7 @@ async fn demo_logs_source(
                         let log = event.as_mut_log();
                         log_namespace.insert_standard_vector_source_metadata(
                             log,
-                            DemoLogsConfig::NAME,
+                            "observo_sample_logs",
                             now,
                         );
                         log_namespace.insert_source_metadata(
@@ -259,7 +340,7 @@ async fn demo_logs_source(
                             log,
                             Some(LegacyKey::InsertIfEmpty(path!("service"))),
                             path!("service"),
-                            "vector",
+                            "observo.ai",
                         );
                         log_namespace.insert_source_metadata(
                             DemoLogsConfig::NAME,
@@ -301,7 +382,10 @@ impl SourceConfig for DemoLogsConfig {
         let decoder =
             DecodingConfig::new(self.framing.clone(), self.decoding.clone(), log_namespace)
                 .build()?;
-        Ok(Box::pin(demo_logs_source(
+
+        let gen_ctx = self.format.build_gen_ctx()?;
+
+        let src = demo_logs_source(
             self.interval,
             self.count,
             self.format.clone(),
@@ -309,7 +393,9 @@ impl SourceConfig for DemoLogsConfig {
             cx.shutdown,
             cx.out,
             log_namespace,
-        )))
+            gen_ctx);
+
+        Ok(Box::pin(src))
     }
 
     fn outputs(&self, global_log_namespace: LogNamespace) -> Vec<SourceOutput> {
@@ -345,6 +431,11 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use futures::{poll, Stream, StreamExt};
+    use tempfile::NamedTempFile;
+    use serde_json;
+    use chrono::NaiveDateTime;
+    use csv::WriterBuilder;
+    use std::mem;
 
     use super::*;
     use crate::{
@@ -354,6 +445,16 @@ mod tests {
         test_util::components::{assert_source_compliance, SOURCE_TAGS},
         SourceSender,
     };
+
+    fn validate_log_line_with_timestamp(pattern: &str, actual: &str) {
+        match NaiveDateTime::parse_from_str(actual, pattern) {
+            Ok(_) => {},  // Successfully parsed
+            Err(_) => {
+                // println!("actual: {}, expected_pattern: {}", actual, pattern);
+                panic!("actual log differs from expected pattern")
+            }
+        }
+    }
 
     #[test]
     fn generate_config() {
@@ -371,6 +472,7 @@ mod tests {
             )
             .build()
             .unwrap();
+            let gen_ctx = config.format.build_gen_ctx().unwrap();
             demo_logs_source(
                 config.interval,
                 config.count,
@@ -379,13 +481,120 @@ mod tests {
                 ShutdownSignal::noop(),
                 tx,
                 LogNamespace::Legacy,
-            )
+                gen_ctx)
             .await
             .unwrap();
 
             rx
         })
         .await
+    }
+
+    #[tokio::test]
+    async fn test_sample_file_generate_reads_syslog_lines_correctly() {
+        let mut tempfile = NamedTempFile::new().unwrap();
+        let mut wtr = WriterBuilder::new()
+            .has_headers(true)
+            .flexible(false)
+            .quote_style(csv::QuoteStyle::NonNumeric)
+            .from_writer(&mut tempfile);
+
+        let syslog_lines= vec![
+            // prefix empty
+            ("", " myhost sshd[1234]: Accepted password for user1 from 192.168.1.10 port 54321 ssh2"),
+            // suffix empty
+            ("myhost sshd[1234]: Accepted password for user1 from 192.168.1.10 port 54321 ssh2 time: ", ""),
+            // both prefix and suffix empty
+            ("", ""),
+            ("Timestamp: ", " myhost systemd[1]: Started Session 42 of user root."),
+            ("Time: ", " myhost kernel: [123456.789012] eth0: link up, 1000 Mbps, full-duplex"),
+        ];
+        let expected_log_patterns = [
+            "%d/%b/%Y:%H:%M:%S myhost sshd[1234]: Accepted password for user1 from 192.168.1.10 port 54321 ssh2",
+            "myhost sshd[1234]: Accepted password for user1 from 192.168.1.10 port 54321 ssh2 time: %d/%b/%Y:%H:%M:%S",
+            "%d/%b/%Y:%H:%M:%S",
+            "Timestamp: %d/%b/%Y:%H:%M:%S myhost systemd[1]: Started Session 42 of user root.",
+            "Time:%d/%b/%Y:%H:%M:%S myhost kernel: [123456.789012] eth0: link up, 1000 Mbps, full-duplex",
+        ];
+
+        wtr.write_record(&["prefix", "suffix"]).unwrap();
+        for (prefix, suffix) in &syslog_lines {
+            wtr.write_record(&[prefix, suffix]).unwrap();
+        }
+        wtr.flush().unwrap();
+        mem::drop(wtr);
+
+        let path = tempfile.path().to_string_lossy();
+        let pattern = "%d/%b/%Y:%H:%M:%S";
+        let message_key = log_schema().message_key().unwrap().to_string();
+        let demo_log_config = DemoLogsConfig {
+            format: OutputFormat::SampleFile {
+                path: (&path).to_string(),
+                time_format: pattern.to_string(),
+            },
+            count: 8,
+            ..DemoLogsConfig::default()
+        };
+        let toml_string = toml::to_string(&demo_log_config).unwrap();
+
+        let mut rx = runit(toml_string.as_str()).await;
+
+        let length = expected_log_patterns.len();
+        for num in 0..5 {
+            let event = match poll!(rx.next()) {
+                Poll::Ready(event) => event.unwrap(),
+                _ => unreachable!(),
+            };
+            let log = event.as_log();
+            let message = log[&message_key].to_string_lossy();
+            let expected_log_pattern = expected_log_patterns[num%length];
+            validate_log_line_with_timestamp(expected_log_pattern, &&*message);
+        }
+    }
+
+    #[test]
+    fn config_sample_file_generate_empty_file() {
+        let temp_file = NamedTempFile::new().expect("failed to create temp file");
+
+        let path = temp_file.path().to_string_lossy();
+        let pattern = "%d/%b/%Y:%H:%M:%S";
+        let errant_config = DemoLogsConfig {
+            format: OutputFormat::SampleFile {
+                path: (&path).to_string(),
+                time_format: pattern.to_string(),
+            },
+            count: 5,
+            ..DemoLogsConfig::default()
+        };
+        let result = errant_config.format.build_gen_ctx();
+        match result {
+            Ok(_) => panic!("expected error"),
+            Err(e) => assert_eq!(e, DemoLogsConfigError::SampleFileDemoLogsEmpty),
+        }
+    }
+
+    #[test]
+    fn config_sample_file_generate_file_does_not_exist() {
+        let errant_config = DemoLogsConfig {
+            format: OutputFormat::SampleFile {
+                path: "invalid/file/path".to_string(),
+                time_format: "%y-%m-%d %H:%M:%S".to_string(),
+            },
+            count: 5,
+            ..DemoLogsConfig::default()
+        };
+        let result = errant_config.format.build_gen_ctx();
+        match result {
+            Ok(_) => panic!("expected error"),
+            Err(e) => {
+                assert_eq!(
+                    e,
+                    DemoLogsConfigError::SampleFileOpenFailed {
+                        message: "No such file or directory (os error 2)".to_string(),
+                    }
+                )
+            },
+        }
     }
 
     #[test]

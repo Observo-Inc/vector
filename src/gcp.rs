@@ -280,7 +280,8 @@ async fn get_token_implicit() -> Result<Token, GcpError> {
         .unwrap();
 
     let proxy = ProxyConfig::from_env();
-    let res = HttpClient::new(None, &proxy)
+    let app_info = crate::app_info();
+    let res = HttpClient::new(None, &proxy, &app_info)
         .context(BuildHttpClientSnafu)?
         .send(req)
         .await

@@ -245,7 +245,8 @@ impl DatadogMetricsConfig {
             }),
             false,
         )?;
-        let client = HttpClient::new(tls_settings, proxy)?;
+        let app_info = crate::app_info();
+        let client = HttpClient::new(tls_settings, proxy, &app_info)?;
         Ok(client)
     }
 

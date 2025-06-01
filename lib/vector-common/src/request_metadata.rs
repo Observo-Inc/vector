@@ -79,6 +79,16 @@ impl GroupedCountByteSize {
         }
     }
 
+    pub fn bulk_add(&mut self, count: usize, json_size: JsonSize) -> crate::Result<()> {
+        match self {
+            Self::Tagged {..} => Err(crate::Error::from("Can't bulk-add tagged events")),
+            Self::Untagged { size } => {
+                *size += CountByteSize(count, json_size);
+                Ok(())
+            }
+        }
+    }
+
     /// Adds the given estimated json size of the event to current count.
     pub fn add_event<E>(&mut self, event: &E, json_size: JsonSize)
     where
@@ -393,6 +403,12 @@ mod tests {
 
         assert_eq!(Some(CountByteSize(2, JsonSize::new(78))), bytesize.size());
         assert_eq!(None, bytesize.sizes());
+
+        assert!(bytesize.bulk_add(10, JsonSize::new(100)).is_ok());
+        assert!(bytesize.bulk_add(5, JsonSize::new(25)).is_ok());
+
+        assert_eq!(Some(CountByteSize(15 + 2, JsonSize::new(125 + 78))), bytesize.size());
+        assert_eq!(None, bytesize.sizes());
     }
 
     #[test]
@@ -447,5 +463,7 @@ mod tests {
             ],
             sizes
         );
+        assert!(!bytesize.bulk_add(10, JsonSize::new(100)).is_ok());
+        assert_eq!(None, bytesize.size());
     }
 }
