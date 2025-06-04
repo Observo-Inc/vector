@@ -34,6 +34,8 @@ pub mod file;
 pub mod file_descriptors;
 #[cfg(feature = "sources-fluent")]
 pub mod fluent;
+#[cfg(feature = "observo")]
+pub mod gcp_gcs;
 #[cfg(feature = "sources-gcp_pubsub")]
 pub mod gcp_pubsub;
 #[cfg(feature = "sources-heroku_logs")]
@@ -56,10 +58,6 @@ pub mod kafka;
 pub mod kubernetes_logs;
 #[cfg(feature = "sources-logstash")]
 pub mod logstash;
-#[cfg(feature = "sources-scol")]
-pub mod scol;
-#[cfg(all(feature = "sources-stcp"))]
-pub mod stcp;
 #[cfg(feature = "sources-mongodb_metrics")]
 pub mod mongodb_metrics;
 #[cfg(feature = "sources-nats")]
@@ -80,6 +78,8 @@ pub mod prometheus;
 pub mod pulsar;
 #[cfg(feature = "sources-redis")]
 pub mod redis;
+#[cfg(feature = "sources-scol")]
+pub mod scol;
 #[cfg(feature = "sources-socket")]
 pub mod socket;
 #[cfg(feature = "sources-splunk_hec")]
@@ -88,6 +88,8 @@ pub mod splunk_hec;
 pub mod static_metrics;
 #[cfg(feature = "sources-statsd")]
 pub mod statsd;
+#[cfg(all(feature = "sources-stcp"))]
+pub mod stcp;
 #[cfg(feature = "sources-syslog")]
 pub mod syslog;
 #[cfg(feature = "sources-vector")]

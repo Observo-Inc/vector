@@ -1573,6 +1573,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "azs"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "azure_core",
+ "azure_identity",
+ "bytes 1.9.0",
+ "chrono",
+ "derivative",
+ "futures 0.3.31",
+ "http 0.2.9",
+ "hyper 0.14.28",
+ "inventory",
+ "once_cell",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tracing 0.1.41",
+ "typetag",
+ "vector-common",
+ "vector-config",
+ "vector-config-macros",
+ "vector-core",
+ "vector-lib",
+ "vrl",
+]
+
+[[package]]
 name = "azure_core"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2519,17 +2548,21 @@ dependencies = [
  "base64 0.13.1",
  "byteorder",
  "bytes 1.9.0",
+ "bytesize",
  "chrono",
  "csv-core",
  "derivative",
  "dyn-clone",
  "flate2",
  "futures 0.3.31",
+ "futures-util",
+ "indexmap 2.7.0",
  "indoc",
  "influxdb-line-protocol",
  "memchr",
  "metrics",
  "netflow_parser",
+ "obvrl",
  "ordered-float 4.5.0",
  "parquet",
  "prost 0.12.6",
@@ -2546,6 +2579,7 @@ dependencies = [
  "syslog_loose",
  "tokio",
  "tokio-util",
+ "toml",
  "tracing 0.1.41",
  "tracing-test",
  "uuid",
@@ -3190,9 +3224,9 @@ dependencies = [
 
 [[package]]
 name = "data-encoding"
-version = "2.6.0"
+version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8566979429cf69b49a5c740c60791108e86440e8be149bbea4fe54d2c32d6e2"
+checksum = "2a2330da5de22e8a3cb63252ce2abb30116bf5265e89c0e01bc17015ce30a476"
 
 [[package]]
 name = "data-url"
@@ -4200,6 +4234,48 @@ dependencies = [
  "pin-utils",
  "slab",
  "tokio-io",
+]
+
+[[package]]
+name = "gcs"
+version = "0.1.0"
+dependencies = [
+ "async-compression",
+ "async-trait",
+ "bytes 1.9.0",
+ "chrono",
+ "codecs",
+ "derivative",
+ "futures 0.3.31",
+ "h2 0.4.7",
+ "http 0.2.9",
+ "hyper 0.14.28",
+ "inventory",
+ "metrics",
+ "object_store",
+ "once_cell",
+ "pin-project",
+ "prost 0.12.6",
+ "prost-build 0.12.6",
+ "prost-types 0.12.6",
+ "serde",
+ "serde_json",
+ "serde_with 3.12.0",
+ "smallvec",
+ "snafu 0.7.5",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "toml",
+ "tonic 0.11.0",
+ "tonic-build 0.11.0",
+ "tracing 0.1.41",
+ "typetag",
+ "uuid",
+ "vector-common",
+ "vector-config",
+ "vector-lib",
+ "vrl",
 ]
 
 [[package]]
@@ -8696,6 +8772,7 @@ dependencies = [
  "rand_chacha 0.2.2",
  "rand_core 0.5.1",
  "rand_hc",
+ "rand_pcg",
 ]
 
 [[package]]
@@ -8762,6 +8839,15 @@ name = "rand_hc"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca3129af7b92a17112d59ad498c6f81eaf463253766b90396d39ea7a39d6613c"
+dependencies = [
+ "rand_core 0.5.1",
+]
+
+[[package]]
+name = "rand_pcg"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16abd0c1b639e9eb4d7c50c0b8100b0d0f849be2349829c740fe8e6eb4816429"
 dependencies = [
  "rand_core 0.5.1",
 ]
@@ -9685,6 +9771,7 @@ dependencies = [
  "rand 0.8.5",
  "rcgen",
  "regex",
+ "rstest",
  "sauth",
  "serde",
  "serde_json",
@@ -9696,6 +9783,8 @@ dependencies = [
  "tokio-util",
  "toml",
  "tracing 0.1.41",
+ "tracing-test",
+ "url",
  "vector-config",
  "vector-lib",
 ]
@@ -9732,8 +9821,10 @@ dependencies = [
  "chkpts",
  "chrono",
  "dashmap 5.5.3",
+ "data-encoding",
  "futures 0.3.31",
  "futures-util",
+ "hmac",
  "http 0.2.9",
  "hyper 0.14.28",
  "inventory",
@@ -9757,6 +9848,8 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "serde_with 3.12.0",
+ "sha1",
+ "sha2",
  "smallvec",
  "snafu 0.7.5",
  "tempfile",
@@ -9768,12 +9861,14 @@ dependencies = [
  "tracing 0.1.41",
  "tracing-test",
  "url",
+ "urlencoding",
  "uuid",
  "vector-common",
  "vector-config",
  "vector-config-macros",
  "vector-core",
  "vector-lib",
+ "vrl",
 ]
 
 [[package]]
@@ -10136,9 +10231,9 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.10.8"
+version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "793db75ad2bcafc3ffa7c68b215fee268f537982cd901d132f89c6343f3a3dc8"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures",
@@ -10449,6 +10544,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "ssa"
+version = "0.1.0"
+dependencies = [
+ "assert_matches",
+ "async-stream",
+ "async-trait",
+ "chrono",
+ "derivative",
+ "futures 0.3.31",
+ "indexmap 2.7.0",
+ "inventory",
+ "metrics",
+ "ordered-float 4.5.0",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_with 3.12.0",
+ "ssa",
+ "streaming_algorithms",
+ "tdigest",
+ "tokio",
+ "tokio-stream",
+ "toml",
+ "tracing 0.1.41",
+ "tracing-test",
+ "vector-common",
+ "vector-config",
+ "vector-config-macros",
+ "vector-core",
+ "vector-lib",
+ "vrl",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10497,6 +10626,18 @@ dependencies = [
  "futures-core",
  "pin-project",
  "tokio",
+]
+
+[[package]]
+name = "streaming_algorithms"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "557300f9a57963ccf859f0c7248481b7d19892c62a6f0332cc39bf8f01f0fc60"
+dependencies = [
+ "rand 0.7.3",
+ "serde",
+ "twox-hash 1.6.3",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -10766,6 +10907,15 @@ dependencies = [
  "cfg-if",
  "native-tls",
  "rustls-pemfile 2.1.0",
+]
+
+[[package]]
+name = "tdigest"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c45d225a08ebccf0e0c7d46db4066ea8ab05b29d3750ecc1a04f1675978bf3c8"
+dependencies = [
+ "ordered-float 2.10.1",
 ]
 
 [[package]]
@@ -11748,6 +11898,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
 dependencies = [
  "cfg-if",
+ "rand 0.8.5",
  "static_assertions",
 ]
 
@@ -12126,6 +12277,7 @@ dependencies = [
  "aws-smithy-types",
  "aws-types",
  "axum 0.6.20",
+ "azs",
  "azure_core",
  "azure_identity",
  "azure_storage",
@@ -12159,6 +12311,7 @@ dependencies = [
  "flate2",
  "futures 0.3.31",
  "futures-util",
+ "gcs",
  "glob",
  "goauth",
  "governor",
@@ -12252,6 +12405,7 @@ dependencies = [
  "snafu 0.7.5",
  "snap",
  "socket2 0.5.8",
+ "ssa",
  "stcp",
  "stream-cancel",
  "strip-ansi-escapes",
@@ -12377,13 +12531,17 @@ dependencies = [
  "paste",
  "pin-project",
  "rand 0.8.5",
+ "regex",
  "serde",
  "serde_json",
+ "serde_with 3.12.0",
+ "similar-asserts",
  "smallvec",
  "snafu 0.7.5",
  "stream-cancel",
  "tempfile",
  "tokio",
+ "tokio-util",
  "toml",
  "tracing 0.1.41",
  "tracing-test",
@@ -12462,9 +12620,11 @@ dependencies = [
  "dyn-clone",
  "enumflags2",
  "env-test-util",
+ "flate2",
  "float_eq",
  "futures 0.3.31",
  "futures-util",
+ "goauth",
  "headers 0.3.9",
  "http 0.2.9",
  "hyper 0.14.28",
@@ -12504,7 +12664,9 @@ dependencies = [
  "serde_yaml 0.9.34+deprecated",
  "similar-asserts",
  "smallvec",
+ "smpl_jwt",
  "snafu 0.7.5",
+ "snap",
  "socket2 0.5.8",
  "tokio",
  "tokio-openssl",
@@ -12524,8 +12686,10 @@ dependencies = [
  "vector-common",
  "vector-config",
  "vector-config-common",
+ "vector-core",
  "vector-lookup",
  "vrl",
+ "zstd 0.13.2",
 ]
 
 [[package]]
@@ -12618,6 +12782,7 @@ dependencies = [
 name = "vector-vrl-functions"
 version = "0.1.0"
 dependencies = [
+ "obvrl",
  "vrl",
 ]
 

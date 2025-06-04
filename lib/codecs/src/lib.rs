@@ -14,9 +14,9 @@ pub use decoding::{
     CharacterDelimitedDecoder, CharacterDelimitedDecoderConfig, GelfDeserializer,
     GelfDeserializerConfig, JsonDeserializer, JsonDeserializerConfig, LengthDelimitedDecoder,
     LengthDelimitedDecoderConfig, NativeDeserializer, NativeDeserializerConfig,
-    NativeJsonDeserializer, NativeJsonDeserializerConfig, NewlineDelimitedDecoder,
-    NewlineDelimitedDecoderConfig, OctetCountingDecoder, OctetCountingDecoderConfig,
-    StreamDecodingError,NetflowDecoder, NetflowDecoderConfig
+    NativeJsonDeserializer, NativeJsonDeserializerConfig, NetflowDecoder, NetflowDecoderConfig,
+    NewlineDelimitedDecoder, NewlineDelimitedDecoderConfig, OctetCountingDecoder,
+    OctetCountingDecoderConfig, StreamDecodingError,
 };
 #[cfg(feature = "syslog")]
 pub use decoding::{SyslogDeserializer, SyslogDeserializerConfig};
@@ -44,3 +44,9 @@ pub enum MetricTagValues {
     /// All tags are exposed as arrays of either string or null values.
     Full,
 }
+
+/// Actions like encoding and decoding.
+pub mod actions;
+/// Events related to codecs.
+pub mod internal_events;
+pub mod serde;

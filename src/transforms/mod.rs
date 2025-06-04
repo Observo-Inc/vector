@@ -32,6 +32,8 @@ pub mod throttle;
 
 #[cfg(feature = "transforms-hash_replace")]
 pub mod hash_replace;
+#[cfg(feature = "observo-ssa")]
+pub mod ssa;
 
 pub use vector_lib::transform::{
     FunctionTransform, OutputBuffer, SyncTransform, TaskTransform, Transform, TransformOutputs,

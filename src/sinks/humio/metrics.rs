@@ -20,7 +20,7 @@ use crate::{
     event::{Event, EventArray, EventContainer},
     sinks::{
         splunk_hec::common::SplunkHecDefaultBatchSettings,
-        util::{BatchConfig, Compression, TowerRequestConfig},
+        util::{BatchConfig, Compression},
         Healthcheck, VectorSink,
     },
     template::Template,
@@ -30,6 +30,7 @@ use crate::{
         FunctionTransform, OutputBuffer,
     },
 };
+use crate::sinks::util::http::RequestConfig;
 
 /// Configuration for the `humio_metrics` sink.
 //
@@ -120,7 +121,7 @@ pub struct HumioMetricsConfig {
 
     #[configurable(derived)]
     #[serde(default)]
-    request: TowerRequestConfig,
+    request: RequestConfig,
 
     #[configurable(derived)]
     #[serde(default)]
@@ -173,7 +174,7 @@ impl SinkConfig for HumioMetricsConfig {
             indexed_fields: self.indexed_fields.clone(),
             index: self.index.clone(),
             compression: self.compression,
-            request: self.request,
+            request: self.request.clone(),
             batch: self.batch,
             tls: self.tls.clone(),
             timestamp_nanos_key: None,

@@ -1,9 +1,9 @@
-use crate::codecs::Transformer;
-use vector_lib::codecs::{
+use super::Transformer;
+use crate::{
     encoding::{BatchSerializer, Framer, FramingConfig, Serializer, SerializerConfig},
     CharacterDelimitedEncoder, LengthDelimitedEncoder, NewlineDelimitedEncoder,
 };
-use vector_lib::configurable::configurable_component;
+use vector_config::configurable_component;
 
 /// Encoding configuration.
 #[configurable_component]
@@ -37,7 +37,7 @@ impl EncodingConfig {
     }
 
     /// Build the `Serializer` for this config.
-    pub fn build(&self) -> crate::Result<Serializer> {
+    pub fn build(&self) -> vector_common::Result<Serializer> {
         self.encoding.build()
     }
 }
@@ -94,7 +94,7 @@ impl EncodingConfigWithFraming {
     }
 
     /// Build the `Framer` and `Serializer` for this config.
-    pub fn build(&self, sink_type: SinkType) -> crate::Result<(Framer, Serializer)> {
+    pub fn build(&self, sink_type: SinkType) -> vector_common::Result<(Framer, Serializer)> {
         let framer = self.framing.as_ref().map(|framing| framing.build());
         let serializer = self.encoding.build()?;
 
@@ -133,7 +133,7 @@ impl EncodingConfigWithFraming {
 
     /// Build `BatchSerializer` for this config.
     /// None if serializer is not batched.
-    pub fn build_batched(&self) -> crate::Result<Option<BatchSerializer>> {
+    pub fn build_batched(&self) -> vector_common::Result<Option<BatchSerializer>> {
         let serializer = self.encoding.config().build_batched()?;
         Ok(serializer)
     }
@@ -162,10 +162,10 @@ where
 
 #[cfg(test)]
 mod test {
-    use vector_lib::lookup::lookup_v2::{parse_value_path, ConfigValuePath};
+    use lookup::lookup_v2::{parse_value_path, ConfigValuePath};
 
+    use super::super::TimestampFormat;
     use super::*;
-    use crate::codecs::encoding::TimestampFormat;
 
     #[test]
     fn deserialize_encoding_config() {

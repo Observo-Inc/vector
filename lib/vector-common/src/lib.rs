@@ -90,5 +90,8 @@ pub fn get_hostname() -> std::io::Result<String> {
     })
 }
 
-
 pub mod net;
+
+pub mod multiline;
+
+pub mod compression;

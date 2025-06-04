@@ -233,6 +233,7 @@ async fn splunk_passthrough_token() {
         request: Default::default(),
         tls: None,
         acknowledgements: Default::default(),
+        path: None,
         timestamp_nanos_key: None,
         timestamp_key: None,
         auto_extract_timestamp: None,

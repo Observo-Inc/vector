@@ -24,6 +24,7 @@ use crate::{
         Healthcheck, UriParseSnafu, VectorSink,
     },
     tls::{TlsConfig, TlsSettings},
+    APP_INFO,
 };
 
 #[derive(Debug, Snafu)]
@@ -129,7 +130,7 @@ impl SinkConfig for PubsubConfig {
         let client = HttpClient::new(tls_settings, cx.proxy(), &app_info)?;
 
         let healthcheck = healthcheck(client.clone(), sink.uri("")?, sink.auth.clone()).boxed();
-        sink.auth.spawn_regenerate_token();
+        sink.auth.spawn_regenerate_token(&APP_INFO);
 
         let sink = BatchedHttpSink::new(
             sink,
@@ -163,7 +164,7 @@ struct PubsubSink {
 impl PubsubSink {
     async fn from_config(config: &PubsubConfig) -> crate::Result<Self> {
         // We only need to load the credentials if we are not targeting an emulator.
-        let auth = config.auth.build(Scope::PubSub).await?;
+        let auth = config.auth.build(Scope::PubSub, &APP_INFO).await?;
 
         let uri_base = format!(
             "{}/v1/projects/{}/topics/{}",

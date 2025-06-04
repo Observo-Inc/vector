@@ -6,24 +6,23 @@ pub use file_source;
 pub use vector_api_client as api_client;
 pub use vector_buffers as buffers;
 #[cfg(feature = "test")]
-pub use vector_core::inet_test_util;
-#[cfg(feature = "test")]
 pub use vector_common::event_test_util;
 pub use vector_common::{
     assert_event_data_eq, btreemap, byte_size_of, byte_size_of::ByteSizeOf, conversion,
-    encode_logfmt, finalization, finalizer, id, impl_event_data_eq, internal_event, json_size,
-    registered_event, request_metadata, sensitive_string, shutdown, trigger, Error, Result,
-    TimeZone
+    encode_logfmt, finalization, finalizer, id, impl_event_data_eq, json_size, registered_event,
+    request_metadata, sensitive_string, shutdown, trigger, Error, Result, TimeZone,
 };
 pub use vector_config as configurable;
 pub use vector_config::impl_generate_config_from_default;
 #[cfg(feature = "vrl")]
 pub use vector_core::compile_vrl;
+pub use vector_core::test_util;
+#[cfg(feature = "test")]
+pub use vector_core::{assert_downcast_matches, inet_test_util, log_event};
 pub use vector_core::{
-    buckets, default_data_dir, emit, event, fanout, ipallowlist, metric_tags, metrics, partition,
-    quantiles, register, samples, schema, serde, sink, source, tcp, tls, transform,
-    EstimatedJsonEncodedSizeOf,
-    http, sender
+    buckets, default_data_dir, emit, event, fanout, http, ipallowlist, metric_tags, metrics,
+    partition, quantiles, register, samples, schema, sender, serde, sink, source, tcp, tls,
+    transform, EstimatedJsonEncodedSizeOf,
 };
 pub use vector_lookup as lookup;
 pub use vector_stream as stream;
@@ -52,9 +51,21 @@ pub mod prometheus {
     pub use prometheus_parser as parser;
 }
 
-pub use vector_common::{AppInfo, get_hostname};
-pub use vector_core::chkpts;
 pub use vector_common::net;
+pub use vector_common::{get_hostname, AppInfo};
+pub use vector_core::{chkpts, source::Source};
 
 #[cfg(feature = "lua")]
 pub use vector_core::lua_err;
+
+#[cfg(feature = "gcp")]
+pub use vector_core::gcp;
+
+pub use vector_core::internal_event;
+
+pub mod internal_events {
+    pub use crate::codecs::internal_events::*;
+    pub use vector_core::internal_events::*;
+}
+
+pub use vector_common::{compression, multiline};

@@ -19,7 +19,7 @@ use crate::{
         util::http::HttpRetryLogic,
     },
 };
-
+use crate::sinks::util::http::{validate_headers, RequestConfig};
 use super::{encoder::HecLogsEncoder, request_builder::HecLogsRequestBuilder, sink::HecLogsSink};
 
 /// Configuration for the `splunk_hec_logs` sink.
@@ -109,7 +109,7 @@ pub struct HecLogsSinkConfig {
 
     #[configurable(derived)]
     #[serde(default)]
-    pub request: TowerRequestConfig,
+    pub request: RequestConfig,
 
     #[configurable(derived)]
     pub tls: Option<TlsConfig>,
@@ -117,6 +117,10 @@ pub struct HecLogsSinkConfig {
     #[configurable(derived)]
     #[serde(default)]
     pub acknowledgements: HecClientAcknowledgementsConfig,
+
+    #[configurable(derived)]
+    #[serde(default)]
+    pub path: Option<String>,
 
     // This settings is relevant only for the `humio_logs` sink and should be left as `None`
     // everywhere else.
@@ -171,9 +175,10 @@ impl GenerateConfig for HecLogsSinkConfig {
             encoding: TextSerializerConfig::default().into(),
             compression: Compression::default(),
             batch: BatchConfig::default(),
-            request: TowerRequestConfig::default(),
+            request: RequestConfig::default(),
             tls: None,
             acknowledgements: Default::default(),
+            path: None,
             timestamp_nanos_key: None,
             timestamp_key: None,
             auto_extract_timestamp: None,
@@ -233,12 +238,15 @@ impl HecLogsSinkConfig {
             compression: self.compression,
         };
 
-        let request_settings = self.request.into_settings();
+        let request_settings = self.request.tower.into_settings();
+        let headers = validate_headers(&self.request.headers)?;
+
         let http_request_builder = Arc::new(HttpRequestBuilder::new(
             self.endpoint.clone(),
             self.endpoint_target,
             self.default_token.inner().to_owned(),
             self.compression,
+            headers,
         ));
         let http_service = ServiceBuilder::new()
             .settings(request_settings, HttpRetryLogic)
@@ -247,6 +255,7 @@ impl HecLogsSinkConfig {
                 Arc::clone(&http_request_builder),
                 self.endpoint_target,
                 self.auto_extract_timestamp.unwrap_or_default(),
+                self.path.clone()
             ));
 
         let service = HecService::new(
@@ -283,6 +292,7 @@ impl HecLogsSinkConfig {
 
 #[cfg(test)]
 mod tests {
+    use indexmap::IndexMap;
     use super::*;
     use crate::components::validation::prelude::*;
     use vector_lib::{
@@ -320,16 +330,23 @@ mod tests {
                 ),
                 compression: Compression::default(),
                 batch,
-                request: TowerRequestConfig {
-                    timeout_secs: 2,
-                    retry_attempts: 0,
-                    ..Default::default()
+                request: RequestConfig {
+                    tower: TowerRequestConfig {
+                        timeout_secs: 2,
+                        retry_attempts: 0,
+                        ..Default::default()
+                    },
+                    headers: IndexMap::<_, _>::from_iter([
+                        ("Accept".to_owned(), "text/plain".to_owned()),
+                        ("X-Foo".to_owned(), "bar".to_owned()),
+                    ])
                 },
                 tls: None,
                 acknowledgements: HecClientAcknowledgementsConfig {
                     indexer_acknowledgements_enabled: false,
                     ..Default::default()
                 },
+                path: None,
                 timestamp_nanos_key: None,
                 timestamp_key: None,
                 auto_extract_timestamp: None,

@@ -3,10 +3,10 @@ use std::{
     sync::Arc,
     task::{ready, Context, Poll},
 };
-
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
-use http::Request;
+use http::{HeaderName, Request, HeaderValue};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
@@ -186,6 +186,7 @@ pub struct HttpRequestBuilder {
     // A Splunk channel must be a GUID/UUID formatted value
     // https://docs.splunk.com/Documentation/Splunk/8.2.3/Data/AboutHECIDXAck#About_channels_and_sending_data
     pub channel: String,
+    pub headers: IndexMap<HeaderName, HeaderValue>,
 }
 
 #[derive(Default)]
@@ -202,6 +203,7 @@ impl HttpRequestBuilder {
         endpoint_target: EndpointTarget,
         default_token: String,
         compression: Compression,
+        headers: IndexMap<HeaderName, HeaderValue>,
     ) -> Self {
         let channel = Uuid::new_v4().hyphenated().to_string();
         Self {
@@ -210,6 +212,7 @@ impl HttpRequestBuilder {
             default_token,
             compression,
             channel,
+            headers,
         }
     }
 
@@ -258,6 +261,16 @@ impl HttpRequestBuilder {
             )
             .header("X-Splunk-Request-Channel", self.channel.as_str());
 
+        let headers = builder
+            .headers_mut()
+            .ok_or_else(|| {
+                crate::Error::from("Failed to access headers in http::Request builder")
+            })?;
+
+        for (header, value) in self.headers.iter() {
+            headers.insert(header, value.clone());
+        }
+
         if let Some(ce) = self.compression.content_encoding() {
             builder = builder.header("Content-Encoding", ce);
         }
@@ -281,6 +294,8 @@ mod tests {
 
     use bytes::Bytes;
     use futures_util::{poll, stream::FuturesUnordered, StreamExt};
+    use http::{HeaderName, HeaderValue};
+    use indexmap::IndexMap;
     use tower::{util::BoxService, Service, ServiceExt};
     use vector_lib::internal_event::CountByteSize;
     use vector_lib::{
@@ -322,12 +337,14 @@ mod tests {
             EndpointTarget::default(),
             String::from(TOKEN),
             Compression::default(),
+            IndexMap::default()
         ));
         let http_service = build_http_batch_service(
             client.clone(),
             Arc::clone(&http_request_builder),
             EndpointTarget::Event,
             false,
+            None
         );
         HecService::new(
             BoxService::new(http_service),
@@ -601,4 +618,172 @@ mod tests {
             Poll::Ready(Ok(_))
         ));
     }
+
+    #[tokio::test]
+    async fn hec_service_with_custom_headers() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/services/collector/event"))
+            .and(header("X-Service-Header", "service-value"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(HecAckResponseBody {
+                ack_id: Some(123),
+            }))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/services/collector/ack"))
+            .respond_with(ack_response_always_succeed)
+            .mount(&mock_server)
+            .await;
+
+        let mut custom_headers = IndexMap::new();
+        custom_headers.insert(
+            HeaderName::from_static("x-service-header"),
+            HeaderValue::from_static("service-value"),
+        );
+
+        let acknowledgements_config = HecClientAcknowledgementsConfig {
+            query_interval: NonZeroU8::new(1).unwrap(),
+            ..Default::default()
+        };
+
+        let app_info = crate::app_info();
+        let client = HttpClient::new(None, &ProxyConfig::default(), &app_info).unwrap();
+        let http_request_builder = Arc::new(HttpRequestBuilder::new(
+            mock_server.uri(),
+            EndpointTarget::default(),
+            String::from(TOKEN),
+            Compression::default(),
+            custom_headers,
+        ));
+
+        let http_service = build_http_batch_service(
+            client.clone(),
+            Arc::clone(&http_request_builder),
+            EndpointTarget::Event,
+            false,
+            None,
+        );
+
+        let mut service = HecService::new(
+            BoxService::new(http_service),
+            Some(client),
+            http_request_builder,
+            acknowledgements_config,
+        );
+
+        let request = get_hec_request();
+        let response = service.ready().await.unwrap().call(request).await.unwrap();
+        assert_eq!(EventStatus::Delivered, response.event_status);
+    }
+
+    #[tokio::test]
+    async fn empty_headers() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/services/collector/event"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(HecAckResponseBody {
+                ack_id: None,
+            }))
+            .mount(&mock_server)
+            .await;
+
+        let custom_headers = IndexMap::default();
+
+        let app_info = crate::app_info();
+        let client = HttpClient::new(None, &ProxyConfig::default(), &app_info).unwrap();
+        let http_request_builder = Arc::new(HttpRequestBuilder::new(
+            mock_server.uri(),
+            EndpointTarget::Event,
+            String::from(TOKEN),
+            Compression::default(),
+            custom_headers,
+        ));
+
+        let http_service = build_http_batch_service(
+            client.clone(),
+            Arc::clone(&http_request_builder),
+            EndpointTarget::Event,
+            false,
+            None,
+        );
+
+        let mut service = HecService::new(
+            BoxService::new(http_service),
+            None, // No ack client needed for this test
+            http_request_builder,
+            HecClientAcknowledgementsConfig {
+                indexer_acknowledgements_enabled: false,
+                ..Default::default()
+            },
+        );
+
+        let request = get_hec_request();
+        let response = service.ready().await.unwrap().call(request).await.unwrap();
+        assert_eq!(EventStatus::Delivered, response.event_status);
+    }
+
+    #[tokio::test]
+    async fn multiple_headers_with_various_values() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/services/collector/event"))
+            .and(header("X-Special-Chars", "value-with-dashes_and_underscores"))
+            .and(header("X-Numeric", "12345"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(HecAckResponseBody {
+                ack_id: None,
+            }))
+            .expect(1) // Verify the mock was actually called
+            .mount(&mock_server)
+            .await;
+
+        let custom_headers: IndexMap<HeaderName, HeaderValue> = [
+            (
+                HeaderName::from_static("x-special-chars"),
+                HeaderValue::from_str("value-with-dashes_and_underscores").unwrap(),
+            ),
+            (
+                HeaderName::from_static("x-numeric"),
+                HeaderValue::from_str("12345").unwrap(),
+            ),
+        ].into();
+
+        let app_info = crate::app_info();
+        let client = HttpClient::new(None, &ProxyConfig::default(), &app_info).unwrap();
+        let http_request_builder = Arc::new(HttpRequestBuilder::new(
+            mock_server.uri(),
+            EndpointTarget::Event,
+            String::from(TOKEN),
+            Compression::default(),
+            custom_headers,
+        ));
+
+        let http_service = build_http_batch_service(
+            client.clone(),
+            Arc::clone(&http_request_builder),
+            EndpointTarget::Event,
+            false,
+            None,
+        );
+
+        let mut service = HecService::new(
+            BoxService::new(http_service),
+            None,
+            http_request_builder,
+            HecClientAcknowledgementsConfig {
+                indexer_acknowledgements_enabled: false,
+                ..Default::default()
+            },
+        );
+
+        let request = get_hec_request();
+        let response = service.ready().await.unwrap().call(request).await.unwrap();
+        assert_eq!(EventStatus::Delivered, response.event_status);
+    }
 }
+
+

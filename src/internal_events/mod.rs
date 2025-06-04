@@ -27,8 +27,8 @@ mod aws_kinesis_firehose;
 #[cfg(any(feature = "sources-aws_s3", feature = "sources-aws_sqs",))]
 mod aws_sqs;
 mod batch;
-mod codecs;
-mod common;
+use vector_lib::codecs::internal_events::codecs;
+pub use vector_lib::internal_events::common;
 mod conditions;
 #[cfg(feature = "sources-datadog_agent")]
 mod datadog_agent;

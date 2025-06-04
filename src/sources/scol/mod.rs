@@ -1,23 +1,19 @@
-/**
-This file is NOT part of the open-source components licensed under the Mozilla Public License, v. 2.0 (MPL-2.0).
-Proprietary and Confidential – © 2025 Observo Inc.
-Unauthorized copying, modification, distribution, or disclosure of this file, via any medium, is strictly prohibited.
-This file is distributed separately and is not subject to the terms of the MPL-2.0.
-**/
-use std::collections::BTreeSet;
+/// This file is NOT part of the open-source components licensed under the Mozilla Public License, v. 2.0 (MPL-2.0).
+/// Proprietary and Confidential – © 2025 Observo Inc.
+/// Unauthorized copying, modification, distribution, or disclosure of this file, via any medium, is strictly prohibited.
+/// This file is distributed separately and is not subject to the terms of the MPL-2.0.
 use futures_util::FutureExt;
+use std::collections::BTreeSet;
 
-pub use scol::{Config, EventTx};
-use smallvec::SmallVec;
-use vector_lib::{config::{DataType, LogNamespace, SourceOutput}, event::Event, schema::Definition, sender::ClosedError, source::Source, Result};
+pub use scol::Config;
+use vector_lib::{
+    config::{DataType, LogNamespace, SourceOutput},
+    schema::Definition,
+    source::Source,
+    Result,
+};
 
-use crate::{config::{SourceConfig, SourceContext}, SourceSender};
-
-impl EventTx for SourceSender {
-    async fn send(&mut self, evts: SmallVec<[Event; 1]>) -> std::result::Result<(), ClosedError> {
-        self.send_batch(evts).await
-    }
-}
+use crate::config::{SourceConfig, SourceContext};
 
 #[async_trait::async_trait]
 #[typetag::serde(name = "scol")]
@@ -28,26 +24,23 @@ impl SourceConfig for Config {
         let src = self
             .clone()
             .build_source(cx.out, cx.shutdown, chkptr, lns)
-            .map(|r| {
-                match r {
-                    Ok(_) => Ok(()),
-                    Err(e) => {
-                        error!("Source terminated: {}", e);
-                        Err(())
-                    }
+            .map(|r| match r {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    error!("Source terminated: {}", e);
+                    Err(())
                 }
             });
         Ok(Box::pin(src))
     }
 
-    fn outputs(&self, global: LogNamespace) -> Vec<SourceOutput>  {
+    fn outputs(&self, global: LogNamespace) -> Vec<SourceOutput> {
         let log_namespace = global.merge(self.log_namespace);
 
         let lns_set = BTreeSet::from([log_namespace]);
 
         let schema_definition =
-            Definition::default_for_namespace(&lns_set)
-                .with_standard_vector_source_metadata();
+            Definition::default_for_namespace(&lns_set).with_standard_vector_source_metadata();
 
         vec![SourceOutput::new_maybe_logs(
             DataType::Log,
@@ -64,7 +57,13 @@ impl SourceConfig for Config {
 mod tests {
     use std::time::Duration;
 
-    use futures::{future::{self, Either::{Left, Right}}, StreamExt};
+    use futures::{
+        future::{
+            self,
+            Either::{Left, Right},
+        },
+        StreamExt,
+    };
     use scol::Config;
     // NOTE: Not having this conditionally compiled on `scol` feature `test-scenarios` is _deliberate_.
     // We don't want surprises where-in the tests run while feature `observo` is enabled and yet
@@ -72,25 +71,28 @@ mod tests {
     // `cargo test -F observo-test` (so we want `cargo build -F observo` to work but
     // `cargo test -F observo` to fail, at the time of writing this there is no better way
     // to do this in Cargo). -jj
+    use crate::test_util::components::{assert_source_compliance, SOURCE_TAGS};
     use scol::test_scenarios as s;
     use vector_common::await_result;
     use vector_lib::config::LogNamespace;
     use vector_lib::event::Event;
     use vector_lib::shutdown::ShutdownSignal;
     use vector_lib::{chkpts::Store, Result};
-    use crate::test_util::components::{assert_source_compliance, SOURCE_TAGS};
 
     use crate::SourceSender;
 
     type CheckpointStore = Box<dyn Store>;
 
-    async fn run(config: String, n_evts: usize, ckkpt_store: Option<CheckpointStore>) -> Result<Vec<Event>> {
-        let chkptr =
-            if let Some(chkpt_store) = ckkpt_store {
-                Some(chkpt_store.accessor(s::COMPONENT_KEY.into()))
-            } else {
-                None
-            };
+    async fn run(
+        config: String,
+        n_evts: usize,
+        ckkpt_store: Option<CheckpointStore>,
+    ) -> Result<Vec<Event>> {
+        let chkptr = if let Some(chkpt_store) = ckkpt_store {
+            Some(chkpt_store.accessor(s::COMPONENT_KEY.into()))
+        } else {
+            None
+        };
         assert_source_compliance(&SOURCE_TAGS, async move {
             let (tx, rx) = SourceSender::new_test();
             let (trigger, signal, _) = ShutdownSignal::new_wired();
@@ -103,14 +105,14 @@ mod tests {
                     trigger.cancel();
                     f_src.as_mut().await.expect("Source did not stop cleanly");
                     Ok(evts)
-                },
+                }
                 Left((Err(e), _)) => {
                     error!("Source failed to start: {:?}", e);
                     Err(e)
-                },
+                }
                 Left((Ok(_), _)) => {
                     panic!("Unreacheable branch taken while trying to run source!")
-                },
+                }
             }
         })
         .await

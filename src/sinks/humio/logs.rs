@@ -16,7 +16,10 @@ use crate::{
             },
             logs::config::HecLogsSinkConfig,
         },
-        util::{BatchConfig, Compression, TowerRequestConfig},
+        util::{
+            BatchConfig, Compression,
+            http::RequestConfig
+        },
         Healthcheck, VectorSink,
     },
     template::Template,
@@ -107,7 +110,7 @@ pub struct HumioLogsConfig {
 
     #[configurable(derived)]
     #[serde(default)]
-    pub(super) request: TowerRequestConfig,
+    pub(super) request: RequestConfig,
 
     #[configurable(derived)]
     #[serde(default)]
@@ -159,7 +162,7 @@ impl GenerateConfig for HumioLogsConfig {
             index: None,
             host_key: config_host_key_target_path(),
             compression: Compression::default(),
-            request: TowerRequestConfig::default(),
+            request: RequestConfig::default(),
             batch: BatchConfig::default(),
             tls: None,
             timestamp_nanos_key: None,
@@ -200,7 +203,7 @@ impl HumioLogsConfig {
             encoding: self.encoding.clone(),
             compression: self.compression,
             batch: self.batch,
-            request: self.request,
+            request: self.request.clone(),
             tls: self.tls.clone(),
             acknowledgements: HecClientAcknowledgementsConfig {
                 indexer_acknowledgements_enabled: false,
@@ -209,6 +212,7 @@ impl HumioLogsConfig {
             timestamp_key: Some(config_timestamp_key_target_path()),
             endpoint_target: EndpointTarget::Event,
             auto_extract_timestamp: None,
+            path: None,
         }
     }
 }
@@ -389,7 +393,7 @@ mod integration_tests {
             indexed_fields: vec![],
             index: None,
             compression: Compression::None,
-            request: TowerRequestConfig::default(),
+            request: RequestConfig::default(),
             batch,
             tls: None,
             timestamp_nanos_key: timestamp_nanos_key(),

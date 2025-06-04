@@ -15,7 +15,7 @@ pub mod metrics;
 pub mod partition;
 pub mod vec;
 
-pub use compression::Compression;
+pub use vector_lib::sink::compression::*;
 pub use partition::{Partition, PartitionBuffer, PartitionInnerBuffer};
 
 #[derive(Debug)]

@@ -4,17 +4,17 @@ use chrono::{DateTime, Utc};
 use core::fmt::Debug;
 use std::collections::BTreeMap;
 
+use lookup::lookup_v2::ConfigValuePath;
+use lookup::{event_path, PathPrefix};
 use ordered_float::NotNan;
 use serde::{Deserialize, Deserializer};
-use vector_lib::configurable::configurable_component;
-use vector_lib::event::{LogEvent, MaybeAsLogMut};
-use vector_lib::lookup::lookup_v2::ConfigValuePath;
-use vector_lib::lookup::{event_path, PathPrefix};
-use vector_lib::schema::meaning;
+use vector_config::configurable_component;
+use vector_core::event::{LogEvent, MaybeAsLogMut};
+use vector_core::schema::meaning;
 use vrl::path::OwnedValuePath;
 use vrl::value::Value;
 
-use crate::{event::Event, serde::is_default};
+use vector_core::{event::Event, serde::is_default};
 
 /// Transformations to prepare an event for serialization.
 #[configurable_component(no_deser)]
@@ -72,7 +72,7 @@ impl Transformer {
         only_fields: Option<Vec<ConfigValuePath>>,
         except_fields: Option<Vec<ConfigValuePath>>,
         timestamp_format: Option<TimestampFormat>,
-    ) -> Result<Self, crate::Error> {
+    ) -> Result<Self, vector_common::Error> {
         Self::validate_fields(only_fields.as_ref(), except_fields.as_ref())?;
 
         Ok(Self {
@@ -104,7 +104,7 @@ impl Transformer {
     fn validate_fields(
         only_fields: Option<&Vec<ConfigValuePath>>,
         except_fields: Option<&Vec<ConfigValuePath>>,
-    ) -> crate::Result<()> {
+    ) -> vector_common::Result<()> {
         if let (Some(only_fields), Some(except_fields)) = (only_fields, except_fields) {
             if except_fields
                 .iter()
@@ -228,11 +228,11 @@ impl Transformer {
     ///
     /// Returns `Err` if the new `except_fields` fail validation, i.e. are not mutually exclusive
     /// with `only_fields`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test"))]
     pub fn set_except_fields(
         &mut self,
         except_fields: Option<Vec<ConfigValuePath>>,
-    ) -> crate::Result<()> {
+    ) -> vector_common::Result<()> {
         Self::validate_fields(self.only_fields.as_ref(), except_fields.as_ref())?;
         self.except_fields = except_fields;
         Ok(())
@@ -266,12 +266,12 @@ pub enum TimestampFormat {
 #[cfg(test)]
 mod tests {
     use indoc::indoc;
-    use vector_lib::btreemap;
-    use vector_lib::config::{log_schema, LogNamespace};
-    use vector_lib::lookup::path::parse_target_path;
+    use lookup::path::parse_target_path;
+    use vector_common::btreemap;
+    use vector_core::config::{log_schema, LogNamespace};
     use vrl::value::Kind;
 
-    use crate::config::schema;
+    use vector_core::schema;
 
     use super::*;
     use std::{collections::BTreeMap, sync::Arc};

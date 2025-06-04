@@ -16,10 +16,10 @@ use hyper::header::AUTHORIZATION;
 use smpl_jwt::Jwt;
 use snafu::{ResultExt, Snafu};
 use tokio::sync::watch;
-use vector_lib::configurable::configurable_component;
-use vector_lib::sensitive_string::SensitiveString;
+use vector_common::{sensitive_string::SensitiveString, AppInfo};
+use vector_config::configurable_component;
 
-use crate::{config::ProxyConfig, http::HttpClient, http::HttpError};
+use crate::{config::proxy::ProxyConfig, http::HttpClient, http::HttpError};
 
 const SERVICE_ACCOUNT_TOKEN_URL: &str =
     "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
@@ -103,7 +103,7 @@ pub struct GcpAuthConfig {
 }
 
 impl GcpAuthConfig {
-    pub async fn build(&self, scope: Scope) -> crate::Result<GcpAuthenticator> {
+    pub async fn build(&self, scope: Scope, app_info: &AppInfo) -> crate::Result<GcpAuthenticator> {
         Ok(if self.skip_authentication {
             GcpAuthenticator::None
         } else {
@@ -112,7 +112,7 @@ impl GcpAuthConfig {
             match (&creds_path, &self.api_key) {
                 (Some(path), _) => GcpAuthenticator::from_file(path, scope).await?,
                 (None, Some(api_key)) => GcpAuthenticator::from_api_key(api_key.inner())?,
-                (None, None) => GcpAuthenticator::new_implicit().await?,
+                (None, None) => GcpAuthenticator::new_implicit(app_info).await?,
             }
         })
     }
@@ -139,8 +139,8 @@ impl GcpAuthenticator {
         Ok(Self::Credentials(Arc::new(InnerCreds { creds, token })))
     }
 
-    async fn new_implicit() -> crate::Result<Self> {
-        let token = RwLock::new(get_token_implicit().await?);
+    async fn new_implicit(app_info: &AppInfo) -> crate::Result<Self> {
+        let token = RwLock::new(get_token_implicit(app_info).await?);
         let creds = None;
         Ok(Self::Credentials(Arc::new(InnerCreds { creds, token })))
     }
@@ -189,13 +189,13 @@ impl GcpAuthenticator {
         }
     }
 
-    pub fn spawn_regenerate_token(&self) -> watch::Receiver<()> {
+    pub fn spawn_regenerate_token(&self, app_info: &'static AppInfo) -> watch::Receiver<()> {
         let (sender, receiver) = watch::channel(());
-        tokio::spawn(self.clone().token_regenerator(sender));
+        tokio::spawn(self.clone().token_regenerator(sender, app_info));
         receiver
     }
 
-    async fn token_regenerator(self, sender: watch::Sender<()>) {
+    async fn token_regenerator(self, sender: watch::Sender<()>, app_info: &'static AppInfo) {
         match self {
             Self::Credentials(inner) => {
                 let expires_in = inner.token.read().unwrap().expires_in() as u64;
@@ -204,7 +204,7 @@ impl GcpAuthenticator {
                 loop {
                     tokio::time::sleep(deadline).await;
                     debug!("Renewing GCP authentication token.");
-                    match inner.regenerate_token().await {
+                    match inner.regenerate_token(app_info).await {
                         Ok(()) => {
                             sender.send_replace(());
                             let expires_in = inner.token.read().unwrap().expires_in() as u64;
@@ -240,10 +240,10 @@ impl GcpAuthenticator {
 }
 
 impl InnerCreds {
-    async fn regenerate_token(&self) -> crate::Result<()> {
+    async fn regenerate_token(&self, app_info: &AppInfo) -> crate::Result<()> {
         let token = match &self.creds {
             Some((creds, scope)) => fetch_token(creds, scope).await?,
-            None => get_token_implicit().await?,
+            None => get_token_implicit(app_info).await?,
         };
         *self.token.write().unwrap() = token;
         Ok(())
@@ -272,7 +272,7 @@ async fn fetch_token(creds: &Credentials, scope: &Scope) -> crate::Result<Token>
         .map_err(Into::into)
 }
 
-async fn get_token_implicit() -> Result<Token, GcpError> {
+async fn get_token_implicit(app_info: &AppInfo) -> Result<Token, GcpError> {
     debug!("Fetching implicit GCP authentication token.");
     let req = http::Request::get(SERVICE_ACCOUNT_TOKEN_URL)
         .header("Metadata-Flavor", "Google")
@@ -280,7 +280,6 @@ async fn get_token_implicit() -> Result<Token, GcpError> {
         .unwrap();
 
     let proxy = ProxyConfig::from_env();
-    let app_info = crate::app_info();
     let res = HttpClient::new(None, &proxy, &app_info)
         .context(BuildHttpClientSnafu)?
         .send(req)
@@ -370,6 +369,10 @@ mod tests {
 
     async fn build_auth(toml: &str) -> crate::Result<GcpAuthenticator> {
         let config: GcpAuthConfig = toml::from_str(toml).expect("Invalid TOML");
-        config.build(Scope::Compute).await
+        let app_info = vector_common::AppInfo {
+            name: "vector",
+            version: String::from("0.44.5"),
+        };
+        config.build(Scope::Compute, &app_info).await
     }
 }

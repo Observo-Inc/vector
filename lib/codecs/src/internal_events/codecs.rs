@@ -1,6 +1,12 @@
+#![allow(missing_docs)]
+
 use metrics::counter;
-use vector_lib::internal_event::InternalEvent;
-use vector_lib::internal_event::{error_stage, error_type, ComponentEventsDropped, UNINTENTIONAL};
+use tracing::error;
+use vector_common::internal_event::InternalEvent;
+use vector_common::internal_event::{
+    error_stage, error_type, ComponentEventsDropped, UNINTENTIONAL,
+};
+use vector_core::emit;
 
 #[derive(Debug)]
 pub struct DecoderFramingError<E> {
@@ -29,7 +35,7 @@ impl<E: std::fmt::Display> InternalEvent for DecoderFramingError<E> {
 
 #[derive(Debug)]
 pub struct DecoderDeserializeError<'a> {
-    pub error: &'a crate::Error,
+    pub error: &'a vector_common::Error,
 }
 
 impl InternalEvent for DecoderDeserializeError<'_> {
@@ -54,7 +60,7 @@ impl InternalEvent for DecoderDeserializeError<'_> {
 
 #[derive(Debug)]
 pub struct EncoderFramingError<'a> {
-    pub error: &'a vector_lib::codecs::encoding::BoxedFramingError,
+    pub error: &'a crate::encoding::BoxedFramingError,
 }
 
 impl InternalEvent for EncoderFramingError<'_> {
@@ -81,7 +87,7 @@ impl InternalEvent for EncoderFramingError<'_> {
 
 #[derive(Debug)]
 pub struct EncoderSerializeError<'a> {
-    pub error: &'a crate::Error,
+    pub error: &'a vector_common::Error,
 }
 
 impl InternalEvent for EncoderSerializeError<'_> {

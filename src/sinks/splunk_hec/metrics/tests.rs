@@ -331,6 +331,7 @@ async fn splunk_passthrough_token() {
         tls: None,
         acknowledgements: Default::default(),
         default_namespace: None,
+        path: None
     };
     let cx = SinkContext::default();
 

@@ -19,13 +19,14 @@ use crate::{
             EndpointTarget, SplunkHecDefaultBatchSettings,
         },
         util::{
-            http::HttpRetryLogic, BatchConfig, Compression, ServiceBuilderExt, TowerRequestConfig,
+            http::HttpRetryLogic, BatchConfig, Compression, ServiceBuilderExt,
         },
         Healthcheck,
     },
     template::Template,
     tls::TlsConfig,
 };
+use crate::sinks::util::http::{validate_headers, RequestConfig};
 
 /// Configuration of the `splunk_hec_metrics` sink.
 #[configurable_component(sink(
@@ -111,7 +112,7 @@ pub struct HecMetricsSinkConfig {
 
     #[configurable(derived)]
     #[serde(default)]
-    pub request: TowerRequestConfig,
+    pub request: RequestConfig,
 
     #[configurable(derived)]
     pub tls: Option<TlsConfig>,
@@ -119,6 +120,10 @@ pub struct HecMetricsSinkConfig {
     #[configurable(derived)]
     #[serde(default)]
     pub acknowledgements: HecClientAcknowledgementsConfig,
+
+    #[configurable(derived)]
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 impl GenerateConfig for HecMetricsSinkConfig {
@@ -133,9 +138,10 @@ impl GenerateConfig for HecMetricsSinkConfig {
             source: None,
             compression: Compression::default(),
             batch: BatchConfig::default(),
-            request: TowerRequestConfig::default(),
+            request: RequestConfig::default(),
             tls: None,
             acknowledgements: Default::default(),
+            path: None,
         })
         .unwrap()
     }
@@ -177,12 +183,15 @@ impl HecMetricsSinkConfig {
             compression: self.compression,
         };
 
-        let request_settings = self.request.into_settings();
+        let request_settings = self.request.tower.into_settings();
+        let headers = validate_headers(&self.request.headers)?;
+
         let http_request_builder = Arc::new(HttpRequestBuilder::new(
             self.endpoint.clone(),
             EndpointTarget::default(),
             self.default_token.inner().to_owned(),
             self.compression,
+            headers,
         ));
         let http_service = ServiceBuilder::new()
             .settings(request_settings, HttpRetryLogic)
@@ -191,6 +200,7 @@ impl HecMetricsSinkConfig {
                 Arc::clone(&http_request_builder),
                 EndpointTarget::Event,
                 false,
+                self.path.clone()
             ));
 
         let service = HecService::new(

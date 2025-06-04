@@ -27,7 +27,7 @@ use crate::config::OutputId;
 pub mod array;
 pub mod discriminant;
 mod estimated_json_encoded_size_of;
-mod log_event;
+pub mod log_event;
 #[cfg(feature = "lua")]
 pub mod lua;
 pub mod merge_state;

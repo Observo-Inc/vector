@@ -1,5 +1,4 @@
 #![allow(missing_docs)]
-use futures::future::BoxFuture;
 use snafu::Snafu;
 
 pub mod prelude;
@@ -24,6 +23,8 @@ pub mod aws_s3;
 pub mod aws_s_s;
 #[cfg(feature = "sinks-axiom")]
 pub mod axiom;
+#[cfg(feature = "sinks-azs")]
+pub mod azs;
 #[cfg(feature = "sinks-azure_blob")]
 pub mod azure_blob;
 #[cfg(feature = "sinks-azure_blob")]
@@ -111,7 +112,7 @@ pub mod websocket;
 
 pub use vector_lib::{config::Input, sink::VectorSink};
 
-pub type Healthcheck = BoxFuture<'static, crate::Result<()>>;
+pub use vector_lib::sink::healthcheck::Healthcheck;
 
 /// Common build errors
 #[derive(Debug, Snafu)]

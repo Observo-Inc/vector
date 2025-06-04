@@ -26,6 +26,7 @@ use vector_lib::{
 use vrl::value::Kind;
 
 use crate::sinks::util::service::TowerRequestConfigDefaults;
+use crate::APP_INFO;
 use crate::{
     codecs::{self, EncodingConfig},
     config::{GenerateConfig, SinkConfig, SinkContext},
@@ -238,11 +239,13 @@ pub enum ChronicleError {
 #[typetag::serde(name = "gcp_chronicle_unstructured")]
 impl SinkConfig for ChronicleUnstructuredConfig {
     async fn build(&self, cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
-        let creds = self.auth.build(Scope::MalachiteIngestion).await?;
+        let creds = self
+            .auth
+            .build(Scope::MalachiteIngestion, &APP_INFO)
+            .await?;
 
         let tls = TlsSettings::from_options(self.tls.as_ref())?;
-        let app_info = crate::app_info();
-        let client = HttpClient::new(tls, cx.proxy(), &app_info)?;
+        let client = HttpClient::new(tls, cx.proxy(), &APP_INFO)?;
 
         let endpoint = self.create_endpoint("v2/unstructuredlogentries:batchCreate")?;
 
@@ -250,7 +253,7 @@ impl SinkConfig for ChronicleUnstructuredConfig {
         let healthcheck_endpoint = self.create_endpoint("v2/logtypes")?;
 
         let healthcheck = build_healthcheck(client.clone(), &healthcheck_endpoint, creds.clone())?;
-        creds.spawn_regenerate_token();
+        creds.spawn_regenerate_token(&APP_INFO);
         let sink = self.build_sink(client, endpoint, creds)?;
 
         Ok((sink, healthcheck))

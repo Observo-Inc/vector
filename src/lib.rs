@@ -28,6 +28,8 @@ extern crate tracing;
 #[macro_use]
 extern crate vector_lib;
 
+use std::sync::LazyLock;
+
 pub use indoc::indoc;
 
 #[cfg(all(feature = "tikv-jemallocator", not(feature = "allocation-tracing")))]
@@ -70,14 +72,14 @@ pub mod async_read;
 #[cfg(feature = "aws-config")]
 pub mod aws;
 #[allow(unreachable_pub)]
-pub mod codecs;
+pub use vector_lib::codecs::actions as codecs;
 pub mod common;
 mod convert_config;
 pub mod encoding_transcode;
 pub mod enrichment_tables;
 pub mod extra_context;
 #[cfg(feature = "gcp")]
-pub mod gcp;
+pub use vector_lib::gcp;
 pub(crate) mod graph;
 pub mod heartbeat;
 
@@ -86,7 +88,7 @@ pub mod heartbeat;
 pub mod kafka;
 #[allow(unreachable_pub)]
 pub mod kubernetes;
-pub mod line_agg;
+pub use vector_lib::multiline::line_agg;
 pub mod list;
 #[cfg(any(feature = "sources-nats", feature = "sinks-nats"))]
 pub(crate) mod nats;
@@ -95,7 +97,7 @@ pub mod net;
 pub(crate) mod proto;
 pub mod providers;
 pub mod secrets;
-pub mod serde;
+pub use vector_lib::codecs::serde;
 #[cfg(windows)]
 pub mod service;
 pub mod signal;
@@ -111,6 +113,8 @@ pub mod stats;
 pub mod tap;
 pub mod template;
 pub mod test_util;
+#[cfg(test)]
+pub use test_util::assert_downcast_matches;
 #[cfg(feature = "api-client")]
 #[allow(unreachable_pub)]
 pub mod top;
@@ -127,9 +131,11 @@ pub mod validate;
 pub mod vector_windows;
 
 pub use source_sender::SourceSender;
+#[cfg(test)]
+pub use vector_lib::log_event;
 pub use vector_lib::{event, metrics, schema, tcp, tls};
+pub use vector_lib::{http, sender, AppInfo};
 pub use vector_lib::{shutdown, Error, Result};
-pub use vector_lib::{http, AppInfo, sender};
 
 /// Returns the application name and version information.
 pub fn app_info() -> AppInfo {
@@ -138,6 +144,9 @@ pub fn app_info() -> AppInfo {
         version: get_version(),
     }
 }
+
+/// App info for vector process
+pub static APP_INFO: LazyLock<AppInfo> = LazyLock::new(|| app_info());
 
 static APP_NAME_SLUG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 

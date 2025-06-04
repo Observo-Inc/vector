@@ -4,6 +4,7 @@ use std::{collections::HashMap, fmt, sync::Arc, time::Instant};
 use chrono::Utc;
 use futures::{Stream, StreamExt};
 use metrics::{histogram, Histogram};
+use smallvec::SmallVec;
 use tracing::Span;
 use vector_lib::buffers::topology::channel::{self, LimitedReceiver, LimitedSender};
 use vector_lib::buffers::EventCount;
@@ -13,6 +14,7 @@ use vector_lib::event::{into_event_stream, EventStatus};
 use vector_lib::finalization::{AddBatchNotifier, BatchNotifier};
 use vector_lib::internal_event::{ComponentEventsDropped, UNINTENTIONAL};
 use vector_lib::json_size::JsonSize;
+use vector_lib::sender::EventTx;
 use vector_lib::{
     config::{log_schema, SourceOutput},
     event::{array, Event, EventArray, EventContainer, EventRef},
@@ -321,6 +323,12 @@ impl SourceSender {
             .expect("unknown output")
             .send_batch(events)
             .await
+    }
+}
+
+impl EventTx for SourceSender {
+    async fn send(&mut self, evts: SmallVec<[Event; 1]>) -> std::result::Result<(), ClosedError> {
+        self.send_batch(evts).await
     }
 }
 

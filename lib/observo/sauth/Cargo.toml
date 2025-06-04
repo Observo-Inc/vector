@@ -35,13 +35,17 @@ serde_json.workspace = true
 toml.workspace = true
 hyper.workspace = true
 rand.workspace = true
+url = { workspace = true, optional = true }
 
 [features]
 default = []
-test-support = ["dep:thiserror", "dep:poem", "dep:poem-derive", "dep:oxide-auth", "dep:oxide-auth-poem", "dep:tempfile", "dep:rcgen", "dep:serde_urlencoded"]
+test-support = ["dep:thiserror", "dep:poem", "dep:poem-derive", "dep:oxide-auth",
+  "dep:oxide-auth-poem", "dep:tempfile", "dep:rcgen", "dep:serde_urlencoded", "dep:url"]
 
 [dev-dependencies]
 sauth = {features = ["test-support"], path = "."}
 regex = { version = "1.11.1", default-features = false, features = ["std", "perf"] }
 tokio-util = { version = "0.7", default-features = false, features = ["io", "time"] }
 tokio = { version = "1.43.0", features = ["test-util"] }
+tracing-test = { version = "0.2.5", features = ["no-env-filter"]}
+rstest = { version = "0.24.0" }

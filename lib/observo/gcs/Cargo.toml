@@ -1,0 +1,58 @@
+#This file is NOT part of the open-source components licensed under the Mozilla Public License, v. 2.0 (MPL-2.0).
+#Proprietary and Confidential – © 2025 Observo Inc.
+#Unauthorized copying, modification, distribution, or disclosure of this file, via any medium, is strictly prohibited.
+#This file is distributed separately and is not subject to the terms of the MPL-2.0.
+[package]
+name = "gcs"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "src/gcs/build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+vector-lib = { path = "../../vector-lib", default-features = false, features = ["lua", "observo",
+"gcp" ] }
+vector-config = { path = "../../vector-config", default-features = false }
+vector-common = { path = "../../vector-common", default-features = false }
+codecs = { path = "../../codecs", default-features = false }
+chrono.workspace = true
+snafu.workspace = true
+serde_with.workspace = true
+vrl.workspace = true
+serde.workspace = true
+inventory.workspace = true
+derivative.workspace = true
+toml.workspace = true
+metrics.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+prost.workspace = true
+prost-build.workspace = true
+bytes.workspace = true
+async-compression.workspace = true
+futures.workspace = true
+http.workspace = true
+object_store.workspace = true
+once_cell.workspace = true
+smallvec.workspace = true
+hyper.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+pin-project.workspace = true
+h2.workspace = true
+async-trait.workspace = true
+typetag.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+prost-types.workspace = true
+
+[features]
+default = []
+
+[build-dependencies]
+prost-build.workspace = true
+tonic-build.workspace = true

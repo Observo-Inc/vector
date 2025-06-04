@@ -13,6 +13,7 @@ use crate::{
             BoxedRawValue, RealtimeSizeBasedDefaultBatchSettings,
         },
     },
+    APP_INFO,
 };
 use http::{Request, Uri};
 use hyper::Body;
@@ -201,7 +202,8 @@ impl_generate_config_from_default!(StackdriverConfig);
 #[typetag::serde(name = "gcp_stackdriver_logs")]
 impl SinkConfig for StackdriverConfig {
     async fn build(&self, cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
-        let auth = self.auth.build(Scope::LoggingWrite).await?;
+        let app_info = crate::app_info();
+        let auth = self.auth.build(Scope::LoggingWrite, &app_info).await?;
 
         let request_builder = StackdriverLogsRequestBuilder {
             encoder: StackdriverLogsEncoder::new(
@@ -222,8 +224,7 @@ impl SinkConfig for StackdriverConfig {
         let request_limits = self.request.into_settings();
 
         let tls_settings = TlsSettings::from_options(self.tls.as_ref())?;
-        let app_info = crate::app_info();
-        let client = HttpClient::new(tls_settings, cx.proxy(), &app_info)?;
+        let client = HttpClient::new(tls_settings, cx.proxy(), &APP_INFO)?;
 
         let uri: Uri = self.endpoint.parse()?;
 
@@ -242,7 +243,7 @@ impl SinkConfig for StackdriverConfig {
 
         let healthcheck = healthcheck(client, auth.clone(), uri).boxed();
 
-        auth.spawn_regenerate_token();
+        auth.spawn_regenerate_token(&APP_INFO);
 
         Ok((VectorSink::from_event_streamsink(sink), healthcheck))
     }

@@ -30,6 +30,8 @@
 pub mod config;
 pub mod event;
 pub mod fanout;
+#[cfg(any(test, feature = "test"))]
+pub mod inet_test_util;
 pub mod ipallowlist;
 pub mod metrics;
 pub mod partition;
@@ -38,10 +40,7 @@ pub mod serde;
 pub mod sink;
 pub mod source;
 pub mod tcp;
-#[cfg(test)]
 pub mod test_util;
-#[cfg(any(test, feature = "test" ))]
-pub mod inet_test_util;
 pub mod time;
 pub mod tls;
 pub mod transform;
@@ -109,11 +108,14 @@ macro_rules! register {
     };
 }
 
-
 pub mod http;
 pub use vector_common::internal_event;
-pub mod sender;
 pub mod chkpts;
+pub mod sender;
 
 #[cfg(feature = "lua")]
 pub mod lua_err;
+
+#[cfg(feature = "gcp")]
+pub mod gcp;
+pub mod internal_events;

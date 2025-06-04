@@ -1,15 +1,13 @@
-use bytes::{Bytes, BytesMut};
-use smallvec::SmallVec;
-use vector_lib::codecs::decoding::{
+use crate::decoding::{
     format::Deserializer as _, BoxedFramingError, BytesDeserializer, Deserializer, Error, Framer,
     NewlineDelimitedDecoder,
 };
-use vector_lib::config::LogNamespace;
-
-use crate::{
-    event::Event,
-    internal_events::{DecoderDeserializeError, DecoderFramingError},
-};
+use crate::internal_events::codecs::{DecoderDeserializeError, DecoderFramingError};
+use bytes::{Bytes, BytesMut};
+use smallvec::SmallVec;
+use vector_core::config::LogNamespace;
+use vector_core::emit;
+use vector_core::event::Event;
 
 /// A decoder that can decode structured events from a byte stream / byte
 /// messages.
@@ -102,13 +100,13 @@ impl tokio_util::codec::Decoder for Decoder {
 #[cfg(test)]
 mod tests {
     use super::Decoder;
-    use bytes::Bytes;
-    use futures::{stream, StreamExt};
-    use tokio_util::{codec::FramedRead, io::StreamReader};
-    use vector_lib::codecs::{
+    use crate::{
         decoding::{Deserializer, Framer},
         JsonDeserializer, NewlineDelimitedDecoder, StreamDecodingError,
     };
+    use bytes::Bytes;
+    use futures::{stream, StreamExt};
+    use tokio_util::{codec::FramedRead, io::StreamReader};
     use vrl::value::Value;
 
     #[tokio::test]

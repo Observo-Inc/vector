@@ -53,12 +53,12 @@ impl VrlDeserializerConfig {
             external: ExternalEnv::default(),
         };
 
-        match compile_vrl(
-            &self.vrl.source,
-            &vrl::stdlib::all(),
-            &state,
-            CompileConfig::default(),
-        ) {
+        let fns = vrl::stdlib::all();
+
+        #[cfg(feature = "observo")]
+        let fns = fns.into_iter().chain(obvrl::all()).collect::<Vec<_>>();
+
+        match compile_vrl(&self.vrl.source, &fns, &state, CompileConfig::default()) {
             Ok(result) => Ok(VrlDeserializer {
                 program: result.program,
                 timezone: self.vrl.timezone.unwrap_or(TimeZone::Local),
@@ -188,6 +188,32 @@ mod tests {
             r#"
             . = { "a" : 1 }
             { "b" : 9 }
+        "#
+        );
+
+        let decoder = make_decoder(source);
+
+        let log_bytes = Bytes::from("some bytes");
+        let result = decoder.parse(log_bytes, LogNamespace::Vector).unwrap();
+        assert_eq!(result.len(), 1);
+        let event = result.first().unwrap();
+        assert_eq!(
+            *event.as_log().get(&OwnedTargetPath::event_root()).unwrap(),
+            btreemap! { "a" => 1 }.into()
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "observo")]
+    fn test_one_of_the_obvrl_fn_exists() {
+        let source = indoc!(
+            r#"
+            _, err = parse_xml_winlog("<xml></xml>")
+            if err != null {
+                . = { "a" : 1 }
+            } else {
+                . = { "b" : 9 }
+            }
         "#
         );
 

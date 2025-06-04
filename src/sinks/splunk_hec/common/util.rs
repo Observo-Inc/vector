@@ -59,17 +59,16 @@ pub fn build_http_batch_service(
     http_request_builder: Arc<HttpRequestBuilder>,
     endpoint_target: EndpointTarget,
     auto_extract_timestamp: bool,
+    path: Option<String>,
 ) -> HttpBatchService<BoxFuture<'static, Result<Request<Bytes>, crate::Error>>, HecRequest> {
     HttpBatchService::new(client, move |req: HecRequest| {
         let request_builder = Arc::clone(&http_request_builder);
+        let path = resolve_path(endpoint_target, path.clone());
         let future: BoxFuture<'static, Result<http::Request<Bytes>, crate::Error>> =
             Box::pin(async move {
                 request_builder.build_request(
                     req.body,
-                    match endpoint_target {
-                        EndpointTarget::Event => "/services/collector/event",
-                        EndpointTarget::Raw => "/services/collector/raw",
-                    },
+                    &path,
                     req.passthrough_token,
                     MetadataFields {
                         source: req.source,
@@ -81,6 +80,16 @@ pub fn build_http_batch_service(
                 )
             });
         future
+    })
+}
+
+fn resolve_path(
+    endpoint_target: EndpointTarget,
+    path: Option<String>,
+) -> String {
+    path.unwrap_or_else(|| match endpoint_target {
+        EndpointTarget::Event => "/services/collector/event".to_string(),
+        EndpointTarget::Raw => "/services/collector/raw".to_string(),
     })
 }
 
@@ -113,7 +122,8 @@ pub fn build_uri(
 ) -> Result<Uri, http::uri::InvalidUri> {
     let mut uri = format!("{}{}", host.trim_end_matches('/'), path);
 
-    let mut first = true;
+    let temp_uri = uri.parse::<Uri>()?;
+    let mut first = temp_uri.query().is_none();
 
     for (key, value) in query.into_iter() {
         if first {
@@ -171,6 +181,7 @@ pub fn render_template_string<'a>(
 mod tests {
     use bytes::Bytes;
     use http::{HeaderValue, Uri};
+    use indexmap::IndexMap;
     use vector_lib::config::proxy::ProxyConfig;
     use wiremock::{
         matchers::{header, method, path},
@@ -185,6 +196,7 @@ mod tests {
         },
         util::Compression,
     };
+    use crate::sinks::splunk_hec::common::util::resolve_path;
 
     #[tokio::test]
     async fn test_build_healthcheck_200_response_returns_ok() {
@@ -274,6 +286,7 @@ mod tests {
             EndpointTarget::default(),
             String::from(token),
             compression,
+            IndexMap::default()
         );
 
         let request = http_request_builder
@@ -317,6 +330,7 @@ mod tests {
             EndpointTarget::default(),
             String::from(token),
             compression,
+            IndexMap::default()
         );
 
         let request = http_request_builder
@@ -363,6 +377,7 @@ mod tests {
             EndpointTarget::default(),
             String::from(token),
             compression,
+            IndexMap::default()
         );
 
         let err = http_request_builder
@@ -392,6 +407,41 @@ mod tests {
             uri
         );
     }
+
+    #[test]
+    fn test_build_uri_with_query_params() {
+        let query = [
+            (HOST_FIELD, "zork flork".to_string()),
+            (SOURCE_FIELD, "zam".to_string()),
+        ];
+        let uri = build_uri("http://sproink.com", "/thing/thang?foo=true", query).unwrap();
+
+        assert_eq!(
+            "http://sproink.com/thing/thang?foo=true&host=zork%20flork&source=zam"
+                .parse::<Uri>()
+                .unwrap(),
+            uri
+        );
+    }
+
+    #[test]
+    fn test_resolve_path() {
+        let test_cases = vec![
+            (EndpointTarget::Event, None, "/services/collector/event"),
+            (EndpointTarget::Raw, None, "/services/collector/raw"),
+            (EndpointTarget::Event, Some("/custom/path".to_string()), "/custom/path"),
+            (EndpointTarget::Raw, Some("/custom/path?foo=bar".to_string()), "/custom/path?foo=bar"),
+        ];
+
+        for (endpoint_target, path, expected) in test_cases {
+            let result = resolve_path(endpoint_target, path.clone());
+            assert_eq!(
+                result, expected,
+                "Failed: endpoint={:?}, url={:?}",
+                endpoint_target, path
+            );
+        }
+    }
 }
 
 #[cfg(all(test, feature = "splunk-integration-tests"))]
@@ -403,14 +453,12 @@ mod integration_tests {
     use vector_lib::config::proxy::ProxyConfig;
     use warp::Filter;
 
-    use super::{
-        build_healthcheck, create_client,
-        integration_test_helpers::{get_token, splunk_hec_address},
-    };
+    use super::{build_healthcheck, create_client, integration_test_helpers::{get_token, splunk_hec_address}, resolve_path};
     use crate::{
         assert_downcast_matches, sinks::splunk_hec::common::HealthcheckError,
         test_util::retry_until,
     };
+    use crate::sinks::splunk_hec::common::EndpointTarget;
 
     #[tokio::test]
     async fn splunk_healthcheck_ok() {
@@ -464,7 +512,6 @@ mod integration_tests {
 pub mod integration_test_helpers {
     use serde_json::Value as JsonValue;
     use tokio::time::Duration;
-
     use crate::test_util::retry_until;
 
     const USERNAME: &str = "admin";
@@ -508,4 +555,6 @@ pub mod integration_test_helpers {
 
         entries[0]["content"]["token"].as_str().unwrap().to_owned()
     }
+
+
 }

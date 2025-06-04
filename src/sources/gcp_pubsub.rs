@@ -26,6 +26,7 @@ use vector_lib::{byte_size_of::ByteSizeOf, finalizer::UnorderedFinalizer};
 use vrl::path;
 use vrl::value::{kind::Collection, Kind};
 
+use crate::APP_INFO;
 use crate::{
     codecs::{Decoder, DecodingConfig},
     config::{DataType, SourceAcknowledgementsConfig, SourceConfig, SourceContext, SourceOutput},
@@ -264,7 +265,7 @@ impl SourceConfig for PubsubConfig {
             }
         };
 
-        let auth = self.auth.build(Scope::PubSub).await?;
+        let auth = self.auth.build(Scope::PubSub, &APP_INFO).await?;
 
         let mut uri: Uri = self.endpoint.parse().context(UriSnafu)?;
         auth.apply_uri(&mut uri);
@@ -284,7 +285,7 @@ impl SourceConfig for PubsubConfig {
             endpoint = endpoint.tls_config(tls_config).context(EndpointTlsSnafu)?;
         }
 
-        let token_generator = auth.spawn_regenerate_token();
+        let token_generator = auth.spawn_regenerate_token(&APP_INFO);
 
         let protocol = uri
             .scheme()

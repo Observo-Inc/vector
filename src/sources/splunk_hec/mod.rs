@@ -1272,7 +1272,7 @@ mod tests {
         event::{Event, LogEvent},
         sinks::{
             splunk_hec::logs::config::HecLogsSinkConfig,
-            util::{BatchConfig, Compression, TowerRequestConfig},
+            util::{BatchConfig, Compression},
             Healthcheck, VectorSink,
         },
         sources::splunk_hec::acknowledgements::{HecAckStatusRequest, HecAckStatusResponse},
@@ -1286,6 +1286,7 @@ mod tests {
         },
         SourceSender,
     };
+    use crate::sinks::util::http::RequestConfig;
 
     #[test]
     fn generate_config() {
@@ -1350,9 +1351,10 @@ mod tests {
             encoding,
             compression,
             batch: BatchConfig::default(),
-            request: TowerRequestConfig::default(),
+            request: RequestConfig::default(),
             tls: None,
             acknowledgements: Default::default(),
+            path: None,
             timestamp_nanos_key: None,
             timestamp_key: None,
             auto_extract_timestamp: None,

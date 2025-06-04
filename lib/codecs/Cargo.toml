@@ -45,6 +45,10 @@ vector-config-macros = { path = "../vector-config-macros", default-features = fa
 vector-core = { path = "../vector-core", default-features = false, features = ["vrl"] }
 base64 = "0.13.1"
 byteorder = "1.5.0"
+obvrl = { path = "../observo/obvrl", optional = true }
+futures.workspace = true
+indexmap.workspace = true
+bytesize.workspace = true
 
 [dev-dependencies]
 futures.workspace = true
@@ -56,6 +60,10 @@ rstest = "0.24.0"
 tracing-test = "0.2.5"
 uuid.workspace = true
 vrl.workspace = true
+toml.workspace = true
+futures-util.workspace = true
 
 [features]
 syslog = ["dep:syslog_loose"]
+observo = ["dep:obvrl"]
+test = []

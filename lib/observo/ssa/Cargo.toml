@@ -1,0 +1,49 @@
+#This file is NOT part of the open-source components licensed under the Mozilla Public License, v. 2.0 (MPL-2.0).
+#Proprietary and Confidential – © 2025 Observo Inc.
+#Unauthorized copying, modification, distribution, or disclosure of this file, via any medium, is strictly prohibited.
+#This file is distributed separately and is not subject to the terms of the MPL-2.0.
+[package]
+name = "ssa"
+version = "0.1.0"
+authors = ["Observo <observo-all@observo.ai>"]
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+vector-common = { path = "../../vector-common", default-features = false }
+vector-config = { path = "../../vector-config", default-features = false }
+vector-config-macros = { path = "../../vector-config-macros", default-features = false }
+vector-core = { path = "../../vector-core", default-features = false }
+vector-lib = { path = "../../vector-lib", default-features = false }
+serde_with.workspace = true
+toml.workspace = true
+futures.workspace = true
+metrics.workspace = true
+inventory.workspace = true
+vrl.workspace = true
+indexmap.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+derivative.workspace = true
+regex.workspace = true
+chrono.workspace = true
+
+streaming_algorithms = { version = "0.3.0" , default-features = false }
+tdigest = {  version = "0.2.3" , default-features = false  }
+ordered-float = { version = "*", default-features = false }
+async-stream = { version = "*", default-features = false}
+
+[features]
+test-scenarios = ["vector-lib/test", "tokio/test-util"]
+
+[dev-dependencies]
+ssa = { path = ".", features = ["test-scenarios"] }
+tracing-test = { version = "0.2.5", features = ["no-env-filter"] }
+assert_matches = { version = "1.5" }

@@ -1,5 +1,5 @@
-use std::{collections::HashMap, convert::TryFrom, io};
 use std::sync::Arc;
+use std::{collections::HashMap, convert::TryFrom, io};
 
 use bytes::Bytes;
 use chrono::{FixedOffset, Utc};
@@ -17,6 +17,7 @@ use vector_lib::{request_metadata::RequestMetadata, TimeZone};
 
 use crate::sinks::util::metadata::RequestMetadataBuilder;
 use crate::sinks::util::service::TowerRequestConfigDefaults;
+use crate::APP_INFO;
 use crate::{
     codecs::{Encoder, EncodingConfigWithFraming, SinkType},
     config::{AcknowledgementsConfig, DataType, GenerateConfig, Input, SinkConfig, SinkContext},
@@ -235,18 +236,20 @@ impl GenerateConfig for GcsSinkConfig {
 #[typetag::serde(name = "gcp_cloud_storage")]
 impl SinkConfig for GcsSinkConfig {
     async fn build(&self, cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
-        let auth = self.auth.build(Scope::DevStorageReadWrite).await?;
+        let auth = self
+            .auth
+            .build(Scope::DevStorageReadWrite, &APP_INFO)
+            .await?;
         let base_url = format!("{}/{}/", self.endpoint, self.bucket);
         let tls = TlsSettings::from_options(self.tls.as_ref())?;
-        let app_info = crate::app_info();
-        let client = HttpClient::new(tls, cx.proxy(), &app_info)?;
+        let client = HttpClient::new(tls, cx.proxy(), &APP_INFO)?;
         let healthcheck = build_healthcheck(
             self.bucket.clone(),
             client.clone(),
             base_url.clone(),
             auth.clone(),
         )?;
-        auth.spawn_regenerate_token();
+        auth.spawn_regenerate_token(&APP_INFO);
         let sink = self.build_sink(client, base_url, auth, cx)?;
 
         Ok((sink, healthcheck))
@@ -485,8 +488,8 @@ mod tests {
 
         let tls = TlsSettings::default();
         let app_info = crate::app_info();
-        let client =
-            HttpClient::new(tls, context.proxy(), &app_info).expect("should not fail to create HTTP client");
+        let client = HttpClient::new(tls, context.proxy(), &app_info)
+            .expect("should not fail to create HTTP client");
 
         let config =
             default_config((None::<FramingConfig>, JsonSerializerConfig::default()).into());

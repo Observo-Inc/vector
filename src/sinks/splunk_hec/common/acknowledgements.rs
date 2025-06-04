@@ -287,6 +287,7 @@ mod tests {
     use std::sync::Arc;
 
     use futures_util::{stream::FuturesUnordered, StreamExt};
+    use indexmap::IndexMap;
     use tokio::sync::oneshot::{self, Receiver};
     use vector_lib::{config::proxy::ProxyConfig, event::EventStatus};
 
@@ -309,6 +310,7 @@ mod tests {
             EndpointTarget::default(),
             String::from(""),
             Compression::default(),
+            IndexMap::default()
         );
         HecAckClient::new(retry_limit, client, Arc::new(http_request_builder))
     }

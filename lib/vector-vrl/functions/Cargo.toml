@@ -8,3 +8,8 @@ license = "MPL-2.0"
 
 [dependencies]
 vrl.workspace = true
+obvrl = { path = "../../observo/obvrl", optional = true }
+
+[features]
+default = []
+observo = ["dep:obvrl"]

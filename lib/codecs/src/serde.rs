@@ -1,12 +1,12 @@
 #![allow(missing_docs)]
-use indexmap::map::IndexMap;
-use serde::{Deserialize, Serialize};
-use vector_lib::codecs::{
+use crate::{
     decoding::{DeserializerConfig, FramingConfig},
     BytesDecoderConfig, BytesDeserializerConfig,
 };
-use vector_lib::configurable::configurable_component;
-pub use vector_lib::serde::{bool_or_struct, is_default};
+use indexmap::map::IndexMap;
+use serde::{Deserialize, Serialize};
+use vector_config::configurable_component;
+pub use vector_core::serde::{bool_or_struct, is_default};
 
 pub const fn default_true() -> bool {
     true

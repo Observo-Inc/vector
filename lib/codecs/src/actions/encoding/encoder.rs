@@ -1,14 +1,12 @@
-use bytes::BytesMut;
-use tokio_util::codec::Encoder as _;
-use vector_lib::codecs::{
+use crate::{
     encoding::{Error, Framer, Serializer},
     CharacterDelimitedEncoder, NewlineDelimitedEncoder, TextSerializerConfig,
 };
+use bytes::BytesMut;
+use tokio_util::codec::Encoder as _;
+use vector_core::{emit, event::Event};
 
-use crate::{
-    event::Event,
-    internal_events::{EncoderFramingError, EncoderSerializeError},
-};
+use crate::internal_events::codecs::{EncoderFramingError, EncoderSerializeError};
 
 #[derive(Debug, Clone)]
 /// An encoder that can encode structured events into byte frames.
@@ -184,11 +182,11 @@ impl tokio_util::codec::Encoder<Event> for Encoder<()> {
 
 #[cfg(test)]
 mod tests {
+    use crate::encoding::BoxedFramingError;
     use bytes::BufMut;
     use futures_util::{SinkExt, StreamExt};
     use tokio_util::codec::FramedWrite;
-    use vector_lib::codecs::encoding::BoxedFramingError;
-    use vector_lib::event::LogEvent;
+    use vector_core::event::LogEvent;
 
     use super::*;
 
