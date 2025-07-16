@@ -17,9 +17,36 @@ PLATFORM="${PLATFORM:-}"
 PUSH="${PUSH:-"true"}"
 REPO="${REPO:-"timberio/vector"}"
 
+IFS=, read -ra REQUESTED_PLATFORMS <<< "$PLATFORM"
+declare -A SUPPORTED_PLATFORMS=(
+  [debian]="linux/amd64,linux/arm/v6,linux/arm/v7,linux/arm64/v8"
+  [alpine]="linux/amd64,linux/arm/v6,linux/arm/v7,linux/arm64/v8"
+  [distroless-static]="linux/amd64,linux/arm/v7,linux/arm64/v8"
+  [distroless-libc]="linux/amd64,linux/arm/v7,linux/arm64/v8"
+  [ubi-fips]="linux/amd64,linux/arm64/v8"
+)
+
 #
 # Functions
 #
+
+evaluate_supported_platforms_for_base() {
+  local BASE="$1"
+  IFS=, read -ra SUPPORTED_PLATFORMS_FOR_BASE <<< "${SUPPORTED_PLATFORMS["$BASE"]}"
+
+  local BUILDABLE_PLATFORMS=""
+  for platform in "${REQUESTED_PLATFORMS[@]}"
+  do
+    if [[ ${SUPPORTED_PLATFORMS_FOR_BASE[*]} =~ $platform ]]
+    then
+      BUILDABLE_PLATFORMS+="$platform,"
+    else
+      >&2 echo "WARN: skipping $platform for $BASE, no base image for platform"
+    fi
+  done
+
+  echo "${BUILDABLE_PLATFORMS%?}"
+}
 
 build() {
   local BASE="$1"
@@ -70,6 +97,7 @@ if [[ "$CHANNEL" == "release" ]]; then
     build debian "$VERSION_TAG"
     build distroless-static "$VERSION_TAG"
     build distroless-libc "$VERSION_TAG"
+    build ubi-fips "$VERSION_TAG"
   done
 elif [[ "$CHANNEL" == "nightly" ]]; then
   for VERSION_TAG in "nightly-$DATE" nightly; do
@@ -77,11 +105,14 @@ elif [[ "$CHANNEL" == "nightly" ]]; then
     build debian "$VERSION_TAG"
     build distroless-static "$VERSION_TAG"
     build distroless-libc "$VERSION_TAG"
+    build ubi-fips "$VERSION_TAG"
   done
 elif [[ "$CHANNEL" == "custom" ]]; then
   build debian "$VERSION"
+  build ubi-fips "$VERSION"
 elif [[ "$CHANNEL" == "test" ]]; then
   build "${BASE:-"alpine"}" "${TAG:-"test"}"
   build "${BASE:-"distroless-libc"}" "${TAG:-"test"}"
   build "${BASE:-"distroless-static"}" "${TAG:-"test"}"
+  build "${BASE:-"ubi-fips"}" "${TAG:-"test"}"
 fi
