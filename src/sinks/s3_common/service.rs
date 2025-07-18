@@ -8,7 +8,7 @@ use aws_sdk_s3::{
 use base64::prelude::{Engine as _, BASE64_STANDARD};
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use sha256:Digest;
+use openssl::sha::sha256;
 use tower::Service;
 use tracing::Instrument;
 use vector_common::request_metadata::{MetaDescriptive, RequestMetadata};
@@ -112,7 +112,7 @@ impl Service<S3Request> for S3Service {
             .content_type
             .or_else(|| Some("text/x-log".to_owned()));
 
-        let checksum_sha256 = BASE64_STANDARD.encode(sha256::Sha256::digest(&request.body));
+        let checksum_sha256 = BASE64_STANDARD.encode(sha256(&request.body));
 
         let tagging = options.tags.map(|tags| {
             let mut tagging = url::form_urlencoded::Serializer::new(String::new());
@@ -141,7 +141,7 @@ impl Service<S3Request> for S3Service {
                 .set_ssekms_key_id(options.ssekms_key_id)
                 .set_storage_class(Some(options.storage_class.into()))
                 .set_tagging(tagging)
-                .set_checksum_256(checksum_sha256);
+                .set_checksum_sha256(Some(checksum_sha256));
 
             let result = request.send().in_current_span().await;
 
