@@ -125,7 +125,7 @@ mod template;
 mod throttle;
 mod udp;
 mod unix;
-#[cfg(feature = "sinks-websocket")]
+#[cfg(any(feature = "sources-websocket", feature = "sinks-websocket"))]
 mod websocket;
 
 #[cfg(any(
@@ -263,7 +263,7 @@ pub(crate) use self::tag_cardinality_limit::*;
 pub(crate) use self::throttle::*;
 #[cfg(unix)]
 pub(crate) use self::unix::*;
-#[cfg(feature = "sinks-websocket")]
+#[cfg(any(feature = "sources-websocket", feature = "sinks-websocket"))]
 pub(crate) use self::websocket::*;
 #[cfg(windows)]
 pub(crate) use self::windows::*;
