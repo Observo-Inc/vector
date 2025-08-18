@@ -10,4 +10,4 @@ license = "MPL-2.0"
 serde = { version = "1.0.163", default-features = false, features = ["derive", "alloc"] }
 vector-config = { path = "../vector-config" }
 vector-config-macros = { path = "../vector-config-macros" }
-vrl = {  git = "ssh://git@github.com/Observo-Inc/vrl.git", rev = "e428894b51e1b740e280e28ab6f8c0ea14c642e7", default-features = false, features = ["path"] }
+vrl = {  git = "ssh://git@github.com/Observo-Inc/vrl.git", rev = "88c954b35ae61db319d601029f95e221ead30942", default-features = false, features = ["path"] }

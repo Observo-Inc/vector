@@ -226,7 +226,7 @@ hex = { version = "0.4.3", default-features = false, optional = true }
 sha2 = { version = "0.10.6", default-features = false, optional = true }
 
 # VRL Lang
-vrl = { package = "vrl", git = "ssh://git@github.com/Observo-Inc/vrl.git", rev = "e428894b51e1b740e280e28ab6f8c0ea14c642e7", features = ["cli"] }
+vrl = { package = "vrl", git = "ssh://git@github.com/Observo-Inc/vrl.git", rev = "88c954b35ae61db319d601029f95e221ead30942", features = ["cli"] }
 
 # External libs
 arc-swap = { version = "1.6", default-features = false, optional = true }
@@ -369,7 +369,7 @@ zstd = { version = "0.12.3", default-features = false }
 [patch.crates-io]
 # Removes dependency on `time` v0.1
 # https://github.com/chronotope/chrono/pull/578
-chrono = { git = "https://github.com/vectordotdev/chrono.git", tag = "v0.4.24-no-default-time-1" }
+#chrono = { git = "https://github.com/vectordotdev/chrono.git", tag = "v0.4.24-no-default-time-1" }
 # The upgrade for `tokio-util` >= 0.6.9 is blocked on https://github.com/vectordotdev/vector/issues/11257.
 tokio-util = { git = "https://github.com/vectordotdev/tokio", branch = "tokio-util-0.7.4-framed-read-continue-on-error" }
 nix = { git = "https://github.com/vectordotdev/nix.git", branch = "memfd/gnu/musl" }

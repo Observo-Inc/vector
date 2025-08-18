@@ -9,4 +9,4 @@ license = "MPL-2.0"
 [dependencies]
 clap = { version = "4.1.14", features = ["derive"] }
 vector-vrl-functions = { path = "../functions" }
-vrl = {  git = "ssh://git@github.com/Observo-Inc/vrl.git", rev = "e428894b51e1b740e280e28ab6f8c0ea14c642e7", default-features = false, features = ["stdlib", "cli"] }
+vrl = {  git = "ssh://git@github.com/Observo-Inc/vrl.git", rev = "88c954b35ae61db319d601029f95e221ead30942", default-features = false, features = ["stdlib", "cli"] }

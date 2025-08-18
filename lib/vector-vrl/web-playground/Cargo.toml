@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 wasm-bindgen = "0.2"
-vrl = {  git = "ssh://git@github.com/Observo-Inc/vrl.git", rev = "e428894b51e1b740e280e28ab6f8c0ea14c642e7", default-features = false, features = ["value", "stdlib"] }
+vrl = {  git = "ssh://git@github.com/Observo-Inc/vrl.git", rev = "88c954b35ae61db319d601029f95e221ead30942", default-features = false, features = ["value", "stdlib"] }
 serde = { version = "1.0", features = ["derive"] }
 serde-wasm-bindgen = "0.5"
 gloo-utils = { version = "0.1", features = ["serde"] }

@@ -27,7 +27,7 @@ snafu = { version = "0.7.4", default-features = false, features = ["futures"] }
 syslog_loose = { version = "0.18", default-features = false, optional = true }
 tokio-util = { version = "0.7", default-features = false, features = ["codec"] }
 tracing = { version = "0.1", default-features = false }
-vrl = {  git = "ssh://git@github.com/Observo-Inc/vrl.git", rev = "e428894b51e1b740e280e28ab6f8c0ea14c642e7", default-features = false, features = ["value"] }
+vrl = {  git = "ssh://git@github.com/Observo-Inc/vrl.git", rev = "88c954b35ae61db319d601029f95e221ead30942", default-features = false, features = ["value"] }
 vector-common = { path = "../vector-common", default-features = false }
 vector-config = { path = "../vector-config", default-features = false }
 vector-config-common = { path = "../vector-config-common", default-features = false }
