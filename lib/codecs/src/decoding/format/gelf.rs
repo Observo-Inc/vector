@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use lookup::{event_path, owned_value_path, PathPrefix};
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
