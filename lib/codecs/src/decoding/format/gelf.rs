@@ -100,14 +100,14 @@ impl GelfDeserializer {
 
         if let Some(timestamp_key) = log_schema().timestamp_key() {
             if let Some(timestamp) = parsed.timestamp {
-                let naive = NaiveDateTime::from_timestamp_opt(
+                let naive = DateTime::from_timestamp(
                     f64::trunc(timestamp) as i64,
                     f64::fract(timestamp) as u32,
                 )
                 .expect("invalid timestamp");
                 log.insert(
                     (PathPrefix::Event, timestamp_key),
-                    DateTime::<Utc>::from_utc(naive, Utc),
+                    DateTime::from_naive_utc_and_offset(naive.naive_utc(), Utc),
                 );
                 // per GELF spec- add timestamp if not provided
             } else {
@@ -273,10 +273,10 @@ mod tests {
             )))
         );
         // Vector does not use the nanos
-        let naive = NaiveDateTime::from_timestamp_opt(1385053862, 0).expect("invalid timestamp");
+        let naive = DateTime::from_timestamp(1385053862, 0).expect("invalid timestamp");
         assert_eq!(
             log.get(TIMESTAMP),
-            Some(&Value::Timestamp(DateTime::<Utc>::from_utc(naive, Utc)))
+            Some(&Value::Timestamp(DateTime::from_naive_utc_and_offset(naive.naive_utc(), Utc)))
         );
         assert_eq!(log.get(LEVEL), Some(&Value::Integer(1)));
         assert_eq!(

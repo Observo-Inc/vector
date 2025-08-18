@@ -55,10 +55,7 @@ fn datetime(g: &mut Gen) -> DateTime<Utc> {
     // are. We just sort of arbitrarily restrict things.
     let secs = i64::arbitrary(g) % 32_000;
     let nanosecs = u32::arbitrary(g) % 32_000;
-    DateTime::<Utc>::from_utc(
-        NaiveDateTime::from_timestamp_opt(secs, nanosecs).expect("invalid timestamp"),
-        Utc,
-    )
+    DateTime::from_timestamp(secs, nanosecs).expect("invalid timestamp")
 }
 
 impl Arbitrary for Event {
