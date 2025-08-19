@@ -3,7 +3,7 @@ use std::{
     iter,
 };
 
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use quickcheck::{empty_shrinker, Arbitrary, Gen};
 
 use crate::{

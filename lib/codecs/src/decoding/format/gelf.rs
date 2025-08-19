@@ -209,7 +209,7 @@ impl Deserializer for GelfDeserializer {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use chrono::{DateTime, NaiveDateTime, Utc};
+    use chrono::{DateTime, Utc};
     use lookup::event_path;
     use serde_json::json;
     use similar_asserts::assert_eq;
