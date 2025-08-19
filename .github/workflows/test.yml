@@ -5,7 +5,7 @@ on:
     types: [submitted]
   push:
     branches: [master]
-  workflow_dispatch:    
+  workflow_dispatch:
 
 env:
   RUST_BACKTRACE: full
@@ -20,7 +20,7 @@ env:
 
 jobs:
   test:
-    if: github.event.review.state == 'approved'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request_review' && github.event.review.state == 'approved')
     name: Unit - x86_64-unknown-linux-gnu
     runs-on: ubuntu-latest-8-cores
     steps:
@@ -41,3 +41,6 @@ jobs:
         run: make test
       - name: Run VRL tests
         run: make test-vrl
+      - name: Hold runner after failure
+        if: failure()
+        run: timeout 30m /bin/bash -c 'while true; do sleep 2m; date; done;'
