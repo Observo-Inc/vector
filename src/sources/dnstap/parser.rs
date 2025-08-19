@@ -974,7 +974,7 @@ mod tests {
             .any(|(key, value)| key == "timestamp"
                 && match *value {
                     Value::Timestamp(timestamp) =>
-                        timestamp.timestamp_nanos() == 1_593_489_007_920_014_129,
+                        timestamp.timestamp_nanos_opt().expect("timestamp should be valid") == 1_593_489_007_920_014_129,
                     _ => false,
                 }));
         assert!(log_event
@@ -1026,7 +1026,7 @@ mod tests {
             .any(|(key, value)| key == "timestamp"
                 && match *value {
                     Value::Timestamp(timestamp) =>
-                        timestamp.timestamp_nanos() == 1_593_541_950_792_494_106,
+                        timestamp.timestamp_nanos_opt().expect("timestamp should be valid") == 1_593_541_950_792_494_106,
                     _ => false,
                 }));
         assert!(log_event
