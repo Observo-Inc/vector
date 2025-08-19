@@ -22,9 +22,11 @@ apt install --yes \
 
 apt upgrade --yes
 
+# Install AWS CLI via snap (master branch solution)
+snap install aws-cli --classic
+
 # Deps
 apt install --yes \
-    awscli \
     build-essential \
     ca-certificates \
     cmake \
