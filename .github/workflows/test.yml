@@ -4,7 +4,7 @@ on:
   pull_request_review:
     types: [submitted]
   push:
-    branches: [master]
+    branches: [master, dataplane_0_30_fips]
   workflow_dispatch:
 
 env:
