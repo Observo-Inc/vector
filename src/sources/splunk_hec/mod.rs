@@ -2104,7 +2104,7 @@ mod tests {
             );
             assert_eq!(
                 parse_timestamp(nano).unwrap().timestamp_nanos_opt().expect("timestamp should be valid"),
-                case.timestamp_nanos()
+                case.timestamp_nanos_opt().expect("timestamp should be valid")
             );
         }
 
