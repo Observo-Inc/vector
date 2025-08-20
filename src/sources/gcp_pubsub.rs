@@ -1,5 +1,3 @@
-#![allow(unused_imports)]
-
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{
     error::Error as _, future::Future, pin::Pin, sync::Arc, task::Context, task::Poll,

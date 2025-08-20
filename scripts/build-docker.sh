@@ -30,24 +30,6 @@ declare -A SUPPORTED_PLATFORMS=(
 # Functions
 #
 
-evaluate_supported_platforms_for_base() {
-  local BASE="$1"
-  IFS=, read -ra SUPPORTED_PLATFORMS_FOR_BASE <<< "${SUPPORTED_PLATFORMS["$BASE"]}"
-
-  local BUILDABLE_PLATFORMS=""
-  for platform in "${REQUESTED_PLATFORMS[@]}"
-  do
-    if [[ ${SUPPORTED_PLATFORMS_FOR_BASE[*]} =~ $platform ]]
-    then
-      BUILDABLE_PLATFORMS+="$platform,"
-    else
-      >&2 echo "WARN: skipping $platform for $BASE, no base image for platform"
-    fi
-  done
-
-  echo "${BUILDABLE_PLATFORMS%?}"
-}
-
 build() {
   local BASE="$1"
   local VERSION="$2"

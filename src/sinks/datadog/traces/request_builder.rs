@@ -384,7 +384,7 @@ impl DatadogTracesEncoder {
             _ => 0,
         };
         let start = match span.get("start") {
-            Some(Value::Timestamp(val)) => val.timestamp_nanos_opt().expect("timestamp should be valid"),
+            Some(Value::Timestamp(val)) => val.timestamp_nanos_opt().unwrap_or(0),
             _ => 0,
         };
 

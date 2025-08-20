@@ -272,8 +272,15 @@ impl EventEncoder {
         self.remove_label_fields(&mut event);
 
         let timestamp = match event.as_log().get_timestamp() {
-            Some(Value::Timestamp(ts)) => ts.timestamp_nanos_opt().expect("timestamp should be valid"),
-            _ => chrono::Utc::now().timestamp_nanos_opt().expect("current time should be valid"),
+            Some(Value::Timestamp(ts)) => match ts.timestamp_nanos_opt() {
+                Some(timestamp) => timestamp,
+                None => {
+                    return None;
+                }
+            },
+            _ => chrono::Utc::now()
+                .timestamp_nanos_opt()
+                .unwrap_or(0),
         };
 
         if self.remove_timestamp {

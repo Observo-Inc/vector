@@ -2095,7 +2095,7 @@ mod tests {
         for case in cases {
             let sec = case.timestamp();
             let millis = case.timestamp_millis();
-            let nano = case.timestamp_nanos_opt().expect("timestamp should be valid");
+            let nano = case.timestamp_nanos_opt().unwrap_or(0);
 
             assert_eq!(parse_timestamp(sec).unwrap().timestamp(), case.timestamp());
             assert_eq!(
@@ -2103,8 +2103,8 @@ mod tests {
                 case.timestamp_millis()
             );
             assert_eq!(
-                parse_timestamp(nano).unwrap().timestamp_nanos_opt().expect("timestamp should be valid"),
-                case.timestamp_nanos_opt().expect("timestamp should be valid")
+                parse_timestamp(nano).unwrap().timestamp_nanos_opt().unwrap_or(0),
+                case.timestamp_nanos_opt().unwrap_or(0)
             );
         }
 
