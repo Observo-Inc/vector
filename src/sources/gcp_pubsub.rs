@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, Utc};
+use chrono::DateTime;
 use codecs::decoding::{DeserializerConfig, FramingConfig};
 use derivative::Derivative;
 use futures::{stream, stream::FuturesUnordered, FutureExt, Stream, StreamExt, TryFutureExt};
@@ -738,6 +738,7 @@ impl Future for Task {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use lookup::OwnedTargetPath;
     use vector_core::schema::Definition;
 
