@@ -738,7 +738,6 @@ impl Future for Task {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
     use lookup::OwnedTargetPath;
     use vector_core::schema::Definition;
 
@@ -833,6 +832,7 @@ mod integration_tests {
     use std::collections::{BTreeMap, HashSet};
 
     use base64::prelude::{Engine as _, BASE64_STANDARD};
+    use chrono::Utc;
     use futures::{Stream, StreamExt};
     use http::method::Method;
     use hyper::{Request, StatusCode};
