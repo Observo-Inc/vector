@@ -1,11 +1,14 @@
 FROM registry.access.redhat.com/ubi9/ubi:latest AS builder
 
-WORKDIR /vector
+WORKDIR /dataplane
 
 COPY vector-*-unknown-linux-*.tar.gz ./
 RUN tar -xvf vector-*-$(uname -m)-unknown-linux-*.tar.gz --strip-components=2
 
-RUN mkdir -p /var/lib/vector
+# Rename vector binary to dataplane for consistency with site images
+RUN mv /dataplane/bin/vector /dataplane/bin/dataplane
+
+RUN mkdir -p /var/lib/dataplane
 
 FROM registry.access.redhat.com/ubi9/ubi:latest
 
@@ -24,13 +27,13 @@ ENV OPENSSL_DIR=/usr
 ENV OPENSSL_STATIC=0
 
 # Copy from builder stage
-COPY --from=builder /vector/bin/* /usr/bin/
-COPY --from=builder /vector/config/README.md /etc/vector/README.md
-COPY --from=builder /var/lib/vector /var/lib/vector
+COPY --from=builder /dataplane/bin/* /usr/bin/
+COPY --from=builder /dataplane/config/README.md /etc/dataplane/README.md
+COPY --from=builder /var/lib/dataplane /var/lib/dataplane
 
 # Smoke test
-RUN ["vector", "--version"]
+RUN ["dataplane", "--version"]
 
 USER root
 
-ENTRYPOINT ["/usr/bin/vector"]
+ENTRYPOINT ["/usr/bin/dataplane"]
