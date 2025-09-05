@@ -2,9 +2,7 @@ use std::{io, sync::Arc};
 
 use bytes::Bytes;
 use chrono::{FixedOffset, Utc};
-use codecs::encoding::Framer;
 use uuid::Uuid;
-use vector_lib::codecs::encoding::Framer;
 use vector_lib::event::Finalizable;
 use vector_lib::request_metadata::RequestMetadata;
 

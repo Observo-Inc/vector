@@ -8,6 +8,7 @@ use ordered_float::NotNan;
 use vector_lib::configurable::configurable_component;
 use vrl::path::OwnedTargetPath;
 
+
 /// Strategies for merging events.
 #[configurable_component]
 #[derive(Clone, Debug, PartialEq)]
@@ -378,9 +379,9 @@ impl ReduceValueMerger for ConcatSquashNewlineMerger {
         Ok(())
     }
 
-    fn insert_into(self: Box<Self>, k: String, v: &mut LogEvent) -> Result<(), String> {
+    fn insert_into(self: Box<Self>, path: &OwnedTargetPath, v: &mut LogEvent) -> Result<(), String> {
         if should_squash(&self.v) {
-            v.insert(k.as_str(), self.v[0].clone());
+            v.insert(path, self.v[0].clone());
         } else {
             if !self.v.is_empty() {
                 let mut buffer = BytesMut::new();
@@ -392,7 +393,7 @@ impl ReduceValueMerger for ConcatSquashNewlineMerger {
                     buffer.extend(&buf[..]);
                     buffer.extend_from_slice(val.to_string_lossy().as_bytes());
                 }
-                v.insert(k.as_str(), Value::Bytes(buffer.into()));
+                v.insert(path, Value::Bytes(buffer.into()));
             }
         }
         Ok(())
@@ -419,13 +420,13 @@ impl ReduceValueMerger for ArraySquashMerger {
         Ok(())
     }
 
-    fn insert_into(self: Box<Self>, k: String, v: &mut LogEvent) -> Result<(), String> {
+    fn insert_into(self: Box<Self>, path: &OwnedTargetPath, v: &mut LogEvent) -> Result<(), String> {
         if (!self.v.is_empty()) && should_squash(&self.v) {
             // get 1st element slice and convert to vector
-            v.insert(k.as_str(), Value::Array(vec![self.v[0].clone()]));
+            v.insert(path, Value::Array(vec![self.v[0].clone()]));
             return Ok(())
         }
-        v.insert(k.as_str(), Value::Array(self.v));
+        v.insert(path, Value::Array(self.v));
         Ok(())
     }
 }
@@ -669,7 +670,7 @@ impl ReduceValueMerger for MinNumberMerger {
 pub trait ReduceValueMerger: std::fmt::Debug + Send + Sync {
     fn add(&mut self, v: Value) -> Result<(), String>;
     fn insert_into(self: Box<Self>, path: &OwnedTargetPath, v: &mut LogEvent)
-        -> Result<(), String>;
+                   -> Result<(), String>;
 }
 
 impl From<Value> for Box<dyn ReduceValueMerger> {
@@ -764,14 +765,10 @@ pub(crate) fn get_value_merger(
 
 #[cfg(test)]
 mod test {
-    use serde_json::json;
-
     use super::*;
     use crate::event::LogEvent;
     use serde_json::json;
     use vrl::owned_event_path;
-
-    use super::*;
 
     #[test]
     fn initial_values() {

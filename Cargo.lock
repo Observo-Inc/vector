@@ -132,21 +132,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "alloc-no-stdlib"
-version = "2.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc7bb162ec39d46ab1ca8c77bf72e890535becd1751bb45f64c597edb4c8c6b3"
-
-[[package]]
-name = "alloc-stdlib"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94fb8275041c72129eb51b7d0322c29b8387a0386127718b096429201a5d6ece"
-dependencies = [
- "alloc-no-stdlib",
-]
-
-[[package]]
 name = "allocator-api2"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -365,13 +350,13 @@ version = "39.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7a27466d897d99654357a6d95dc0a26931d9e4306e60c14fc31a894edb86579"
 dependencies = [
- "ahash 0.8.2",
+ "ahash 0.8.11",
  "arrow-buffer",
  "arrow-data",
  "arrow-schema",
  "chrono",
- "half 2.2.1",
- "hashbrown 0.13.2",
+ "half",
+ "hashbrown 0.13.1",
  "num",
 ]
 
@@ -381,7 +366,7 @@ version = "39.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9405b78106a9d767c7b97c78a70ee1b23ee51a74f5188a821a716d9a85d1af2b"
 dependencies = [
- "half 2.2.1",
+ "half",
  "num",
 ]
 
@@ -409,7 +394,7 @@ checksum = "c6f710d98964d2c069b8baf566130045e79e11baa105623f038a6c942f805681"
 dependencies = [
  "arrow-buffer",
  "arrow-schema",
- "half 2.2.1",
+ "half",
  "num",
 ]
 
@@ -516,7 +501,7 @@ version = "0.4.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df895a515f70646414f4b45c0b79082783b80552b373a68283012928df56f522"
 dependencies = [
- "brotli",
+ "brotli 7.0.0",
  "flate2",
  "futures-core",
  "memchr",
@@ -1895,34 +1880,24 @@ dependencies = [
 
 [[package]]
 name = "brotli"
-version = "7.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc97b8f16f944bba54f0433f07e30be199b6dc2bd25937444bbad560bcea29bd"
-dependencies = [
- "alloc-no-stdlib",
- "alloc-stdlib",
- "brotli-decompressor",
-]
-
-[[package]]
-name = "brotli-decompressor"
-version = "4.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6221fe77a248b9117d431ad93761222e1cf8ff282d9d1d5d9f53d6299a1cf76"
-dependencies = [
- "alloc-no-stdlib",
- "alloc-stdlib",
-]
-
-[[package]]
-name = "brotli"
 version = "3.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1a0b1dbcc8ae29329621f8d4f0d835787c1c38bb1401979b49d13b0b305ff68"
 dependencies = [
  "alloc-no-stdlib",
  "alloc-stdlib",
- "brotli-decompressor",
+ "brotli-decompressor 2.3.4",
+]
+
+[[package]]
+name = "brotli"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc97b8f16f944bba54f0433f07e30be199b6dc2bd25937444bbad560bcea29bd"
+dependencies = [
+ "alloc-no-stdlib",
+ "alloc-stdlib",
+ "brotli-decompressor 4.0.0",
 ]
 
 [[package]]
@@ -1930,6 +1905,16 @@ name = "brotli-decompressor"
 version = "2.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4b6561fd3f895a11e8f72af2cb7d22e08366bebc2b6b57f7744c4bda27034744"
+dependencies = [
+ "alloc-no-stdlib",
+ "alloc-stdlib",
+]
+
+[[package]]
+name = "brotli-decompressor"
+version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6221fe77a248b9117d431ad93761222e1cf8ff282d9d1d5d9f53d6299a1cf76"
 dependencies = [
  "alloc-no-stdlib",
  "alloc-stdlib",
@@ -2233,7 +2218,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57663b653d948a338bfb3eeba9bb2fd5fcfaecb9e199e87e1eda4d9e8b240fd9"
 dependencies = [
  "ciborium-io",
- "half 1.8.2",
+ "half",
 ]
 
 [[package]]
@@ -2368,10 +2353,8 @@ dependencies = [
  "indoc",
  "influxdb-line-protocol",
  "memchr",
- "once_cell",
- "parquet",
- "prost",
  "ordered-float 4.6.0",
+ "parquet",
  "prost 0.12.6",
  "prost-reflect",
  "rand 0.8.5",
@@ -2557,32 +2540,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28c122c3980598d243d63d9a704629a2d748d101f278052ff068be5a4423ab6f"
 
 [[package]]
-name = "const_fn"
-version = "0.4.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fbdcdcb6d86f71c5e97409ad45898af11cbc995b4ee8112d59095a28d376c935"
-
-[[package]]
 name = "const-random"
-version = "0.1.15"
+version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "368a7a772ead6ce7e1de82bfb04c485f3db8ec744f72925af5735e29a22cc18e"
+checksum = "87e00182fe74b066627d63b85fd550ac2998d4b0bd86bfed477a0ae4c7c71359"
 dependencies = [
  "const-random-macro",
- "proc-macro-hack",
 ]
 
 [[package]]
 name = "const-random-macro"
-version = "0.1.15"
+version = "0.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d7d6ab3c3a2282db210df5f02c4dab6e0a7057af0fb7ebd4070f30fe05c0ddb"
+checksum = "f9d839f2a20b0aee515dc581a6172f2321f96cab76c1a38a4c584a194955390e"
 dependencies = [
- "getrandom 0.2.9",
+ "getrandom 0.2.15",
  "once_cell",
- "proc-macro-hack",
  "tiny-keccak",
 ]
+
+[[package]]
+name = "const_fn"
+version = "0.4.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fbdcdcb6d86f71c5e97409ad45898af11cbc995b4ee8112d59095a28d376c935"
 
 [[package]]
 name = "convert_case"
@@ -3764,8 +3745,8 @@ version = "23.1.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77f5399c2c9c50ae9418e522842ad362f61ee48b346ac106807bd355a8a7c619"
 dependencies = [
- "bitflags",
- "rustc_version 0.4.0",
+ "bitflags 1.3.2",
+ "rustc_version 0.4.1",
 ]
 
 [[package]]
@@ -4242,16 +4223,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing 0.1.41",
-]
-
-[[package]]
-name = "half"
-version = "2.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6dd08c532ae367adf81c312a4580bc67f1d0fe8bc9c460520283f4c0ff277888"
-dependencies = [
- "cfg-if",
- "crunchy",
 ]
 
 [[package]]
@@ -7083,7 +7054,7 @@ version = "39.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0a1e6fa27f09ebddba280f5966ef435f3ac4d74cfc3ffe370fd3fd59c2e004d"
 dependencies = [
- "ahash 0.8.2",
+ "ahash 0.8.11",
  "arrow-array",
  "arrow-buffer",
  "arrow-cast",
@@ -7091,12 +7062,12 @@ dependencies = [
  "arrow-ipc",
  "arrow-schema",
  "arrow-select",
- "base64 0.21.0",
- "brotli",
- "bytes 1.4.0",
+ "base64 0.21.7",
+ "brotli 3.3.4",
+ "bytes 1.9.0",
  "chrono",
  "flate2",
- "hashbrown 0.13.2",
+ "hashbrown 0.13.1",
  "lz4",
  "num",
  "num-bigint",
@@ -7104,8 +7075,8 @@ dependencies = [
  "seq-macro",
  "snap",
  "thrift",
- "twox-hash",
- "zstd 0.12.3+zstd.1.5.2",
+ "twox-hash 1.6.3",
+ "zstd 0.12.4",
 ]
 
 [[package]]
@@ -10058,7 +10029,7 @@ checksum = "7e54bc85fc7faa8bc175c4bab5b92ba8d9a3ce893d0e9f42cc455c8ab16a9e09"
 dependencies = [
  "byteorder",
  "integer-encoding",
- "ordered-float 2.10.0",
+ "ordered-float 2.10.1",
 ]
 
 [[package]]
@@ -10893,6 +10864,16 @@ dependencies = [
 
 [[package]]
 name = "twox-hash"
+version = "1.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
+dependencies = [
+ "cfg-if",
+ "static_assertions",
+]
+
+[[package]]
+name = "twox-hash"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7b17f197b3050ba473acf9181f7b1d3b66d1cf7356c6cc57886662276e65908"
@@ -11669,7 +11650,7 @@ dependencies = [
  "tokio-util",
  "tower",
  "tracing 0.1.41",
- "twox-hash",
+ "twox-hash 2.1.0",
  "vector-common",
  "vector-core",
 ]

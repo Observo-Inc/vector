@@ -382,10 +382,12 @@ impl SerializerConfig {
                 ).build()?,
             ))),
             SerializerConfig::Avro { .. }
+            | SerializerConfig::Cef(..)
             | SerializerConfig::Csv(..)
             | SerializerConfig::Gelf
             | SerializerConfig::Json(..)
             | SerializerConfig::Logfmt
+            | SerializerConfig::Protobuf(..)
             | SerializerConfig::Native
             | SerializerConfig::NativeJson
             | SerializerConfig::RawMessage

@@ -1,4 +1,4 @@
-use std::{convert::TryInto, sync::Arc};
+use std::sync::Arc;
 
 use aws_sdk_s3::Client as S3Client;
 use tower::ServiceBuilder;
@@ -178,7 +178,7 @@ impl GenerateConfig for S3SinkConfig {
             timezone: Default::default(),
             force_path_style: Default::default(),
         })
-        .unwrap()
+            .unwrap()
     }
 }
 
@@ -274,7 +274,7 @@ impl S3SinkConfig {
             self.tls.as_ref(),
             self.force_path_style,
         )
-        .await
+            .await
     }
 }
 

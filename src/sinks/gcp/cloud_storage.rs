@@ -227,7 +227,7 @@ impl GenerateConfig for GcsSinkConfig {
             framing.method = "newline_delimited"
             encoding.codec = "json"
         "#})
-        .unwrap()
+            .unwrap()
     }
 }
 
@@ -400,7 +400,7 @@ impl RequestSettings {
         let acl = config
             .acl
             .map(|acl| HeaderValue::from_str(&to_string(acl)).unwrap());
-        let content_type = HeaderValue::from_str(content_type_value.clone()).unwrap();
+        let content_type = HeaderValue::from_str(content_type_value).unwrap();
         let content_encoding = config
             .compression
             .content_encoding()
@@ -438,7 +438,7 @@ impl RequestSettings {
             time_format,
             append_uuid,
             compression: config.compression,
-            encoder,
+            encoder: encoder,
             tz_offset: offset,
         })
     }

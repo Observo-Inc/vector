@@ -4,6 +4,7 @@ use bytes::BytesMut;
 use itertools::{Itertools, Position};
 use tokio_util::codec::Encoder as _;
 use vector_lib::codecs::encoding::Framer;
+use vector_lib::json_size::JsonSize;
 use vector_lib::request_metadata::GroupedCountByteSize;
 use vector_lib::{config::telemetry, EstimatedJsonEncodedSizeOf};
 
@@ -97,17 +98,17 @@ impl Encoder<Event> for (Transformer, crate::codecs::Encoder<()>) {
 }
 
 impl<T, D: Encoder<T> + ?Sized> Encoder<T> for Arc<D> {
-    fn encode_input(&self, input: T, writer: &mut dyn io::Write) -> io::Result<usize> {
+    fn encode_input(&self, input: T, writer: &mut dyn io::Write) -> io::Result<(usize, GroupedCountByteSize)> {
         (**self).encode_input(input, writer)
     }
 }
 
-impl Encoder<Vec<Event>> for (Transformer, codecs::encoding::BatchSerializer) {
+impl Encoder<Vec<Event>> for (Transformer, vector_lib::codecs::encoding::BatchSerializer) {
     fn encode_input(
         &self,
         mut events: Vec<Event>,
         writer: &mut dyn io::Write,
-    ) -> io::Result<usize> {
+    ) -> io::Result<(usize, GroupedCountByteSize)> {
         let mut encoder = self.1.clone();
         let n_events_pending = events.len();
 
@@ -123,8 +124,15 @@ impl Encoder<Vec<Event>> for (Transformer, codecs::encoding::BatchSerializer) {
         })?;
 
         write_all(writer, n_events_pending, &bytes)?;
+        let num_bytes = bytes.len();
 
-        Ok(bytes.len())
+        // TODO: https://observo.atlassian.net/browse/OB-5913
+        let mut grp_sz = GroupedCountByteSize::new_untagged();
+        grp_sz
+            .bulk_add(n_events_pending, JsonSize::new(num_bytes))
+            .expect("Couldn't bulk-add untagged-events");
+
+        Ok((num_bytes, grp_sz))
     }
 }
 
