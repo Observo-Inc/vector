@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::config::{log_schema, LegacyKey, LogNamespace};
-use lookup::lookup_v2::{parse_value_path, TargetPath};
+use lookup::lookup_v2::TargetPath;
 use lookup::{owned_value_path, OwnedTargetPath, OwnedValuePath, PathPrefix};
 use vrl::value::{kind::Collection, Kind};
+
+use crate::config::{log_schema, LegacyKey, LogNamespace};
 
 /// The definition of a schema.
 ///
@@ -144,9 +145,7 @@ impl Definition {
     #[must_use]
     pub fn with_standard_vector_source_metadata(self) -> Self {
         self.with_vector_metadata(
-            parse_value_path(log_schema().source_type_key())
-                .ok()
-                .as_ref(),
+            log_schema().source_type_key(),
             &owned_value_path!("source_type"),
             Kind::bytes(),
             None,
@@ -382,7 +381,7 @@ impl Definition {
     /// # Panics
     ///
     /// This method panics if the provided path points to an unknown location in the collection.
-    fn add_meaning(&mut self, target_path: OwnedTargetPath, meaning: &str) {
+    pub fn add_meaning(&mut self, target_path: OwnedTargetPath, meaning: &str) {
         self.try_with_meaning(target_path, meaning)
             .unwrap_or_else(|err| panic!("{}", err));
     }
@@ -457,6 +456,25 @@ impl Definition {
         self
     }
 
+    /// If the schema definition depends on the `LogNamespace`, this combines the individual
+    /// definitions for each `LogNamespace`.
+    pub fn combine_log_namespaces(
+        log_namespaces: &BTreeSet<LogNamespace>,
+        legacy: Self,
+        vector: Self,
+    ) -> Self {
+        let mut combined =
+            Definition::new_with_default_metadata(Kind::never(), log_namespaces.clone());
+
+        if log_namespaces.contains(&LogNamespace::Legacy) {
+            combined = combined.merge(legacy);
+        }
+        if log_namespaces.contains(&LogNamespace::Vector) {
+            combined = combined.merge(vector);
+        }
+        combined
+    }
+
     /// Returns an `OwnedTargetPath` into an event, based on the provided `meaning`, if the meaning exists.
     pub fn meaning_path(&self, meaning: &str) -> Option<&OwnedTargetPath> {
         match self.meaning.get(meaning) {
@@ -519,7 +537,7 @@ impl Definition {
 
 #[cfg(any(test, feature = "test"))]
 mod test_utils {
-    use super::*;
+    use super::{Definition, Kind};
     use crate::event::{Event, LogEvent};
 
     impl Definition {

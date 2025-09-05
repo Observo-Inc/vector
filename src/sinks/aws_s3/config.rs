@@ -1,13 +1,14 @@
 use std::{convert::TryInto, sync::Arc};
 
 use aws_sdk_s3::Client as S3Client;
-use codecs::{
+use tower::ServiceBuilder;
+use vector_lib::codecs::{
     encoding::{Framer, FramingConfig},
     TextSerializerConfig,
 };
-use tower::ServiceBuilder;
-use vector_config::configurable_component;
-use vector_core::sink::VectorSink;
+use vector_lib::configurable::configurable_component;
+use vector_lib::sink::VectorSink;
+use vector_lib::TimeZone;
 
 use super::sink::S3RequestOptions;
 use crate::{
@@ -24,8 +25,8 @@ use crate::{
             sink::S3Sink,
         },
         util::{
-            BatchConfig, BulkSizeBasedDefaultBatchSettings, Compression, ServiceBuilderExt,
-            TowerRequestConfig,
+            timezone_to_offset, BatchConfig, BulkSizeBasedDefaultBatchSettings, Compression,
+            ServiceBuilderExt, TowerRequestConfig,
         },
         Healthcheck,
     },
@@ -34,7 +35,10 @@ use crate::{
 };
 
 /// Configuration for the `aws_s3` sink.
-#[configurable_component(sink("aws_s3"))]
+#[configurable_component(sink(
+    "aws_s3",
+    "Store observability events in the AWS S3 object storage system."
+))]
 #[derive(Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct S3SinkConfig {
@@ -84,6 +88,7 @@ pub struct S3SinkConfig {
     /// This ensures there are no name collisions, and can be useful in high-volume workloads where
     /// object keys must be unique.
     #[serde(default = "crate::serde::default_true")]
+    #[configurable(metadata(docs::human_name = "Append UUID to Filename"))]
     pub filename_append_uuid: bool,
 
     /// The filename extension to use in the object key.
@@ -130,9 +135,19 @@ pub struct S3SinkConfig {
     #[serde(
         default,
         deserialize_with = "crate::serde::bool_or_struct",
-        skip_serializing_if = "crate::serde::skip_serializing_if_default"
+        skip_serializing_if = "crate::serde::is_default"
     )]
     pub acknowledgements: AcknowledgementsConfig,
+
+    #[configurable(derived)]
+    #[serde(default)]
+    pub timezone: Option<TimeZone>,
+
+    /// Specifies which addressing style to use.
+    ///
+    /// This controls if the bucket name is in the hostname or part of the URL.
+    #[serde(default = "crate::serde::default_true")]
+    pub force_path_style: bool,
 }
 
 pub(super) fn default_key_prefix() -> String {
@@ -160,17 +175,20 @@ impl GenerateConfig for S3SinkConfig {
             tls: Some(TlsConfig::default()),
             auth: AwsAuthentication::default(),
             acknowledgements: Default::default(),
+            timezone: Default::default(),
+            force_path_style: Default::default(),
         })
         .unwrap()
     }
 }
 
 #[async_trait::async_trait]
+#[typetag::serde(name = "aws_s3")]
 impl SinkConfig for S3SinkConfig {
     async fn build(&self, cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
         let service = self.create_service(&cx.proxy).await?;
         let healthcheck = self.build_healthcheck(service.client())?;
-        let sink = self.build_processor(service)?;
+        let sink = self.build_processor(service, cx)?;
         Ok((sink, healthcheck))
     }
 
@@ -184,19 +202,30 @@ impl SinkConfig for S3SinkConfig {
 }
 
 impl S3SinkConfig {
-    pub fn build_processor(&self, service: S3Service) -> crate::Result<VectorSink> {
+    pub fn build_processor(
+        &self,
+        service: S3Service,
+        cx: SinkContext,
+    ) -> crate::Result<VectorSink> {
         // Build our S3 client/service, which is what we'll ultimately feed
         // requests into in order to ship files to S3.  We build this here in
         // order to configure the client/service with retries, concurrency
         // limits, rate limits, and whatever else the client should have.
-        let request_limits = self.request.unwrap_with(&Default::default());
+        let request_limits = self.request.into_settings();
         let service = ServiceBuilder::new()
             .settings(request_limits, S3RetryLogic)
             .service(service);
 
+        let offset = self
+            .timezone
+            .or(cx.globals.timezone)
+            .and_then(timezone_to_offset);
+
         // Configure our partitioning/batching.
         let batch_settings = self.batch.into_batcher_settings()?;
-        let key_prefix = self.key_prefix.clone().try_into()?;
+
+        let key_prefix = Template::try_from(self.key_prefix.clone())?.with_tz_offset(offset);
+
         let ssekms_key_id = self
             .options
             .ssekms_key_id
@@ -204,7 +233,8 @@ impl S3SinkConfig {
             .cloned()
             .map(|ssekms_key_id| Template::try_from(ssekms_key_id.as_str()))
             .transpose()?;
-        let partitioner = S3KeyPartitioner::new(key_prefix, ssekms_key_id);
+
+        let partitioner = S3KeyPartitioner::new(key_prefix, ssekms_key_id, None);
 
         let transformer = self.encoding.transformer();
         let encoder = if let Some(serializer) = self.encoding.build_batched()? {
@@ -224,6 +254,7 @@ impl S3SinkConfig {
             filename_append_uuid: self.filename_append_uuid,
             encoder,
             compression: self.compression,
+            filename_tz_offset: offset,
         };
 
         let sink = S3Sink::new(service, request_options, partitioner, batch_settings);
@@ -236,7 +267,14 @@ impl S3SinkConfig {
     }
 
     pub async fn create_service(&self, proxy: &ProxyConfig) -> crate::Result<S3Service> {
-        s3_common::config::create_service(&self.region, &self.auth, proxy, &self.tls).await
+        s3_common::config::create_service(
+            &self.region,
+            &self.auth,
+            proxy,
+            self.tls.as_ref(),
+            self.force_path_style,
+        )
+        .await
     }
 }
 

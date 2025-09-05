@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::{collections::HashMap, fmt, num::NonZeroUsize};
 
 use bitmask_enum::bitmask;
@@ -8,6 +9,7 @@ mod global_options;
 mod log_schema;
 pub mod output_id;
 pub mod proxy;
+mod telemetry;
 
 use crate::event::LogEvent;
 pub use global_options::GlobalOptions;
@@ -15,6 +17,7 @@ pub use log_schema::{init_log_schema, log_schema, LogSchema};
 use lookup::{lookup_v2::ValuePath, path, PathPrefix};
 pub use output_id::OutputId;
 use serde::{Deserialize, Serialize};
+pub use telemetry::{init_telemetry, telemetry, Tags, Telemetry};
 pub use vector_common::config::ComponentKey;
 use vector_config::configurable_component;
 use vrl::value::Value;
@@ -27,6 +30,7 @@ pub const MEMORY_BUFFER_DEFAULT_MAX_EVENTS: NonZeroUsize =
 // This enum should be kept alphabetically sorted as the bitmask value is used when
 // sorting sources by data type in the GraphQL API.
 #[bitmask(u8)]
+#[bitmask_config(flags_iter)]
 pub enum DataType {
     Log,
     Metric,
@@ -35,11 +39,11 @@ pub enum DataType {
 
 impl fmt::Display for DataType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let mut t = Vec::new();
-        self.contains(DataType::Log).then(|| t.push("Log"));
-        self.contains(DataType::Metric).then(|| t.push("Metric"));
-        self.contains(DataType::Trace).then(|| t.push("Trace"));
-        f.write_str(&t.join(","))
+        f.debug_list()
+            .entries(
+                Self::flags().filter_map(|&(name, value)| self.contains(value).then_some(name)),
+            )
+            .finish()
     }
 }
 
@@ -88,7 +92,7 @@ impl Input {
 
     pub fn all() -> Self {
         Self {
-            ty: DataType::all(),
+            ty: DataType::all_bits(),
             log_schema_requirement: schema::Requirement::empty(),
         }
     }
@@ -109,25 +113,23 @@ pub struct SourceOutput {
     // NOTE: schema definitions are only implemented/supported for log-type events. There is no
     // inherent blocker to support other types as well, but it'll require additional work to add
     // the relevant schemas, and store them separately in this type.
-    pub schema_definition: Option<schema::Definition>,
+    pub schema_definition: Option<Arc<schema::Definition>>,
 }
 
 impl SourceOutput {
     /// Create a `SourceOutput` of the given data type that contains a single output `Definition`.
+    /// If the data type does not contain logs, the schema definition will be ignored.
     /// Designed for use in log sources.
-    ///
-    ///
-    /// # Panics
-    ///
-    /// Panics if `ty` does not contain [`DataType::Log`].
     #[must_use]
-    pub fn new_logs(ty: DataType, schema_definition: schema::Definition) -> Self {
-        assert!(ty.contains(DataType::Log));
+    pub fn new_maybe_logs(ty: DataType, schema_definition: schema::Definition) -> Self {
+        let schema_definition = ty
+            .contains(DataType::Log)
+            .then(|| Arc::new(schema_definition));
 
         Self {
             port: None,
             ty,
-            schema_definition: Some(schema_definition),
+            schema_definition,
         }
     }
 
@@ -166,17 +168,15 @@ impl SourceOutput {
     /// Schema enabled is set in the users configuration.
     #[must_use]
     pub fn schema_definition(&self, schema_enabled: bool) -> Option<schema::Definition> {
+        use std::ops::Deref;
+
         self.schema_definition.as_ref().map(|definition| {
             if schema_enabled {
-                definition.clone()
+                definition.deref().clone()
             } else {
                 let mut new_definition =
                     schema::Definition::default_for_namespace(definition.log_namespaces());
-
-                if definition.log_namespaces().contains(&LogNamespace::Vector) {
-                    new_definition.add_meanings(definition.meanings());
-                }
-
+                new_definition.add_meanings(definition.meanings());
                 new_definition
             }
         })
@@ -192,6 +192,24 @@ impl SourceOutput {
     }
 }
 
+fn fmt_helper(
+    f: &mut fmt::Formatter<'_>,
+    maybe_port: Option<&String>,
+    data_type: DataType,
+) -> fmt::Result {
+    match maybe_port {
+        Some(port) => write!(f, "port: \"{port}\",",),
+        None => write!(f, "port: None,"),
+    }?;
+    write!(f, " types: {data_type}")
+}
+
+impl fmt::Display for SourceOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_helper(f, self.port.as_ref(), self.ty)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransformOutput {
     pub port: Option<String>,
@@ -201,7 +219,13 @@ pub struct TransformOutput {
     /// enabled, at least one definition  should be output. If the transform
     /// has multiple connected sources, it is possible to have multiple output
     /// definitions - one for each input.
-    log_schema_definitions: HashMap<OutputId, schema::Definition>,
+    pub log_schema_definitions: HashMap<OutputId, schema::Definition>,
+}
+
+impl fmt::Display for TransformOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_helper(f, self.port.as_ref(), self.ty)
+    }
 }
 
 impl TransformOutput {
@@ -243,11 +267,7 @@ impl TransformOutput {
                 .map(|(output, definition)| {
                     let mut new_definition =
                         schema::Definition::default_for_namespace(definition.log_namespaces());
-
-                    if definition.log_namespaces().contains(&LogNamespace::Vector) {
-                        new_definition.add_meanings(definition.meanings());
-                    }
-
+                    new_definition.add_meanings(definition.meanings());
                     (output.clone(), new_definition)
                 })
                 .collect()
@@ -337,9 +357,9 @@ impl From<SourceAcknowledgementsConfig> for AcknowledgementsConfig {
 pub struct AcknowledgementsConfig {
     /// Whether or not end-to-end acknowledgements are enabled.
     ///
-    /// When enabled for a sink, any source connected to that sink, where the source supports
-    /// end-to-end acknowledgements as well, waits for events to be acknowledged by the sink
-    /// before acknowledging them at the source.
+    /// When enabled for a sink, any source connected to that sink where the source supports
+    /// end-to-end acknowledgements as well, waits for events to be acknowledged by **all
+    /// connected** sinks before acknowledging them at the source.
     ///
     /// Enabling or disabling acknowledgements at the sink level takes precedence over any global
     /// [`acknowledgements`][global_acks] configuration.
@@ -479,7 +499,7 @@ impl LogNamespace {
     ) {
         self.insert_vector_metadata(
             log,
-            Some(log_schema().source_type_key()),
+            log_schema().source_type_key(),
             path!("source_type"),
             Bytes::from_static(source_name.as_bytes()),
         );
@@ -558,10 +578,10 @@ mod test {
 
     #[test]
     fn test_insert_standard_vector_source_metadata() {
-        let nested_path = "a.b.c.d";
-
         let mut schema = LogSchema::default();
-        schema.set_source_type_key(nested_path.to_owned());
+        schema.set_source_type_key(Some(OwnedTargetPath::event(owned_value_path!(
+            "a", "b", "c", "d"
+        ))));
         init_log_schema(schema, false);
 
         let namespace = LogNamespace::Legacy;
@@ -576,7 +596,7 @@ mod test {
         let definition = schema::Definition::empty_legacy_namespace()
             .with_event_field(&owned_value_path!("zork"), Kind::bytes(), Some("zork"))
             .with_event_field(&owned_value_path!("nork"), Kind::integer(), None);
-        let output = SourceOutput::new_logs(DataType::Log, definition);
+        let output = SourceOutput::new_maybe_logs(DataType::Log, definition);
 
         let valid_event = LogEvent::from(Value::from(btreemap! {
             "zork" => "norknoog",
@@ -604,7 +624,10 @@ mod test {
 
         // There should be the default legacy definition without schemas enabled.
         assert_eq!(
-            Some(schema::Definition::default_legacy_namespace()),
+            Some(
+                schema::Definition::default_legacy_namespace()
+                    .with_meaning(OwnedTargetPath::event(owned_value_path!("zork")), "zork")
+            ),
             output.schema_definition(false)
         );
     }
@@ -619,7 +642,7 @@ mod test {
             )
             .with_event_field(&owned_value_path!("nork"), Kind::integer(), None);
 
-        let output = SourceOutput::new_logs(DataType::Log, definition);
+        let output = SourceOutput::new_maybe_logs(DataType::Log, definition);
 
         let mut valid_event = LogEvent::from(Value::from(btreemap! {
             "nork" => 32
@@ -672,5 +695,19 @@ mod test {
         // Events should not have the schema validated.
         new_definition.assert_valid_for_event(&valid_event);
         new_definition.assert_valid_for_event(&invalid_event);
+    }
+
+    #[test]
+    fn test_new_log_source_ignores_definition_with_metric_data_type() {
+        let definition = schema::Definition::any();
+        let output = SourceOutput::new_maybe_logs(DataType::Metric, definition);
+        assert_eq!(output.schema_definition(true), None);
+    }
+
+    #[test]
+    fn test_new_log_source_uses_definition_with_log_data_type() {
+        let definition = schema::Definition::any();
+        let output = SourceOutput::new_maybe_logs(DataType::Log, definition.clone());
+        assert_eq!(output.schema_definition(true), Some(definition));
     }
 }

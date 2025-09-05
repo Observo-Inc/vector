@@ -12,12 +12,12 @@ use heim::units::time::second;
 use serde_with::serde_as;
 use tokio::time;
 use tokio_stream::wrappers::IntervalStream;
-use vector_common::internal_event::{
+use vector_lib::config::LogNamespace;
+use vector_lib::configurable::configurable_component;
+use vector_lib::internal_event::{
     ByteSize, BytesReceived, CountByteSize, InternalEventHandle as _, Protocol, Registered,
 };
-use vector_config::configurable_component;
-use vector_core::config::LogNamespace;
-use vector_core::EstimatedJsonEncodedSizeOf;
+use vector_lib::EstimatedJsonEncodedSizeOf;
 
 use crate::{
     config::{SourceConfig, SourceContext, SourceOutput},
@@ -34,6 +34,9 @@ mod disk;
 mod filesystem;
 mod memory;
 mod network;
+mod process;
+#[cfg(target_os = "linux")]
+mod tcp;
 
 /// Collector types.
 #[serde_as]
@@ -48,6 +51,9 @@ pub enum Collector {
 
     /// Metrics related to CPU utilization.
     Cpu,
+
+    /// Metrics related to Process utilization.
+    Process,
 
     /// Metrics related to disk I/O utilization.
     Disk,
@@ -66,12 +72,15 @@ pub enum Collector {
 
     /// Metrics related to network utilization.
     Network,
+
+    /// Metrics related to TCP connections.
+    TCP,
 }
 
 /// Filtering configuration.
 #[configurable_component]
 #[derive(Clone, Debug, Default)]
-pub(self) struct FilterList {
+struct FilterList {
     /// Any patterns which should be included.
     ///
     /// The patterns are matched using globbing.
@@ -93,6 +102,7 @@ pub struct HostMetricsConfig {
     /// The interval between metric gathering, in seconds.
     #[serde_as(as = "serde_with::DurationSeconds<u64>")]
     #[serde(default = "default_scrape_interval")]
+    #[configurable(metadata(docs::human_name = "Scrape Interval"))]
     pub scrape_interval_secs: Duration,
 
     /// The list of host metric collector services to use.
@@ -124,6 +134,10 @@ pub struct HostMetricsConfig {
     #[configurable(derived)]
     #[serde(default)]
     pub network: network::NetworkConfig,
+
+    #[configurable(derived)]
+    #[serde(default)]
+    pub process: process::ProcessConfig,
 }
 
 /// Options for the cgroups (controller groups) metrics collector.
@@ -136,7 +150,7 @@ pub struct HostMetricsConfig {
 pub struct CGroupsConfig {
     /// The number of levels of the cgroups hierarchy for which to report metrics.
     ///
-    /// A value of `1` means just the root or named cgroup.
+    /// A value of `1` means the root or named cgroup.
     #[derivative(Default(value = "default_levels()"))]
     #[serde(default = "default_levels")]
     #[configurable(metadata(docs::examples = 1))]
@@ -157,6 +171,7 @@ pub struct CGroupsConfig {
     /// Base cgroup directory, for testing use only
     #[serde(skip_serializing)]
     #[configurable(metadata(docs::hidden))]
+    #[configurable(metadata(docs::human_name = "Base Directory"))]
     base_dir: Option<PathBuf>,
 }
 
@@ -168,7 +183,7 @@ pub fn default_namespace() -> Option<String> {
     Some(String::from("host"))
 }
 
-const fn example_collectors() -> [&'static str; 8] {
+const fn example_collectors() -> [&'static str; 9] {
     [
         "cgroups",
         "cpu",
@@ -178,6 +193,7 @@ const fn example_collectors() -> [&'static str; 8] {
         "host",
         "memory",
         "network",
+        "tcp",
     ]
 }
 
@@ -190,15 +206,18 @@ fn default_collectors() -> Option<Vec<Collector>> {
         Collector::Host,
         Collector::Memory,
         Collector::Network,
+        Collector::Process,
     ];
 
     #[cfg(target_os = "linux")]
     {
         collectors.push(Collector::CGroups);
+        collectors.push(Collector::TCP);
     }
     #[cfg(not(target_os = "linux"))]
     if std::env::var("VECTOR_GENERATE_SCHEMA").is_ok() {
         collectors.push(Collector::CGroups);
+        collectors.push(Collector::TCP);
     }
 
     Some(collectors)
@@ -212,6 +231,20 @@ fn example_devices() -> FilterList {
 }
 
 fn default_all_devices() -> FilterList {
+    FilterList {
+        includes: Some(vec!["*".try_into().unwrap()]),
+        excludes: None,
+    }
+}
+
+fn example_processes() -> FilterList {
+    FilterList {
+        includes: Some(vec!["docker".try_into().unwrap()]),
+        excludes: None,
+    }
+}
+
+fn default_all_processes() -> FilterList {
     FilterList {
         includes: Some(vec!["*".try_into().unwrap()]),
         excludes: None,
@@ -259,6 +292,9 @@ impl SourceConfig for HostMetricsConfig {
             if self.cgroups.is_some() || self.has_collector(Collector::CGroups) {
                 return Err("CGroups collector is only available on Linux systems".into());
             }
+            if self.has_collector(Collector::TCP) {
+                return Err("TCP collector is only available on Linux systems".into());
+            }
         }
 
         let mut config = self.clone();
@@ -294,8 +330,8 @@ impl HostMetricsConfig {
             bytes_received.emit(ByteSize(0));
             let metrics = generator.capture_metrics().await;
             let count = metrics.len();
-            if let Err(error) = out.send_batch(metrics).await {
-                emit!(StreamClosedError { count, error });
+            if (out.send_batch(metrics).await).is_err() {
+                emit!(StreamClosedError { count });
                 return Err(());
             }
         }
@@ -352,6 +388,9 @@ impl HostMetrics {
         if self.config.has_collector(Collector::Cpu) {
             self.cpu_metrics(&mut buffer).await;
         }
+        if self.config.has_collector(Collector::Process) {
+            self.process_metrics(&mut buffer).await;
+        }
         if self.config.has_collector(Collector::Disk) {
             self.disk_metrics(&mut buffer).await;
         }
@@ -370,6 +409,10 @@ impl HostMetrics {
         }
         if self.config.has_collector(Collector::Network) {
             self.network_metrics(&mut buffer).await;
+        }
+        #[cfg(target_os = "linux")]
+        if self.config.has_collector(Collector::TCP) {
+            self.tcp_metrics(&mut buffer).await;
         }
 
         let metrics = buffer.metrics;
@@ -481,7 +524,7 @@ impl MetricsBuffer {
     }
 }
 
-pub(self) fn filter_result_sync<T, E>(result: Result<T, E>, message: &'static str) -> Option<T>
+fn filter_result_sync<T, E>(result: Result<T, E>, message: &'static str) -> Option<T>
 where
     E: std::error::Error,
 {
@@ -490,7 +533,7 @@ where
         .ok()
 }
 
-pub(self) async fn filter_result<T, E>(result: Result<T, E>, message: &'static str) -> Option<T>
+async fn filter_result<T, E>(result: Result<T, E>, message: &'static str) -> Option<T>
 where
     E: std::error::Error,
 {
@@ -625,7 +668,7 @@ impl From<PatternWrapper> for String {
 }
 
 #[cfg(test)]
-pub(self) mod tests {
+mod tests {
     use crate::test_util::components::{run_and_assert_source_compliance, SOURCE_TAGS};
     use std::{collections::HashSet, future::Future, time::Duration};
 
@@ -706,6 +749,7 @@ pub(self) mod tests {
             #[cfg(target_os = "linux")]
             Collector::CGroups,
             Collector::Cpu,
+            Collector::Process,
             Collector::Disk,
             Collector::Filesystem,
             Collector::Load,

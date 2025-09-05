@@ -2,6 +2,7 @@ use std::cell::RefCell;
 
 use vector_config_common::{attributes::CustomAttribute, constants};
 
+use crate::schema::generate_optional_schema;
 use crate::{
     num::NumberClass,
     schema::{generate_number_schema, SchemaGenerator, SchemaObject},
@@ -50,7 +51,7 @@ where
 impl Configurable for serde_with::DurationSeconds<u64, serde_with::formats::Strict> {
     fn referenceable_name() -> Option<&'static str> {
         // We're masking the type parameters here because we only deal with whole seconds via this
-        // version, and handle fractional seconds with `DurationSeconds<f64, Strict>`, which we
+        // version, and handle fractional seconds with `DurationSecondsWithFrac<f64, Strict>`, which we
         // expose as `serde_with::DurationFractionalSeconds`.
         Some("serde_with::DurationSeconds")
     }
@@ -76,7 +77,7 @@ impl Configurable for serde_with::DurationSeconds<u64, serde_with::formats::Stri
     }
 }
 
-impl Configurable for serde_with::DurationSeconds<f64, serde_with::formats::Strict> {
+impl Configurable for serde_with::DurationSecondsWithFrac<f64, serde_with::formats::Strict> {
     fn referenceable_name() -> Option<&'static str> {
         // We're masking the type parameters here because we only deal with fractional seconds via this
         // version, and handle whole seconds with `DurationSeconds<u64, Strict>`, which we
@@ -130,5 +131,14 @@ impl Configurable for serde_with::DurationMilliSeconds<u64, serde_with::formats:
         // This boils down to a number schema, but we just need to shuttle around the metadata so
         // that we can call the relevant schema generation function.
         Ok(generate_number_schema::<u64>())
+    }
+}
+
+impl Configurable for Option<serde_with::DurationMilliSeconds<u64, serde_with::formats::Strict>> {
+    fn generate_schema(gen: &RefCell<SchemaGenerator>) -> Result<SchemaObject, GenerateError>
+    where
+        Self: Sized,
+    {
+        generate_optional_schema(&u64::as_configurable_ref(), gen)
     }
 }

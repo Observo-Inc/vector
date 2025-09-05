@@ -1,8 +1,8 @@
-use codecs::{encoding::Framer, JsonSerializerConfig, NewlineDelimitedEncoderConfig};
 use opendal::{layers::LoggingLayer, services::Webhdfs, Operator};
 use tower::ServiceBuilder;
-use vector_config::configurable_component;
-use vector_core::{
+use vector_lib::codecs::{encoding::Framer, JsonSerializerConfig, NewlineDelimitedEncoderConfig};
+use vector_lib::configurable::configurable_component;
+use vector_lib::{
     config::{AcknowledgementsConfig, DataType, Input},
     sink::VectorSink,
 };
@@ -21,7 +21,7 @@ use crate::{
 };
 
 /// Configuration for the `webhdfs` sink.
-#[configurable_component(sink("webhdfs"))]
+#[configurable_component(sink("webhdfs", "WebHDFS."))]
 #[derive(Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct WebHdfsConfig {
@@ -70,7 +70,7 @@ pub struct WebHdfsConfig {
     #[serde(
         default,
         deserialize_with = "crate::serde::bool_or_struct",
-        skip_serializing_if = "crate::serde::skip_serializing_if_default"
+        skip_serializing_if = "crate::serde::is_default"
     )]
     pub acknowledgements: AcknowledgementsConfig,
 }
@@ -97,6 +97,7 @@ impl GenerateConfig for WebHdfsConfig {
 }
 
 #[async_trait::async_trait]
+#[typetag::serde(name = "webhdfs")]
 impl SinkConfig for WebHdfsConfig {
     async fn build(&self, _cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
         let op = self.build_operator()?;
@@ -159,6 +160,6 @@ impl WebHdfsConfig {
 
     pub fn key_partitioner(&self) -> crate::Result<KeyPartitioner> {
         let prefix = self.prefix.clone().try_into()?;
-        Ok(KeyPartitioner::new(prefix))
+        Ok(KeyPartitioner::new(prefix, None))
     }
 }

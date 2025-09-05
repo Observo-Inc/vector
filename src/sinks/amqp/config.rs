@@ -1,17 +1,8 @@
 //! Configuration functionality for the `AMQP` sink.
-use crate::{
-    amqp::AmqpConfig,
-    codecs::EncodingConfig,
-    config::{DataType, GenerateConfig, Input, SinkConfig, SinkContext},
-    sinks::{Healthcheck, VectorSink},
-    template::Template,
-};
-use codecs::TextSerializerConfig;
-use futures::FutureExt;
+use crate::{amqp::AmqpConfig, sinks::prelude::*};
 use lapin::{types::ShortString, BasicProperties};
 use std::sync::Arc;
-use vector_config::configurable_component;
-use vector_core::config::AcknowledgementsConfig;
+use vector_lib::codecs::TextSerializerConfig;
 
 use super::sink::AmqpSink;
 
@@ -21,12 +12,13 @@ use super::sink::AmqpSink;
 #[derive(Clone, Debug, Default)]
 pub struct AmqpPropertiesConfig {
     /// Content-Type for the AMQP messages.
-    #[configurable(derived)]
     pub(crate) content_type: Option<String>,
 
     /// Content-Encoding for the AMQP messages.
-    #[configurable(derived)]
     pub(crate) content_encoding: Option<String>,
+
+    /// Expiration for AMQP messages (in milliseconds)
+    pub(crate) expiration_ms: Option<u64>,
 }
 
 impl AmqpPropertiesConfig {
@@ -38,6 +30,9 @@ impl AmqpPropertiesConfig {
         if let Some(content_encoding) = &self.content_encoding {
             prop = prop.with_content_encoding(ShortString::from(content_encoding.clone()));
         }
+        if let Some(expiration_ms) = &self.expiration_ms {
+            prop = prop.with_expiration(ShortString::from(expiration_ms.to_string()));
+        }
         prop
     }
 }
@@ -45,7 +40,10 @@ impl AmqpPropertiesConfig {
 /// Configuration for the `amqp` sink.
 ///
 /// Supports AMQP version 0.9.1
-#[configurable_component(sink("amqp"))]
+#[configurable_component(sink(
+    "amqp",
+    "Send events to AMQP 0.9.1 compatible brokers like RabbitMQ."
+))]
 #[derive(Clone, Debug)]
 pub struct AmqpSinkConfig {
     /// The exchange to publish messages to.
@@ -67,7 +65,7 @@ pub struct AmqpSinkConfig {
     #[serde(
         default,
         deserialize_with = "crate::serde::bool_or_struct",
-        skip_serializing_if = "crate::serde::skip_serializing_if_default"
+        skip_serializing_if = "crate::serde::is_default"
     )]
     pub(crate) acknowledgements: AcknowledgementsConfig,
 }
@@ -98,6 +96,7 @@ impl GenerateConfig for AmqpSinkConfig {
 }
 
 #[async_trait::async_trait]
+#[typetag::serde(name = "amqp")]
 impl SinkConfig for AmqpSinkConfig {
     async fn build(&self, _cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
         let sink = AmqpSink::new(self.clone()).await?;

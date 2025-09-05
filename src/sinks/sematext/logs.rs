@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
 use indoc::indoc;
-use vector_common::sensitive_string::SensitiveString;
-use vector_config::configurable_component;
+use vector_lib::configurable::configurable_component;
+use vector_lib::sensitive_string::SensitiveString;
+use vrl::event_path;
 
 use super::Region;
 use crate::{
@@ -21,7 +22,7 @@ use crate::{
 };
 
 /// Configuration for the `sematext_logs` sink.
-#[configurable_component(sink("sematext_logs"))]
+#[configurable_component(sink("sematext_logs", "Publish log events to Sematext."))]
 #[derive(Clone, Debug)]
 pub struct SematextLogsConfig {
     #[serde(default = "super::default_region")]
@@ -42,10 +43,7 @@ pub struct SematextLogsConfig {
     token: SensitiveString,
 
     #[configurable(derived)]
-    #[serde(
-        skip_serializing_if = "crate::serde::skip_serializing_if_default",
-        default
-    )]
+    #[serde(skip_serializing_if = "crate::serde::is_default", default)]
     pub encoding: Transformer,
 
     #[configurable(derived)]
@@ -60,7 +58,7 @@ pub struct SematextLogsConfig {
     #[serde(
         default,
         deserialize_with = "crate::serde::bool_or_struct",
-        skip_serializing_if = "crate::serde::skip_serializing_if_default"
+        skip_serializing_if = "crate::serde::is_default"
     )]
     acknowledgements: AcknowledgementsConfig,
 }
@@ -79,6 +77,7 @@ const US_ENDPOINT: &str = "https://logsene-receiver.sematext.com";
 const EU_ENDPOINT: &str = "https://logsene-receiver.eu.sematext.com";
 
 #[async_trait::async_trait]
+#[typetag::serde(name = "sematext_logs")]
 impl SinkConfig for SematextLogsConfig {
     async fn build(&self, cx: SinkContext) -> crate::Result<(VectorSink, Healthcheck)> {
         let endpoint = match (&self.endpoint, &self.region) {
@@ -142,12 +141,12 @@ fn map_timestamp(mut events: EventArray) -> EventArray {
     match &mut events {
         EventArray::Logs(logs) => {
             for log in logs {
-                if let Some(path) = log.timestamp_path() {
-                    log.rename_key(path.as_str(), "@timestamp");
+                if let Some(path) = log.timestamp_path().cloned().as_ref() {
+                    log.rename_key(path, event_path!("@timestamp"));
                 }
 
-                if let Some(path) = log.host_path() {
-                    log.rename_key(path.as_str(), "os.host");
+                if let Some(path) = log.host_path().cloned().as_ref() {
+                    log.rename_key(path, event_path!("os.host"));
                 }
             }
         }

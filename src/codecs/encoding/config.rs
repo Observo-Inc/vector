@@ -1,9 +1,9 @@
 use crate::codecs::Transformer;
-use codecs::{
+use vector_lib::codecs::{
     encoding::{BatchSerializer, Framer, FramingConfig, Serializer, SerializerConfig},
     CharacterDelimitedEncoder, LengthDelimitedEncoder, NewlineDelimitedEncoder,
 };
-use vector_config::configurable_component;
+use vector_lib::configurable::configurable_component;
 
 /// Encoding configuration.
 #[configurable_component]
@@ -101,21 +101,31 @@ impl EncodingConfigWithFraming {
         let framer = match (framer, &serializer) {
             (Some(framer), _) => framer,
             (None, Serializer::Json(_)) => match sink_type {
-                SinkType::StreamBased => NewlineDelimitedEncoder::new().into(),
+                SinkType::StreamBased => NewlineDelimitedEncoder::default().into(),
                 SinkType::MessageBased => CharacterDelimitedEncoder::new(b',').into(),
             },
             (None, Serializer::Avro(_) | Serializer::Native(_)) => {
-                LengthDelimitedEncoder::new().into()
+                LengthDelimitedEncoder::default().into()
+            }
+            (None, Serializer::Gelf(_)) => {
+                // Graylog/GELF always uses null byte delimiter on TCP, see
+                // https://github.com/Graylog2/graylog2-server/issues/1240
+                CharacterDelimitedEncoder::new(0).into()
+            }
+            (None, Serializer::Protobuf(_)) => {
+                // Protobuf uses length-delimited messages, see:
+                // https://developers.google.com/protocol-buffers/docs/techniques#streaming
+                LengthDelimitedEncoder::default().into()
             }
             (
                 None,
-                Serializer::Csv(_)
-                | Serializer::Gelf(_)
+                Serializer::Cef(_)
+                | Serializer::Csv(_)
                 | Serializer::Logfmt(_)
                 | Serializer::NativeJson(_)
                 | Serializer::RawMessage(_)
                 | Serializer::Text(_),
-            ) => NewlineDelimitedEncoder::new().into(),
+            ) => NewlineDelimitedEncoder::default().into(),
         };
 
         Ok((framer, serializer))
@@ -152,7 +162,7 @@ where
 
 #[cfg(test)]
 mod test {
-    use lookup::lookup_v2::{parse_value_path, ConfigValuePath};
+    use vector_lib::lookup::lookup_v2::{parse_value_path, ConfigValuePath};
 
     use super::*;
     use crate::codecs::encoding::TimestampFormat;
@@ -179,10 +189,7 @@ mod test {
             transformer.only_fields(),
             &Some(vec![ConfigValuePath(parse_value_path("a.b[0]").unwrap())])
         );
-        assert_eq!(
-            transformer.except_fields(),
-            &Some(vec!["ignore_me".to_owned()])
-        );
+        assert_eq!(transformer.except_fields(), &Some(vec!["ignore_me".into()]));
         assert_eq!(transformer.timestamp_format(), &Some(TimestampFormat::Unix));
     }
 
@@ -214,10 +221,7 @@ mod test {
             transformer.only_fields(),
             &Some(vec![ConfigValuePath(parse_value_path("a.b[0]").unwrap())])
         );
-        assert_eq!(
-            transformer.except_fields(),
-            &Some(vec!["ignore_me".to_owned()])
-        );
+        assert_eq!(transformer.except_fields(), &Some(vec!["ignore_me".into()]));
         assert_eq!(transformer.timestamp_format(), &Some(TimestampFormat::Unix));
     }
 
@@ -237,7 +241,7 @@ mod test {
         let encoding = serde_json::from_str::<EncodingConfigWithFraming>(string).unwrap();
         let (framing, serializer) = encoding.config();
 
-        assert!(matches!(framing, None));
+        assert!(framing.is_none());
         assert!(matches!(serializer, SerializerConfig::Json(_)));
 
         let transformer = encoding.transformer();
@@ -246,10 +250,7 @@ mod test {
             transformer.only_fields(),
             &Some(vec![ConfigValuePath(parse_value_path("a.b[0]").unwrap())])
         );
-        assert_eq!(
-            transformer.except_fields(),
-            &Some(vec!["ignore_me".to_owned()])
-        );
+        assert_eq!(transformer.except_fields(), &Some(vec!["ignore_me".into()]));
         assert_eq!(transformer.timestamp_format(), &Some(TimestampFormat::Unix));
     }
 }

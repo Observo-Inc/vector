@@ -2,8 +2,9 @@ use std::sync::Arc;
 use bytes::Bytes;
 use chrono::Utc;
 use uuid::Uuid;
-use vector_common::request_metadata::RequestMetadata;
-use vector_core::ByteSizeOf;
+use vector_lib::codecs::encoding::Framer;
+use vector_lib::request_metadata::RequestMetadata;
+use vector_lib::EstimatedJsonEncodedSizeOf;
 
 use crate::{
     event::{Event, Finalizable},
@@ -52,7 +53,7 @@ impl RequestBuilder<(String, Vec<Event>)> for AzureBlobRequestOptions {
         let azure_metadata = AzureBlobMetadata {
             partition_key,
             count: events.len(),
-            byte_size: events.size_of(),
+            byte_size: events.estimated_json_encoded_size_of(),
             finalizers,
         };
 
@@ -101,19 +102,9 @@ impl RequestBuilder<(String, Vec<Event>)> for AzureBlobRequestOptions {
         AzureBlobRequest {
             blob_data,
             content_encoding: self.compression.content_encoding(),
-            content_type: content_type,
+            content_type: self.encoder.1.content_type(),
             metadata: azure_metadata,
             request_metadata,
-        }
-    }
-}
-
-impl Compression {
-    pub const fn content_type(self) -> &'static str {
-        match self {
-            Self::None => "text/plain",
-            Self::Gzip(_) => "application/gzip",
-            Self::Zlib(_) => "application/zlib",
         }
     }
 }

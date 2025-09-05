@@ -13,12 +13,16 @@
 #![deny(unused_comparisons)]
 
 #[cfg(feature = "btreemap")]
-pub use vrl::value::btreemap;
+pub use vrl::btreemap;
 
 #[cfg(feature = "byte_size_of")]
 pub mod byte_size_of;
 
+pub mod json_size;
+
 pub mod config;
+
+pub mod constants;
 
 #[cfg(feature = "conversion")]
 pub use vrl::compiler::TimeZone;
@@ -41,6 +45,8 @@ pub mod event_test_util;
 pub mod finalization;
 pub mod finalizer;
 pub use finalizer::EmptyStream;
+
+pub mod id;
 
 pub mod internal_event;
 
