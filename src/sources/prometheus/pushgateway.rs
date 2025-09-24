@@ -11,8 +11,8 @@
 //!   - Only counters and histograms can be aggregated as there is no meaningful
 //!     way to aggregate gauges or summaries.
 
-use base64::prelude::BASE64_URL_SAFE;
 use base64::Engine;
+use base64::prelude::BASE64_URL_SAFE;
 use std::{collections::HashMap, net::SocketAddr};
 
 use bytes::Bytes;
@@ -22,6 +22,8 @@ use vector_lib::configurable::configurable_component;
 use warp::http::HeaderMap;
 
 use super::parser;
+use crate::common::http::ErrorMessage;
+use crate::common::http::server_auth::HttpServerAuthConfig;
 use crate::http::KeepaliveConfig;
 use crate::{
     config::{
@@ -31,7 +33,7 @@ use crate::{
     serde::bool_or_struct,
     sources::{
         self,
-        util::{http::HttpMethod, ErrorMessage, HttpSource, HttpSourceAuthConfig},
+        util::{HttpSource, http::HttpMethod},
     },
     tls::TlsEnableableConfig,
 };
@@ -54,7 +56,7 @@ pub struct PrometheusPushgatewayConfig {
 
     #[configurable(derived)]
     #[configurable(metadata(docs::advanced))]
-    auth: Option<HttpSourceAuthConfig>,
+    auth: Option<HttpServerAuthConfig>,
 
     #[configurable(derived)]
     #[serde(default, deserialize_with = "bool_or_struct")]
@@ -143,7 +145,7 @@ impl HttpSource for PushgatewaySource {
             |error| {
                 ErrorMessage::new(
                     http::StatusCode::UNPROCESSABLE_ENTITY,
-                    format!("Failed to parse metrics body: {}", error),
+                    format!("Failed to parse metrics body: {error}"),
                 )
             },
         )
@@ -232,20 +234,14 @@ fn decode_label_pair(k: &str, v: &str) -> Result<(String, String), ErrorMessage>
     let decoded_bytes = BASE64_URL_SAFE.decode(padded_value).map_err(|_| {
         ErrorMessage::new(
             http::StatusCode::BAD_REQUEST,
-            format!(
-                "Grouping key invalid - invalid base64 value for key {}: {}",
-                k, v
-            ),
+            format!("Grouping key invalid - invalid base64 value for key {k}: {v}"),
         )
     })?;
 
     let decoded = String::from_utf8(decoded_bytes).map_err(|_| {
         ErrorMessage::new(
             http::StatusCode::BAD_REQUEST,
-            format!(
-                "Grouping key invalid - invalid UTF-8 in decoded base64 value for key {}",
-                k
-            ),
+            format!("Grouping key invalid - invalid UTF-8 in decoded base64 value for key {k}"),
         )
     })?;
 
@@ -255,9 +251,9 @@ fn decode_label_pair(k: &str, v: &str) -> Result<(String, String), ErrorMessage>
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::test_util::components::{assert_source_compliance, HTTP_PUSH_SOURCE_TAGS};
+    use crate::test_util::components::{HTTP_PUSH_SOURCE_TAGS, assert_source_compliance};
     use crate::test_util::wait_for_tcp;
-    use crate::{test_util, SourceSender};
+    use crate::{SourceSender, test_util};
     use chrono::{TimeZone, Timelike, Utc};
     use vector_lib::event::{EventStatus, Metric, MetricKind, MetricValue};
     use vector_lib::tls::MaybeTlsSettings;
