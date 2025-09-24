@@ -16,16 +16,15 @@ use std::{
     sync::Arc,
 };
 
-use futures_util::{stream::FuturesUnordered, StreamExt};
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use indexmap::IndexMap;
-use ordered_float::NotNan;
 use tokio::sync::{
-    oneshot::{self, Receiver},
     Mutex,
+    oneshot::{self, Receiver},
 };
 use uuid::Uuid;
 use vrl::{
-    compiler::{state::RuntimeState, Context, TargetValue, TimeZone},
+    compiler::{Context, TargetValue, TimeZone, state::RuntimeState},
     diagnostic::Formatter,
     value,
 };
@@ -34,16 +33,16 @@ pub use self::unit_test_components::{
     UnitTestSinkCheck, UnitTestSinkConfig, UnitTestSinkResult, UnitTestSourceConfig,
     UnitTestStreamSinkConfig, UnitTestStreamSourceConfig,
 };
-use super::{compiler::expand_globs, graph::Graph, transform::get_transform_output_ids, OutputId};
+use super::{OutputId, compiler::expand_globs, graph::Graph, transform::get_transform_output_ids};
 use crate::{
     conditions::Condition,
     config::{
-        self, loading, ComponentKey, Config, ConfigBuilder, ConfigPath, SinkOuter, SourceOuter,
-        TestDefinition, TestInput, TestInputValue, TestOutput,
+        self, ComponentKey, Config, ConfigBuilder, ConfigPath, SinkOuter, SourceOuter,
+        TestDefinition, TestInput, TestOutput, loading,
     },
-    event::{Event, EventMetadata, LogEvent, Value},
+    event::{Event, EventMetadata, LogEvent},
     signal,
-    topology::{builder::TopologyPieces, RunningTopology},
+    topology::{RunningTopology, builder::TopologyPieces},
 };
 
 pub struct UnitTest {
@@ -140,7 +139,7 @@ pub async fn build_unit_tests(
                 let mut test_error = errors.join("\n");
                 // Indent all line breaks
                 test_error = test_error.replace('\n', "\n  ");
-                test_error.insert_str(0, &format!("Failed to build test '{}':\n  ", test_name));
+                test_error.insert_str(0, &format!("Failed to build test '{test_name}':\n  "));
                 build_errors.push(test_error);
             }
         }
@@ -386,6 +385,10 @@ async fn build_unit_test(
         &transform_only_config.transforms,
         &transform_only_config.sinks,
         transform_only_config.schema,
+        transform_only_config
+            .global
+            .wildcard_matching
+            .unwrap_or_default(),
     );
     let test = test.resolve_outputs(&transform_only_graph)?;
 
@@ -402,6 +405,7 @@ async fn build_unit_test(
         &config_builder.transforms,
         &config_builder.sinks,
         config_builder.schema,
+        config_builder.global.wildcard_matching.unwrap_or_default(),
     );
 
     let mut valid_components = get_relevant_test_components(
@@ -433,6 +437,7 @@ async fn build_unit_test(
         &config_builder.transforms,
         &config_builder.sinks,
         config_builder.schema,
+        config_builder.global.wildcard_matching.unwrap_or_default(),
     );
     let valid_inputs = graph.input_map()?;
     for (_, transform) in config_builder.transforms.iter_mut() {
@@ -563,8 +568,7 @@ fn build_outputs(
             match condition.build(&Default::default()) {
                 Ok(condition) => conditions.push(condition),
                 Err(error) => errors.push(format!(
-                    "failed to create test condition '{}': {}",
-                    index, error
+                    "failed to create test condition '{index}': {error}"
                 )),
             }
         }
@@ -622,16 +626,8 @@ fn build_input_event(input: &TestInput) -> Result<Event, String> {
             if let Some(log_fields) = &input.log_fields {
                 let mut event = LogEvent::from_str_legacy("");
                 for (path, value) in log_fields {
-                    let value: Value = match value {
-                        TestInputValue::String(s) => Value::from(s.to_owned()),
-                        TestInputValue::Boolean(b) => Value::from(*b),
-                        TestInputValue::Integer(i) => Value::from(*i),
-                        TestInputValue::Float(f) => Value::from(
-                            NotNan::new(*f).map_err(|_| "NaN value not supported".to_string())?,
-                        ),
-                    };
                     event
-                        .parse_path_and_insert(path, value)
+                        .parse_path_and_insert(path, value.clone())
                         .map_err(|e| e.to_string())?;
                 }
                 Ok(event.into())

@@ -1,6 +1,6 @@
-use super::{default_all_processes, example_processes, FilterList, HostMetrics};
+use super::{FilterList, HostMetrics, default_all_processes, example_processes};
 use std::ffi::OsStr;
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, UpdateKind};
 use vector_lib::configurable::configurable_component;
 #[cfg(target_os = "linux")]
 use vector_lib::metric_tags;
@@ -21,19 +21,18 @@ const MEMORY_USAGE: &str = "process_memory_usage";
 const MEMORY_VIRTUAL_USAGE: &str = "process_memory_virtual_usage";
 
 impl HostMetrics {
-    pub async fn process_metrics(&self, output: &mut super::MetricsBuffer) {
-        let mut sys = System::new();
-        sys.refresh_processes_specifics(
+    pub async fn process_metrics(&mut self, output: &mut super::MetricsBuffer) {
+        self.system.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
-            ProcessRefreshKind::new()
+            ProcessRefreshKind::default()
                 .with_memory()
                 .with_cpu()
                 .with_cmd(UpdateKind::OnlyIfNotSet),
         );
         output.name = "process";
         let sep = OsStr::new(" ");
-        for (pid, process) in sys.processes().iter().filter(|&(_, proc)| {
+        for (pid, process) in self.system.processes().iter().filter(|&(_, proc)| {
             self.config
                 .process
                 .processes
@@ -73,9 +72,11 @@ mod tests {
         assert!(!metrics.is_empty());
 
         // All metrics are named process_*
-        assert!(!metrics
-            .iter()
-            .any(|metric| !metric.name().starts_with("process_")));
+        assert!(
+            !metrics
+                .iter()
+                .any(|metric| !metric.name().starts_with("process_"))
+        );
 
         // They should all have the required tag
         assert_eq!(count_tag(&metrics, "pid"), metrics.len());

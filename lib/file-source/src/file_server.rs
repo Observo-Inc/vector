@@ -1,6 +1,6 @@
 use std::{
     cmp,
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap},
     fs::{self, remove_file},
     path::PathBuf,
     sync::Arc,
@@ -10,19 +10,21 @@ use std::{
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::{
-    future::{select, Either},
     Future, Sink, SinkExt,
+    future::{Either, select},
 };
 use indexmap::IndexMap;
 use tokio::time::sleep;
 use tracing::{debug, error, info, trace};
 
-use crate::{
+use file_source_common::{
+    FileFingerprint, FileSourceInternalEvents, Fingerprinter, ReadFrom,
     checkpointer::{Checkpointer, CheckpointsView},
-    file_watcher::FileWatcher,
-    fingerprinter::{FileFingerprint, Fingerprinter},
+};
+
+use crate::{
+    file_watcher::{FileWatcher, RawLineResult},
     paths_provider::PathsProvider,
-    FileSourceInternalEvents, ReadFrom,
 };
 
 /// `FileServer` is a Source which cooperatively schedules reads over files,
@@ -100,7 +102,7 @@ where
 
         checkpointer.read_checkpoints(self.ignore_before);
 
-        let mut known_small_files = HashSet::new();
+        let mut known_small_files = HashMap::new();
 
         let mut existing_files = Vec::new();
         for path in self.paths_provider.paths().into_iter() {
@@ -209,15 +211,14 @@ where
                                 if let (Ok(old_modified_time), Ok(new_modified_time)) = (
                                     fs::metadata(old_path).and_then(|m| m.modified()),
                                     fs::metadata(new_path).and_then(|m| m.modified()),
-                                ) {
-                                    if old_modified_time < new_modified_time {
-                                        info!(
-                                            message = "Switching to watch most recently modified file.",
-                                            new_modified_time = ?new_modified_time,
-                                            old_modified_time = ?old_modified_time,
-                                        );
-                                        watcher.update_path(path).ok(); // ok if this fails: might fix next cycle
-                                    }
+                                ) && old_modified_time < new_modified_time
+                                {
+                                    info!(
+                                        message = "Switching to watch most recently modified file.",
+                                        new_modified_time = ?new_modified_time,
+                                        old_modified_time = ?old_modified_time,
+                                    );
+                                    watcher.update_path(path).ok(); // ok if this fails: might fix next cycle
                                 }
                             }
                         } else {
@@ -230,6 +231,29 @@ where
                 stats.record("discovery", start.elapsed());
             }
 
+            // Cleanup the known_small_files
+            if let Some(grace_period) = self.remove_after {
+                known_small_files.retain(|path, last_time_open| {
+                    // Should the file be removed
+                    if last_time_open.elapsed() >= grace_period {
+                        // Try to remove
+                        match remove_file(path) {
+                            Ok(()) => {
+                                self.emitter.emit_file_deleted(path);
+                                false
+                            }
+                            Err(error) => {
+                                // We will try again after some time.
+                                self.emitter.emit_file_delete_error(path, error);
+                                true
+                            }
+                        }
+                    } else {
+                        true
+                    }
+                });
+            }
+
             // Collect lines by polling files.
             let mut global_bytes_read: usize = 0;
             let mut maxed_out_reading_single_file = false;
@@ -240,7 +264,19 @@ where
 
                 let start = time::Instant::now();
                 let mut bytes_read: usize = 0;
-                while let Ok(Some(line)) = watcher.read_line() {
+                while let Ok(RawLineResult {
+                    raw_line: Some(line),
+                    discarded_for_size_and_truncated,
+                }) = watcher.read_line()
+                {
+                    discarded_for_size_and_truncated.iter().for_each(|buf| {
+                        self.emitter.emit_file_line_too_long(
+                            &buf.clone(),
+                            self.max_line_bytes,
+                            buf.len(),
+                        )
+                    });
+
                     let sz = line.bytes.len();
                     trace!(
                         message = "Read bytes.",
@@ -270,18 +306,18 @@ where
                     global_bytes_read = global_bytes_read.saturating_add(bytes_read);
                 } else {
                     // Should the file be removed
-                    if let Some(grace_period) = self.remove_after {
-                        if watcher.last_read_success().elapsed() >= grace_period {
-                            // Try to remove
-                            match remove_file(&watcher.path) {
-                                Ok(()) => {
-                                    self.emitter.emit_file_deleted(&watcher.path);
-                                    watcher.set_dead();
-                                }
-                                Err(error) => {
-                                    // We will try again after some time.
-                                    self.emitter.emit_file_delete_error(&watcher.path, error);
-                                }
+                    if let Some(grace_period) = self.remove_after
+                        && watcher.last_read_success().elapsed() >= grace_period
+                    {
+                        // Try to remove
+                        match remove_file(&watcher.path) {
+                            Ok(()) => {
+                                self.emitter.emit_file_deleted(&watcher.path);
+                                watcher.set_dead();
+                            }
+                            Err(error) => {
+                                // We will try again after some time.
+                                self.emitter.emit_file_delete_error(&watcher.path, error);
                             }
                         }
                     }

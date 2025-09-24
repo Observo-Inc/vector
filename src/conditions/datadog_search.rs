@@ -5,7 +5,7 @@ use bytes::Bytes;
 use vector_lib::configurable::configurable_component;
 use vector_lib::event::{Event, LogEvent, Value};
 use vrl::datadog_filter::regex::{wildcard_regex, word_regex};
-use vrl::datadog_filter::{build_matcher, Filter, Matcher, Resolver, Run};
+use vrl::datadog_filter::{Filter, Matcher, Resolver, Run, build_matcher};
 use vrl::datadog_search_syntax::{Comparison, ComparisonValue, Field, QueryNode};
 
 use super::{Condition, Conditional, ConditionalConfig};
@@ -23,6 +23,12 @@ impl Default for DatadogSearchConfig {
         Self {
             source: QueryNode::MatchAllDocs,
         }
+    }
+}
+
+impl DatadogSearchConfig {
+    pub fn build_matcher(&self) -> crate::Result<Box<dyn Matcher<Event>>> {
+        Ok(as_log(build_matcher(&self.source, &EventFilter)?))
     }
 }
 
@@ -48,10 +54,22 @@ pub struct DatadogSearchRunner {
     matcher: Box<dyn Matcher<Event>>,
 }
 
+impl TryFrom<&DatadogSearchConfig> for DatadogSearchRunner {
+    type Error = crate::Error;
+    fn try_from(config: &DatadogSearchConfig) -> Result<Self, Self::Error> {
+        config.build_matcher().map(|matcher| Self { matcher })
+    }
+}
+
+impl DatadogSearchRunner {
+    pub fn matches(&self, event: &Event) -> bool {
+        self.matcher.run(event)
+    }
+}
+
 impl Conditional for DatadogSearchRunner {
-    fn check(&self, e: Event) -> (bool, Event) {
-        let result = self.matcher.run(&e);
-        (result, e)
+    fn check(&self, event: Event) -> (bool, Event) {
+        (self.matches(&event), event)
     }
 }
 
@@ -60,9 +78,7 @@ impl ConditionalConfig for DatadogSearchConfig {
         &self,
         _enrichment_tables: &vector_lib::enrichment::TableRegistry,
     ) -> crate::Result<Condition> {
-        let matcher = as_log(build_matcher(&self.source, &EventFilter).map_err(|e| e.to_string())?);
-
-        Ok(Condition::DatadogSearch(DatadogSearchRunner { matcher }))
+        Ok(Condition::DatadogSearch(self.try_into()?))
     }
 }
 
@@ -84,24 +100,22 @@ impl Filter<LogEvent> for EventFilter {
     fn exists(&self, field: Field) -> Result<Box<dyn Matcher<LogEvent>>, PathParseError> {
         Ok(match field {
             Field::Tag(tag) => {
-                let starts_with = format!("{}:", tag);
+                let starts_with = format!("{tag}:");
 
-                any_string_match("tags", move |value| {
+                any_string_match_multiple(vec!["ddtags", "tags"], move |value| {
                     value == tag || value.starts_with(&starts_with)
                 })
             }
             // Literal field 'tags' needs to be compared by key.
             Field::Reserved(field) if field == "tags" => {
-                any_string_match("tags", move |value| value == field)
+                any_string_match_multiple(vec!["ddtags", "tags"], move |value| value == field)
             }
-            Field::Default(f) | Field::Attribute(f) | Field::Reserved(f) => {
-                Run::boxed(move |log: &LogEvent| {
-                    log.parse_path_and_get_value(f.as_str())
-                        .ok()
-                        .flatten()
-                        .is_some()
-                })
+            // A literal "source" field should string match in "source" and "ddsource" fields (OR condition).
+            Field::Reserved(field) if field == "source" => {
+                exists_match_multiple(vec!["ddsource", "source"])
             }
+
+            Field::Default(f) | Field::Attribute(f) | Field::Reserved(f) => exists_match(f),
         })
     }
 
@@ -121,15 +135,23 @@ impl Filter<LogEvent> for EventFilter {
             Field::Reserved(field) if field == "tags" => {
                 let to_match = to_match.to_owned();
 
-                array_match(field, move |values| {
+                array_match_multiple(vec!["ddtags", "tags"], move |values| {
                     values.contains(&Value::Bytes(Bytes::copy_from_slice(to_match.as_bytes())))
                 })
             }
             // Individual tags are compared by element key:value.
             Field::Tag(tag) => {
-                let value_bytes = Value::Bytes(format!("{}:{}", tag, to_match).into());
+                let value_bytes = Value::Bytes(format!("{tag}:{to_match}").into());
 
-                array_match("tags", move |values| values.contains(&value_bytes))
+                array_match_multiple(vec!["ddtags", "tags"], move |values| {
+                    values.contains(&value_bytes)
+                })
+            }
+            // A literal "source" field should string match in "source" and "ddsource" fields (OR condition).
+            Field::Reserved(field) if field == "source" => {
+                let to_match = to_match.to_owned();
+
+                string_match_multiple(vec!["ddsource", "source"], move |value| value == to_match)
             }
             // Reserved values are matched by string equality.
             Field::Reserved(field) => {
@@ -154,16 +176,27 @@ impl Filter<LogEvent> for EventFilter {
         Ok(match field {
             // Default fields are matched by word boundary.
             Field::Default(field) => {
-                let re = word_regex(&format!("{}*", prefix));
+                let re = word_regex(&format!("{prefix}*"));
 
                 string_match(field, move |value| re.is_match(&value))
             }
             // Tags are recursed until a match is found.
             Field::Tag(tag) => {
-                let starts_with = format!("{}:{}", tag, prefix);
+                let starts_with = format!("{tag}:{prefix}");
 
-                any_string_match("tags", move |value| value.starts_with(&starts_with))
+                any_string_match_multiple(vec!["ddtags", "tags"], move |value| {
+                    value.starts_with(&starts_with)
+                })
             }
+            // A literal "source" field should string match in "source" and "ddsource" fields (OR condition).
+            Field::Reserved(field) if field == "source" => {
+                let prefix = prefix.to_owned();
+
+                string_match_multiple(vec!["ddsource", "source"], move |value| {
+                    value.starts_with(&prefix)
+                })
+            }
+
             // All other field types are compared by complete value.
             Field::Reserved(field) | Field::Attribute(field) => {
                 let prefix = prefix.to_owned();
@@ -185,9 +218,15 @@ impl Filter<LogEvent> for EventFilter {
                 string_match(field, move |value| re.is_match(&value))
             }
             Field::Tag(tag) => {
-                let re = wildcard_regex(&format!("{}:{}", tag, wildcard));
+                let re = wildcard_regex(&format!("{tag}:{wildcard}"));
 
-                any_string_match("tags", move |value| re.is_match(&value))
+                any_string_match_multiple(vec!["ddtags", "tags"], move |value| re.is_match(&value))
+            }
+            // A literal "source" field should string match in "source" and "ddsource" fields (OR condition).
+            Field::Reserved(field) if field == "source" => {
+                let re = wildcard_regex(wildcard);
+
+                string_match_multiple(vec!["ddsource", "source"], move |value| re.is_match(&value))
             }
             Field::Reserved(field) | Field::Attribute(field) => {
                 let re = wildcard_regex(wildcard);
@@ -277,19 +316,30 @@ impl Filter<LogEvent> for EventFilter {
                 })
             }
             // Tag values need extracting by "key:value" to be compared.
-            Field::Tag(tag) => any_string_match("tags", move |value| match value.split_once(':') {
-                Some((t, lhs)) if t == tag => {
-                    let lhs = Cow::from(lhs);
+            Field::Tag(tag) => any_string_match_multiple(vec!["ddtags", "tags"], move |value| {
+                match value.split_once(':') {
+                    Some((t, lhs)) if t == tag => {
+                        let lhs = Cow::from(lhs);
 
-                    match comparator {
-                        Comparison::Lt => lhs < rhs,
-                        Comparison::Lte => lhs <= rhs,
-                        Comparison::Gt => lhs > rhs,
-                        Comparison::Gte => lhs >= rhs,
+                        match comparator {
+                            Comparison::Lt => lhs < rhs,
+                            Comparison::Lte => lhs <= rhs,
+                            Comparison::Gt => lhs > rhs,
+                            Comparison::Gte => lhs >= rhs,
+                        }
                     }
+                    _ => false,
                 }
-                _ => false,
             }),
+            // A literal "source" field should string match in "source" and "ddsource" fields (OR condition).
+            Field::Reserved(field) if field == "source" => {
+                string_match_multiple(vec!["ddsource", "source"], move |lhs| match comparator {
+                    Comparison::Lt => lhs < rhs,
+                    Comparison::Lte => lhs <= rhs,
+                    Comparison::Gt => lhs > rhs,
+                    Comparison::Gte => lhs >= rhs,
+                })
+            }
             // All other tag types are compared by string.
             Field::Default(field) | Field::Reserved(field) => {
                 string_match(field, move |lhs| match comparator {
@@ -301,6 +351,21 @@ impl Filter<LogEvent> for EventFilter {
             }
         })
     }
+}
+
+// Returns a `Matcher` that returns true if the field exists.
+fn exists_match<S>(field: S) -> Box<dyn Matcher<LogEvent>>
+where
+    S: Into<String>,
+{
+    let field = field.into();
+
+    Run::boxed(move |log: &LogEvent| {
+        log.parse_path_and_get_value(field.as_str())
+            .ok()
+            .flatten()
+            .is_some()
+    })
 }
 
 /// Returns a `Matcher` that returns true if the field resolves to a string,
@@ -340,43 +405,68 @@ where
     })
 }
 
-/// Returns a `Matcher` that returns true if the log event resolves to an array, where
-/// the vector of `Value`s the array contains matches the provided `func`.
-fn array_match<S, F>(field: S, func: F) -> Box<dyn Matcher<LogEvent>>
+// Returns a `Matcher` that returns true if any provided field exists.
+fn exists_match_multiple<S>(fields: Vec<S>) -> Box<dyn Matcher<LogEvent>>
 where
-    S: Into<String>,
-    F: Fn(&Vec<Value>) -> bool + Send + Sync + Clone + 'static,
+    S: Into<String> + Clone + Send + Sync + 'static,
 {
-    let field = field.into();
-
     Run::boxed(move |log: &LogEvent| {
-        match log.parse_path_and_get_value(field.as_str()).ok().flatten() {
-            Some(Value::Array(values)) => func(values),
-            _ => false,
-        }
+        fields
+            .iter()
+            .any(|field| exists_match(field.clone()).run(log))
     })
 }
 
-/// Returns a `Matcher` that returns true if the log event resolves to an array, where
-/// at least one `Value` it contains matches the provided `func`.
-fn any_match<S, F>(field: S, func: F) -> Box<dyn Matcher<LogEvent>>
+/// Returns a `Matcher` that returns true if any provided field resolves to a string which
+/// matches the provided `func`.
+fn string_match_multiple<S, F>(fields: Vec<S>, func: F) -> Box<dyn Matcher<LogEvent>>
 where
-    S: Into<String>,
-    F: Fn(&Value) -> bool + Send + Sync + Clone + 'static,
-{
-    array_match(field, move |values| values.iter().any(&func))
-}
-
-/// Returns a `Matcher` that returns true if the log event resolves to an array of strings,
-/// where at least one string matches the provided `func`.
-fn any_string_match<S, F>(field: S, func: F) -> Box<dyn Matcher<LogEvent>>
-where
-    S: Into<String>,
+    S: Into<String> + Clone + Send + Sync + 'static,
     F: Fn(Cow<str>) -> bool + Send + Sync + Clone + 'static,
 {
-    any_match(field, move |value| {
+    Run::boxed(move |log: &LogEvent| {
+        fields
+            .iter()
+            .any(|field| string_match(field.clone(), func.clone()).run(log))
+    })
+}
+
+fn any_string_match_multiple<S, F>(fields: Vec<S>, func: F) -> Box<dyn Matcher<LogEvent>>
+where
+    S: Into<String> + Clone + Send + Sync + 'static,
+    F: Fn(Cow<str>) -> bool + Send + Sync + Clone + 'static,
+{
+    any_match_multiple(fields, move |value| {
         let bytes = value.coerce_to_bytes();
         func(String::from_utf8_lossy(&bytes))
+    })
+}
+
+/// Returns a `Matcher` that returns true if any provided field of the log event resolves to an array, where
+/// at least one `Value` it contains matches the provided `func`.
+fn any_match_multiple<S, F>(fields: Vec<S>, func: F) -> Box<dyn Matcher<LogEvent>>
+where
+    S: Into<String> + Clone + Send + Sync + 'static,
+    F: Fn(&Value) -> bool + Send + Sync + Clone + 'static,
+{
+    array_match_multiple(fields, move |values| values.iter().any(&func))
+}
+
+/// Returns a `Matcher` that returns true if any provided field of the log event resolves to an array, where
+/// the vector of `Value`s the array contains matches the provided `func`.
+fn array_match_multiple<S, F>(fields: Vec<S>, func: F) -> Box<dyn Matcher<LogEvent>>
+where
+    S: Into<String> + Clone + Send + Sync + 'static,
+    F: Fn(&Vec<Value>) -> bool + Send + Sync + Clone + 'static,
+{
+    Run::boxed(move |log: &LogEvent| {
+        fields.iter().any(|field| {
+            let field = field.clone().into();
+            match log.parse_path_and_get_value(field.as_str()).ok().flatten() {
+                Some(Value::Array(values)) => func(values),
+                _ => false,
+            }
+        })
     })
 }
 
@@ -1187,6 +1277,314 @@ mod test {
                 log_event!["field" => false, "field2" => "value2"],
                 log_event!["field" => true, "field2" => "value2"],
             ),
+            // tags checks with 'ddtags' (DD Agent Source naming)
+
+            // Tag exists.
+            (
+                "_exists_:a",                          // Source
+                log_event!["ddtags" => vec!["a:foo"]], // Pass
+                log_event!["ddtags" => vec!["b:foo"]], // Fail
+            ),
+            // Tag exists with - in name.
+            (
+                "_exists_:a-b",                          // Source
+                log_event!["ddtags" => vec!["a-b:foo"]], // Pass
+                log_event!["ddtags" => vec!["ab:foo"]],  // Fail
+            ),
+            // Tag exists (negate).
+            (
+                "NOT _exists_:a",
+                log_event!["ddtags" => vec!["b:foo"]],
+                log_event!("ddtags" => vec!["a:foo"]),
+            ),
+            // Tag exists (negate w/-).
+            (
+                "-_exists_:a",
+                log_event!["ddtags" => vec!["b:foo"]],
+                log_event!["ddtags" => vec!["a:foo"]],
+            ),
+            // Tag doesn't exist.
+            (
+                "_missing_:a",
+                log_event![],
+                log_event!["ddtags" => vec!["a:foo"]],
+            ),
+            // Tag doesn't exist (negate).
+            (
+                "NOT _missing_:a",
+                log_event!["ddtags" => vec!["a:foo"]],
+                log_event![],
+            ),
+            // Tag doesn't exist (negate w/-).
+            (
+                "-_missing_:a",
+                log_event!["ddtags" => vec!["a:foo"]],
+                log_event![],
+            ),
+            // Tag match.
+            (
+                "a:bla",
+                log_event!["ddtags" => vec!["a:bla"]],
+                log_event!["ddtags" => vec!["b:bla"]],
+            ),
+            // Tag match (negate).
+            (
+                "NOT a:bla",
+                log_event!["ddtags" => vec!["b:bla"]],
+                log_event!["ddtags" => vec!["a:bla"]],
+            ),
+            // Reserved tag match (negate).
+            (
+                "NOT host:foo",
+                log_event!["ddtags" => vec!["host:fo  o"]],
+                log_event!["host" => "foo"],
+            ),
+            // Tag match (negate w/-).
+            (
+                "-a:bla",
+                log_event!["ddtags" => vec!["b:bla"]],
+                log_event!["ddtags" => vec!["a:bla"]],
+            ),
+            // Quoted tag match.
+            (
+                r#"a:"bla""#,
+                log_event!["ddtags" => vec!["a:bla"]],
+                log_event!["a" => "bla"],
+            ),
+            // Quoted tag match (negate).
+            (
+                r#"NOT a:"bla""#,
+                log_event!["a" => "bla"],
+                log_event!["ddtags" => vec!["a:bla"]],
+            ),
+            // Quoted tag match (negate w/-).
+            (
+                r#"-a:"bla""#,
+                log_event!["a" => "bla"],
+                log_event!["ddtags" => vec!["a:bla"]],
+            ),
+            // String attribute match.
+            (
+                "@a:bla",
+                log_event!["a" => "bla"],
+                log_event!["ddtags" => vec!["a:bla"]],
+            ),
+            // String attribute match (negate).
+            (
+                "NOT @a:bla",
+                log_event!["ddtags" => vec!["a:bla"]],
+                log_event!["a" => "bla"],
+            ),
+            // String attribute match (negate w/-).
+            (
+                "-@a:bla",
+                log_event!["ddtags" => vec!["a:bla"]],
+                log_event!["a" => "bla"],
+            ),
+            // Quoted attribute match.
+            (
+                r#"@a:"bla""#,
+                log_event!["a" => "bla"],
+                log_event!["ddtags" => vec!["a:bla"]],
+            ),
+            // Quoted attribute match (negate).
+            (
+                r#"NOT @a:"bla""#,
+                log_event!["ddtags" => vec!["a:bla"]],
+                log_event!["a" => "bla"],
+            ),
+            // Quoted attribute match (negate w/-).
+            (
+                r#"-@a:"bla""#,
+                log_event!["ddtags" => vec!["a:bla"]],
+                log_event!["a" => "bla"],
+            ),
+            // Integer attribute match.
+            (
+                "@a:200",
+                log_event!["a" => 200],
+                log_event!["ddtags" => vec!["a:200"]],
+            ),
+            // Float attribute match.
+            (
+                "@a:0.75",
+                log_event!["a" => 0.75],
+                log_event!["ddtags" => vec!["a:0.75"]],
+            ),
+            (
+                "a:*bla",
+                log_event!["ddtags" => vec!["a:foobla"]],
+                log_event!["ddtags" => vec!["a:blafoo"]],
+            ),
+            // Wildcard prefix - tag (negate).
+            (
+                "NOT a:*bla",
+                log_event!["ddtags" => vec!["a:blafoo"]],
+                log_event!["ddtags" => vec!["a:foobla"]],
+            ),
+            // Wildcard prefix - tag (negate w/-).
+            (
+                "-a:*bla",
+                log_event!["ddtags" => vec!["a:blafoo"]],
+                log_event!["ddtags" => vec!["a:foobla"]],
+            ),
+            // Wildcard suffix - tag.
+            (
+                "b:bla*",
+                log_event!["ddtags" => vec!["b:blabop"]],
+                log_event!["ddtags" => vec!["b:bopbla"]],
+            ),
+            // Wildcard suffix - tag (negate).
+            (
+                "NOT b:bla*",
+                log_event!["ddtags" => vec!["b:bopbla"]],
+                log_event!["ddtags" => vec!["b:blabop"]],
+            ),
+            // Wildcard suffix - tag (negate w/-).
+            (
+                "-b:bla*",
+                log_event!["ddtags" => vec!["b:bopbla"]],
+                log_event!["ddtags" => vec!["b:blabop"]],
+            ),
+            // Multiple wildcards - tag.
+            (
+                "c:*b*la*",
+                log_event!["ddtags" => vec!["c:foobla"]],
+                log_event!["custom" => r#"{"title" => "foobla"}"#],
+            ),
+            // Multiple wildcards - tag (negate).
+            (
+                "NOT c:*b*la*",
+                log_event!["custom" => r#"{"title" => "foobla"}"#],
+                log_event!["ddtags" => vec!["c:foobla"]],
+            ),
+            // Multiple wildcards - tag (negate w/-).
+            (
+                "-c:*b*la*",
+                log_event!["custom" => r#"{"title" => "foobla"}"#],
+                log_event!["ddtags" => vec!["c:foobla"]],
+            ),
+            // Wildcard prefix - attribute.
+            (
+                "@a:*bla",
+                log_event!["a" => "foobla"],
+                log_event!["ddtags" => vec!["a:foobla"]],
+            ),
+            // Wildcard prefix - attribute (negate).
+            (
+                "NOT @a:*bla",
+                log_event!["ddtags" => vec!["a:foobla"]],
+                log_event!["a" => "foobla"],
+            ),
+            // Wildcard prefix - attribute (negate w/-).
+            (
+                "-@a:*bla",
+                log_event!["ddtags" => vec!["a:foobla"]],
+                log_event!["a" => "foobla"],
+            ),
+            // Wildcard suffix - attribute.
+            (
+                "@b:bla*",
+                log_event!["b" => "blabop"],
+                log_event!["ddtags" => vec!["b:blabop"]],
+            ),
+            // Wildcard suffix - attribute (negate).
+            (
+                "NOT @b:bla*",
+                log_event!["ddtags" => vec!["b:blabop"]],
+                log_event!["b" => "blabop"],
+            ),
+            // Wildcard suffix - attribute (negate w/-).
+            (
+                "-@b:bla*",
+                log_event!["ddtags" => vec!["b:blabop"]],
+                log_event!["b" => "blabop"],
+            ),
+            // Multiple wildcards - attribute.
+            (
+                "@c:*b*la*",
+                log_event!["c" => "foobla"],
+                log_event!["ddtags" => vec!["c:foobla"]],
+            ),
+            // Multiple wildcards - attribute (negate).
+            (
+                "NOT @c:*b*la*",
+                log_event!["ddtags" => vec!["c:foobla"]],
+                log_event!["c" => "foobla"],
+            ),
+            // Multiple wildcards - attribute (negate w/-).
+            (
+                "-@c:*b*la*",
+                log_event!["ddtags" => vec!["c:foobla"]],
+                log_event!["c" => "foobla"],
+            ),
+            // Special case for tags.
+            (
+                "tags:a",
+                log_event!["ddtags" => vec!["a", "b", "c"]],
+                log_event!["ddtags" => vec!["d", "e", "f"]],
+            ),
+            // Special case for tags (negate).
+            (
+                "NOT tags:a",
+                log_event!["ddtags" => vec!["d", "e", "f"]],
+                log_event!["ddtags" => vec!["a", "b", "c"]],
+            ),
+            // Special case for tags (negate w/-).
+            (
+                "-tags:a",
+                log_event!["ddtags" => vec!["d", "e", "f"]],
+                log_event!["ddtags" => vec!["a", "b", "c"]],
+            ),
+            // Special case: 'source' looks up on 'source' and 'ddsource' (OR condition)
+            // source
+            (
+                "source:foo",
+                log_event!["source" => "foo"],
+                log_event!["tags" => vec!["source:foo"]],
+            ),
+            (
+                "source:foo",
+                log_event!["source" => "foo"],
+                log_event!["source" => "foobar"],
+            ),
+            (
+                "source:foo",
+                log_event!["source" => "foo"],
+                log_event!["source" => r#"{"value": "foo"}"#],
+            ),
+            // ddsource
+            (
+                "source:foo",
+                log_event!["ddsource" => "foo"],
+                log_event!["tags" => vec!["ddsource:foo"]],
+            ),
+            (
+                "source:foo",
+                log_event!["ddsource" => "foo"],
+                log_event!["ddsource" => "foobar"],
+            ),
+            (
+                "source:foo",
+                log_event!["ddsource" => "foo"],
+                log_event!["ddsource" => r#"{"value": "foo"}"#],
+            ),
+            // both source and ddsource
+            (
+                "source:foo",
+                log_event!["source" => "foo", "ddsource" => "foo"],
+                log_event!["source" => "foobar", "ddsource" => "foobar"],
+            ),
+            (
+                "source:foo",
+                log_event!["source" => "foo", "ddsource" => "foobar"],
+                log_event!["source" => "foobar", "ddsource" => "foobar"],
+            ),
+            (
+                "source:foo",
+                log_event!["source" => "foobar", "ddsource" => "foo"],
+                log_event!["source" => "foobar", "ddsource" => "foobar"],
+            ),
         ]
     }
 
@@ -1229,7 +1627,7 @@ mod test {
             // Every query should build successfully.
             let cond = config
                 .build(&Default::default())
-                .unwrap_or_else(|_| panic!("build failed: {}", source));
+                .unwrap_or_else(|_| panic!("build failed: {source}"));
 
             assert!(
                 cond.check_with_context(pass.clone()).0.is_ok(),
