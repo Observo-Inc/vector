@@ -8,7 +8,7 @@ use tokio::{
 };
 use vector_lib::metric_tags;
 
-use super::{filter_result_sync, CGroupsConfig, HostMetrics, MetricsBuffer};
+use super::{CGroupsConfig, HostMetrics, MetricsBuffer, filter_result_sync};
 use crate::event::MetricTags;
 
 const MICROSECONDS: f64 = 1.0 / 1_000_000.0;
@@ -416,11 +416,11 @@ define_stat_struct! { MemoryStat(
 )}
 
 fn is_dir(path: impl AsRef<Path>) -> bool {
-    std::fs::metadata(path.as_ref()).map_or(false, |metadata| metadata.is_dir())
+    std::fs::metadata(path.as_ref()).is_ok_and(|metadata| metadata.is_dir())
 }
 
 fn is_file(path: impl AsRef<Path>) -> bool {
-    std::fs::metadata(path.as_ref()).map_or(false, |metadata| metadata.is_file())
+    std::fs::metadata(path.as_ref()).is_ok_and(|metadata| metadata.is_file())
 }
 
 /// Join a base directory path with a cgroup name.
@@ -455,17 +455,17 @@ mod tests {
     use std::io::Write;
     use std::path::{Path, PathBuf};
 
-    use rand::{rngs::ThreadRng, Rng};
+    use rand::{Rng, rngs::ThreadRng};
     use similar_asserts::assert_eq;
     use tempfile::TempDir;
     use vector_lib::event::Metric;
 
     use super::{
         super::{
-            tests::{count_name, count_tag},
             HostMetrics, HostMetricsConfig,
+            tests::{count_name, count_tag},
         },
-        join_name, join_path, MetricsBuffer,
+        MetricsBuffer, join_name, join_path,
     };
 
     #[test]
@@ -529,8 +529,8 @@ mod tests {
         base.d("memory");
         base.d("unified");
         for subdir in SUBDIRS {
-            base.group(&format!("unified/{}", subdir), CPU_STAT, Some(""));
-            base.group(&format!("memory/{}", subdir), MEMORY_STAT, None);
+            base.group(&format!("unified/{subdir}"), CPU_STAT, Some(""));
+            base.group(&format!("memory/{subdir}"), MEMORY_STAT, None);
         }
         base.test().await;
     }
@@ -548,11 +548,11 @@ mod tests {
         base.d("unified");
         for subdir in SUBDIRS {
             base.group(
-                &format!("unified/{}", subdir),
+                &format!("unified/{subdir}"),
                 if subdir == "." { NONE } else { CPU_STAT },
                 Some(""),
             );
-            base.group(&format!("memory/{}", subdir), MEMORY_STAT, None);
+            base.group(&format!("memory/{subdir}"), MEMORY_STAT, None);
         }
         base.test().await;
     }
@@ -565,8 +565,8 @@ mod tests {
         base.d("cpu");
         base.d("memory");
         for subdir in SUBDIRS {
-            base.group(&format!("cpu/{}", subdir), CPU_STAT, None);
-            base.group(&format!("memory/{}", subdir), MEMORY_STAT, None);
+            base.group(&format!("cpu/{subdir}"), CPU_STAT, None);
+            base.group(&format!("memory/{subdir}"), MEMORY_STAT, None);
         }
     }
 
@@ -588,7 +588,7 @@ mod tests {
 
     impl Setup {
         fn new() -> Self {
-            Self(tempfile::tempdir().unwrap(), rand::thread_rng())
+            Self(tempfile::tempdir().unwrap(), rand::rng())
         }
 
         async fn test(&self) {
@@ -661,9 +661,9 @@ mod tests {
         }
 
         fn cpu_stat(&mut self, subdir: &str) {
-            let a = self.1.gen_range(1000000..1000000000);
-            let b = self.1.gen_range(1000000..1000000000);
-            let c = self.1.gen_range(1000000..1000000000);
+            let a = self.1.random_range(1000000..1000000000);
+            let b = self.1.random_range(1000000..1000000000);
+            let c = self.1.random_range(1000000..1000000000);
             self.f(
                 subdir,
                 "cpu.stat",
@@ -672,8 +672,8 @@ mod tests {
         }
 
         fn memory_stat(&mut self, subdir: &str) {
-            let anon = self.1.gen_range(1000000..1000000000);
-            let file = self.1.gen_range(1000000..1000000000);
+            let anon = self.1.random_range(1000000..1000000000);
+            let file = self.1.random_range(1000000..1000000000);
             self.f(
                 subdir,
                 "memory.stat",
