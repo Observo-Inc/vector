@@ -5,7 +5,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures::{future::BoxFuture, FutureExt};
+use futures::{FutureExt, future::BoxFuture};
 use pin_project::pin_project;
 use snafu::Snafu;
 use tokio::task::JoinError;
@@ -79,6 +79,7 @@ impl Task {
         self.key.id()
     }
 
+    #[allow(clippy::missing_const_for_fn)] // Adding `const` results in https://doc.rust-lang.org/error_codes/E0015.html
     pub fn typetag(&self) -> &str {
         &self.typetag
     }
