@@ -19,10 +19,10 @@ use tower::{Service, ServiceBuilder};
 use vector_lib::configurable::configurable_component;
 use vector_lib::request_metadata::{GroupedCountByteSize, MetaDescriptive, RequestMetadata};
 use vector_lib::{
-    config::{telemetry, AcknowledgementsConfig, Input},
+    EstimatedJsonEncodedSizeOf,
+    config::{AcknowledgementsConfig, Input, telemetry},
     event::{Event, EventFinalizers, Finalizable},
     sink::VectorSink,
-    EstimatedJsonEncodedSizeOf,
 };
 use vrl::value::Kind;
 
@@ -34,22 +34,22 @@ use crate::{
     http::HttpClient,
     schema,
     sinks::{
+        Healthcheck,
         gcp_chronicle::{
             compression::ChronicleCompression,
             partitioner::{ChroniclePartitionKey, ChroniclePartitioner},
             sink::ChronicleSink,
         },
         gcs_common::{
-            config::{healthcheck_response, GcsRetryLogic},
+            config::{GcsRetryLogic, healthcheck_response},
             service::GcsResponse,
         },
         util::{
-            encoding::{as_tracked_write, Encoder},
+            BatchConfig, Compression, RequestBuilder, SinkBatchSettings, TowerRequestConfig,
+            encoding::{Encoder, as_tracked_write},
             metadata::RequestMetadataBuilder,
             request_builder::EncodeResult,
-            BatchConfig, Compression, RequestBuilder, SinkBatchSettings, TowerRequestConfig,
         },
-        Healthcheck,
     },
     template::{Template, TemplateParseError},
     tls::{TlsConfig, TlsSettings},
@@ -237,6 +237,10 @@ pub struct ChronicleUnstructuredConfig {
     #[configurable(metadata(docs::examples = "WINDOWS_DNS", docs::examples = "{{ log_type }}"))]
     pub log_type: Template,
 
+    /// The default `log_type` to attach to events if the template in `log_type` cannot be resolved.
+    #[configurable(metadata(docs::examples = "VECTOR_DEV"))]
+    pub fallback_log_type: Option<String>,
+
     #[configurable(derived)]
     #[serde(
         default,
@@ -261,6 +265,7 @@ impl GenerateConfig for ChronicleUnstructuredConfig {
             namespace = "namespace"
             compression = "gzip"
             log_type = "log_type"
+            fallback_log_type = "VECTOR_DEV"
             encoding.codec = "text"
         "#})
         .unwrap()
@@ -342,7 +347,7 @@ impl ChronicleUnstructuredConfig {
         let partitioner = self.partitioner()?;
 
         let svc = ServiceBuilder::new()
-            .settings(request, GcsRetryLogic)
+            .settings(request, GcsRetryLogic::default())
             .service(ChronicleService::new(client, base_url, creds));
 
         let request_settings = ChronicleRequestBuilder::new(self)?;
@@ -355,6 +360,7 @@ impl ChronicleUnstructuredConfig {
     fn partitioner(&self) -> crate::Result<ChroniclePartitioner> {
         Ok(ChroniclePartitioner::new(
             self.log_type.clone(),
+            self.fallback_log_type.clone(),
             self.namespace.clone(),
         ))
     }
@@ -672,8 +678,8 @@ mod integration_tests {
     use super::*;
     use crate::test_util::{
         components::{
-            run_and_assert_sink_compliance, run_and_assert_sink_error, COMPONENT_ERROR_TAGS,
-            SINK_TAGS,
+            COMPONENT_ERROR_TAGS, SINK_TAGS, run_and_assert_sink_compliance,
+            run_and_assert_sink_error,
         },
         random_events_with_stream, random_string, trace_init,
     };
@@ -782,13 +788,13 @@ mod integration_tests {
 
     async fn request(method: Method, path: &str, log_type: &str) -> Response {
         let address = std::env::var(ADDRESS_ENV_VAR).unwrap();
-        let url = format!("{}/{}", address, path);
+        let url = format!("{address}/{path}");
         Client::new()
             .request(method.clone(), &url)
             .query(&[("log_type", log_type)])
             .send()
             .await
-            .unwrap_or_else(|_| panic!("Sending {} request to {} failed", method, url))
+            .unwrap_or_else(|_| panic!("Sending {method} request to {url} failed"))
     }
 
     async fn pull_messages(log_type: &str) -> Vec<Log> {

@@ -3,14 +3,13 @@ use std::collections::HashMap;
 use bytes::BytesMut;
 use serde::Deserialize;
 use serde_json::Value;
-use snafu::Snafu;
 use tokio_util::codec::Encoder as _;
 use vector_lib::codecs::encoding::format::JsonSerializerOptions;
 
 use crate::codecs::Encoder;
 use vector_lib::codecs::{
-    encoding, JsonSerializer, LengthDelimitedEncoder, LogfmtSerializer, MetricTagValues,
-    NewlineDelimitedEncoder,
+    JsonSerializer, LengthDelimitedEncoder, LogfmtSerializer, MetricTagValues,
+    NewlineDelimitedEncoder, encoding,
 };
 use vector_lib::event::{Event, LogEvent};
 
@@ -101,7 +100,7 @@ impl TestEvent {
         }
     }
 
-    pub fn get_event(&mut self) -> &mut Event {
+    pub const fn get_event(&mut self) -> &mut Event {
         match self {
             Self::Passthrough(event) => event,
             Self::FailWithAlternateEncoder(event) => event,
@@ -135,9 +134,6 @@ impl TestEvent {
         }
     }
 }
-
-#[derive(Clone, Debug, Eq, PartialEq, Snafu)]
-pub enum RawTestEventParseError {}
 
 impl From<RawTestEvent> for TestEvent {
     fn from(other: RawTestEvent) -> Self {
