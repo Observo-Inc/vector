@@ -1,10 +1,10 @@
 use vector_lib::codecs::{
-    encoding::{Framer, FramingConfig},
     TextSerializerConfig,
+    encoding::{Framer, FramingConfig},
 };
 use vector_lib::configurable::configurable_component;
 
-#[cfg(unix)]
+#[cfg(not(windows))]
 use crate::sinks::util::unix::UnixSinkConfig;
 use crate::{
     codecs::{Encoder, EncodingConfig, EncodingConfigWithFraming, SinkType},
@@ -41,15 +41,12 @@ pub enum Mode {
     Udp(UdpMode),
 
     /// Send over a Unix domain socket (UDS), in stream mode.
-    #[cfg(unix)]
     #[serde(alias = "unix")]
     UnixStream(UnixMode),
 
     /// Send over a Unix domain socket (UDS), in datagram mode.
     /// Unavailable on macOS, due to send(2)'s apparent non-blocking behavior,
     /// resulting in ENOBUFS errors which we currently don't handle.
-    #[cfg(unix)]
-    #[cfg_attr(target_os = "macos", serde(skip))]
     UnixDatagram(UnixMode),
 }
 
@@ -76,7 +73,6 @@ pub struct UdpMode {
 }
 
 /// Unix Domain Socket configuration.
-#[cfg(unix)]
 #[configurable_component]
 #[derive(Clone, Debug)]
 pub struct UnixMode {
@@ -85,6 +81,19 @@ pub struct UnixMode {
 
     #[serde(flatten)]
     encoding: EncodingConfigWithFraming,
+}
+
+// Workaround for https://github.com/vectordotdev/vector/issues/22198.
+#[cfg(windows)]
+/// A Unix Domain Socket sink.
+#[configurable_component]
+#[derive(Clone, Debug)]
+pub struct UnixSinkConfig {
+    /// The Unix socket path.
+    ///
+    /// This should be an absolute path.
+    #[configurable(metadata(docs::examples = "/path/to/socket"))]
+    pub path: std::path::PathBuf,
 }
 
 impl GenerateConfig for SocketSinkConfig {
@@ -151,16 +160,28 @@ impl SinkConfig for SocketSinkConfig {
                     super::util::service::net::UnixMode::Stream,
                 )
             }
+            #[allow(unused)]
             #[cfg(unix)]
             Mode::UnixDatagram(UnixMode { config, encoding }) => {
-                let transformer = encoding.transformer();
-                let (framer, serializer) = encoding.build(SinkType::StreamBased)?;
-                let encoder = Encoder::<Framer>::new(framer, serializer);
-                config.build(
-                    transformer,
-                    encoder,
-                    super::util::service::net::UnixMode::Datagram,
-                )
+                cfg_if! {
+                    if #[cfg(not(target_os = "macos"))] {
+                        let transformer = encoding.transformer();
+                        let (framer, serializer) = encoding.build(SinkType::StreamBased)?;
+                        let encoder = Encoder::<Framer>::new(framer, serializer);
+                        config.build(
+                            transformer,
+                            encoder,
+                            super::util::service::net::UnixMode::Datagram,
+                        )
+                    }
+                    else {
+                        Err("UnixDatagram is not available on macOS platforms.".into())
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            Mode::UnixStream(_) | Mode::UnixDatagram(_) => {
+                Err("Unix modes are supported only on Unix platforms.".into())
             }
         }
     }
@@ -169,9 +190,7 @@ impl SinkConfig for SocketSinkConfig {
         let encoder_input_type = match &self.mode {
             Mode::Tcp(TcpMode { encoding, .. }) => encoding.config().1.input_type(),
             Mode::Udp(UdpMode { encoding, .. }) => encoding.config().input_type(),
-            #[cfg(unix)]
             Mode::UnixStream(UnixMode { encoding, .. }) => encoding.config().1.input_type(),
-            #[cfg(unix)]
             Mode::UnixDatagram(UnixMode { encoding, .. }) => encoding.config().1.input_type(),
         };
         Input::new(encoder_input_type)
@@ -188,31 +207,37 @@ mod test {
         future::ready,
         net::{SocketAddr, UdpSocket},
     };
-    #[cfg(unix)]
-    use std::{os::unix::net::UnixDatagram, path::PathBuf};
 
     use futures::stream::StreamExt;
     use futures_util::stream;
     use serde_json::Value;
     use tokio::{
         net::TcpListener,
-        time::{sleep, timeout, Duration},
+        time::{Duration, sleep, timeout},
     };
     use tokio_stream::wrappers::TcpListenerStream;
     use tokio_util::codec::{FramedRead, LinesCodec};
     use vector_lib::codecs::JsonSerializerConfig;
-    #[cfg(unix)]
-    use vector_lib::codecs::NativeJsonSerializerConfig;
 
     use super::*;
-    #[cfg(unix)]
-    use crate::test_util::random_metrics_with_stream;
+
+    #[cfg(target_os = "windows")]
+    use cfg_if::cfg_if;
+    cfg_if! { if #[cfg(unix)] {
+        use vector_lib::codecs::NativeJsonSerializerConfig;
+        use crate::test_util::random_metrics_with_stream;
+        use std::path::PathBuf;
+    } }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    use std::os::unix::net::UnixDatagram;
+
     use crate::{
         config::SinkContext,
         event::{Event, LogEvent},
         test_util::{
-            components::{assert_sink_compliance, run_and_assert_sink_compliance, SINK_TAGS},
-            next_addr, next_addr_v6, random_lines_with_stream, trace_init, CountReceiver,
+            CountReceiver,
+            components::{SINK_TAGS, assert_sink_compliance, run_and_assert_sink_compliance},
+            next_addr, next_addr_v6, random_lines_with_stream, trace_init,
         },
     };
 
@@ -223,20 +248,20 @@ mod test {
 
     enum DatagramSocket {
         Udp(UdpSocket),
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "macos")))]
         Unix(UnixDatagram),
     }
 
     enum DatagramSocketAddr {
         Udp(SocketAddr),
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "macos")))]
         Unix(PathBuf),
     }
 
     async fn test_datagram(datagram_addr: DatagramSocketAddr) {
         let receiver = match &datagram_addr {
             DatagramSocketAddr::Udp(addr) => DatagramSocket::Udp(UdpSocket::bind(addr).unwrap()),
-            #[cfg(unix)]
+            #[cfg(all(unix, not(target_os = "macos")))]
             DatagramSocketAddr::Unix(path) => {
                 DatagramSocket::Unix(UnixDatagram::bind(path).unwrap())
             }
@@ -248,7 +273,7 @@ mod test {
                     config: UdpSinkConfig::from_address(addr.to_string()),
                     encoding: JsonSerializerConfig::default().into(),
                 }),
-                #[cfg(unix)]
+                #[cfg(all(unix, not(target_os = "macos")))]
                 DatagramSocketAddr::Unix(path) => Mode::UnixDatagram(UnixMode {
                     config: UnixSinkConfig::new(path.to_path_buf()),
                     encoding: (None::<FramingConfig>, JsonSerializerConfig::default()).into(),
@@ -272,7 +297,7 @@ mod test {
             DatagramSocket::Udp(sock) => {
                 sock.recv_from(&mut buf).expect("Did not receive message").0
             }
-            #[cfg(unix)]
+            #[cfg(all(unix, not(target_os = "macos")))]
             DatagramSocket::Unix(sock) => sock.recv(&mut buf).expect("Did not receive message"),
         };
 
@@ -298,7 +323,7 @@ mod test {
         test_datagram(DatagramSocketAddr::Udp(next_addr_v6())).await;
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[tokio::test]
     async fn unix_datagram() {
         trace_init();
@@ -401,18 +426,18 @@ mod test {
         use std::{
             pin::Pin,
             sync::{
-                atomic::{AtomicUsize, Ordering},
                 Arc,
+                atomic::{AtomicUsize, Ordering},
             },
             task::Poll,
         };
 
-        use futures::{channel::mpsc, FutureExt, SinkExt, StreamExt};
+        use futures::{FutureExt, SinkExt, StreamExt, channel::mpsc};
         use tokio::{
             io::{AsyncRead, AsyncWriteExt, ReadBuf},
             net::TcpStream,
             task::yield_now,
-            time::{interval, Duration},
+            time::{Duration, interval},
         };
         use tokio_stream::wrappers::IntervalStream;
 
@@ -480,9 +505,11 @@ mod test {
 
                     let mut stream: MaybeTlsIncomingStream<TcpStream> = connection.unwrap();
 
-                    std::future::poll_fn(move |cx| loop {
-                        if let Some(fut) = close_rx.as_mut() {
-                            if let Poll::Ready(()) = fut.poll_unpin(cx) {
+                    std::future::poll_fn(move |cx| {
+                        loop {
+                            if let Some(fut) = close_rx.as_mut()
+                                && let Poll::Ready(()) = fut.poll_unpin(cx)
+                            {
                                 stream
                                     .get_mut()
                                     .unwrap()
@@ -492,22 +519,22 @@ mod test {
                                     .unwrap();
                                 close_rx = None;
                             }
-                        }
 
-                        let mut buf = [0u8; 11];
-                        let mut buf = ReadBuf::new(&mut buf);
-                        return match Pin::new(&mut stream).poll_read(cx, &mut buf) {
-                            Poll::Ready(Ok(())) => {
-                                if buf.filled().is_empty() {
-                                    Poll::Ready(())
-                                } else {
-                                    msg_counter1.fetch_add(1, Ordering::SeqCst);
-                                    continue;
+                            let mut buf = [0u8; 11];
+                            let mut buf = ReadBuf::new(&mut buf);
+                            return match Pin::new(&mut stream).poll_read(cx, &mut buf) {
+                                Poll::Ready(Ok(())) => {
+                                    if buf.filled().is_empty() {
+                                        Poll::Ready(())
+                                    } else {
+                                        msg_counter1.fetch_add(1, Ordering::SeqCst);
+                                        continue;
+                                    }
                                 }
-                            }
-                            Poll::Ready(Err(error)) => panic!("{}", error),
-                            Poll::Pending => Poll::Pending,
-                        };
+                                Poll::Ready(Err(error)) => panic!("{error}"),
+                                Poll::Pending => Poll::Pending,
+                            };
+                        }
                     })
                 })
                 .await;
@@ -598,18 +625,20 @@ mod test {
 
         // Second listener
         // If this doesn't succeed then the sink hanged.
-        assert!(timeout(
-            Duration::from_secs(5),
-            CountReceiver::receive_lines(addr).connected()
-        )
-        .await
-        .is_ok());
+        assert!(
+            timeout(
+                Duration::from_secs(5),
+                CountReceiver::receive_lines(addr).connected()
+            )
+            .await
+            .is_ok()
+        );
 
         sink_handle.await.unwrap();
     }
 
     #[cfg(unix)]
     fn temp_uds_path(name: &str) -> PathBuf {
-        tempfile::tempdir().unwrap().into_path().join(name)
+        tempfile::tempdir().unwrap().keep().join(name)
     }
 }
