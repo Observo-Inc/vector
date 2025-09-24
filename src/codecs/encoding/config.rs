@@ -1,14 +1,15 @@
 use crate::codecs::Transformer;
 use vector_lib::codecs::{
-    encoding::{Framer, FramingConfig, Serializer, SerializerConfig},
     CharacterDelimitedEncoder, LengthDelimitedEncoder, NewlineDelimitedEncoder,
+    encoding::{Framer, FramingConfig, Serializer, SerializerConfig},
 };
 use vector_lib::configurable::configurable_component;
 
 /// Encoding configuration.
 #[configurable_component]
 #[derive(Clone, Debug)]
-#[configurable(description = "Configures how events are encoded into raw bytes.")]
+/// Configures how events are encoded into raw bytes.
+/// The selected encoding also determines which input types (logs, metrics, traces) are supported.
 pub struct EncodingConfig {
     #[serde(flatten)]
     encoding: SerializerConfig,
@@ -155,7 +156,7 @@ where
 
 #[cfg(test)]
 mod test {
-    use vector_lib::lookup::lookup_v2::{parse_value_path, ConfigValuePath};
+    use vector_lib::lookup::lookup_v2::{ConfigValuePath, parse_value_path};
 
     use super::*;
     use crate::codecs::encoding::TimestampFormat;
