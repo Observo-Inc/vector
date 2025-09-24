@@ -5,7 +5,7 @@ pub mod timeout;
 
 pub use auth::{AwsAuthentication, ImdsAuthentication};
 use aws_config::{
-    meta::region::ProvideRegion, retry::RetryConfig, timeout::TimeoutConfig, Region, SdkConfig,
+    Region, SdkConfig, meta::region::ProvideRegion, retry::RetryConfig, timeout::TimeoutConfig,
 };
 use aws_credential_types::provider::{ProvideCredentials, SharedCredentialsProvider};
 use aws_sigv4::{
@@ -28,7 +28,7 @@ use aws_types::sdk_config::SharedHttpClient;
 use bytes::Bytes;
 use futures_util::FutureExt;
 use http::HeaderMap;
-use http_body::{combinators::BoxBody, Body};
+use http_body::{Body, combinators::BoxBody};
 use pin_project::pin_project;
 use regex::RegexSet;
 pub use region::RegionOrEndpoint;
@@ -37,8 +37,8 @@ use std::{
     error::Error,
     pin::Pin,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, OnceLock,
+        atomic::{AtomicUsize, Ordering},
     },
     task::{Context, Poll},
     time::{Duration, SystemTime},
@@ -126,10 +126,11 @@ pub trait ClientBuilder {
     fn build(&self, config: &SdkConfig) -> Self::Client;
 }
 
-fn region_provider(
+/// Provides the configured AWS region.
+pub fn region_provider(
     proxy: &ProxyConfig,
     tls_options: Option<&TlsConfig>,
-) -> crate::Result<impl ProvideRegion> {
+) -> crate::Result<impl ProvideRegion + use<>> {
     let config = aws_config::provider_config::ProviderConfig::default()
         .with_http_client(connector(proxy, tls_options)?);
 
@@ -222,6 +223,10 @@ where
 
     if let Some(endpoint_override) = endpoint {
         config_builder = config_builder.endpoint_url(endpoint_override);
+    } else if let Some(endpoint_from_config) =
+        aws_config::default_provider::endpoint_url::endpoint_url_provider(&provider_config).await
+    {
+        config_builder = config_builder.endpoint_url(endpoint_from_config);
     }
 
     if let Some(use_fips) =
@@ -361,13 +366,13 @@ where
 
         HttpConnectorFuture::new(fut.inspect(move |result| {
             let byte_size = bytes_sent.load(Ordering::Relaxed);
-            if let Ok(result) = result {
-                if result.status().is_success() {
-                    emit!(AwsBytesSent {
-                        byte_size,
-                        region: Some(region),
-                    });
-                }
+            if let Ok(result) = result
+                && result.status().is_success()
+            {
+                emit!(AwsBytesSent {
+                    byte_size,
+                    region: Some(region),
+                });
             }
         }))
     }
