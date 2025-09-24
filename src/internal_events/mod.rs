@@ -63,7 +63,7 @@ mod heartbeat;
 #[cfg(feature = "sources-host_metrics")]
 mod host_metrics;
 mod http;
-pub mod http_client;
+pub use vector_lib::http::internal_events as http_client;
 #[cfg(feature = "sources-utils-http-client")]
 mod http_client_source;
 #[cfg(feature = "sinks-influxdb")]
@@ -135,6 +135,10 @@ mod websocket;
 ))]
 mod file;
 mod windows;
+mod hash_replace;
+
+#[cfg(feature = "transforms-hash_replace")]
+pub(crate) use self::hash_replace::*;
 
 #[cfg(feature = "sources-mongodb_metrics")]
 pub(crate) use mongodb_metrics::*;

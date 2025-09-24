@@ -3,7 +3,6 @@ use std::{
     path::Path,
     task::{Context, Poll},
 };
-
 use futures::{task::noop_waker_ref, Stream, StreamExt};
 
 use crate::event::{Event, EventArray, EventContainer};

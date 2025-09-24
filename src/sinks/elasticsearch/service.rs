@@ -3,6 +3,7 @@ use std::{
     task::{Context, Poll},
 };
 
+use std::format;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use http::{Response, Uri};
@@ -10,19 +11,20 @@ use hyper::{service::Service, Body, Request};
 use tower::ServiceExt;
 use vector_lib::stream::DriverResponse;
 use vector_lib::ByteSizeOf;
+use metrics::Counter;
 use vector_lib::{
     json_size::JsonSize,
     request_metadata::{GroupedCountByteSize, MetaDescriptive, RequestMetadata},
 };
 
-use super::{ElasticsearchCommon, ElasticsearchConfig};
+use super::{ElasticsearchCommon, ElasticsearchConfig, RejectionReport};
 use crate::{
     event::{EventFinalizers, EventStatus, Finalizable},
     http::HttpClient,
     sinks::util::{
         auth::Auth,
         http::{HttpBatchService, RequestConfig},
-        Compression, ElementCount,
+        Compression, ElementCount, Decompressor,
     },
 };
 
@@ -64,6 +66,18 @@ impl MetaDescriptive for ElasticsearchRequest {
 }
 
 #[derive(Clone)]
+pub struct Telemetry {
+    // #OBSERVO_STYLE_TELEMETRY# (diverges from upstream convention)
+    // The usual way (using emit!(...)) to emit metrics has high overhead. It dereferences global-state and requires
+    // more than 8 method calls to pull the labels out for every `emit!` invocation.
+    // We can't fix it for all of vector (for fear of merge-conflicts during upgrade) but we use a more efficient
+    // approach here.
+    // Config::build does that hard-work once and then we hold on to the counter and continue incrementing it.
+    pub rejected: Counter,
+    pub indexed: Counter,
+}
+
+#[derive(Clone)]
 pub struct ElasticsearchService {
     // TODO: `HttpBatchService` has been deprecated for direct use in sinks.
     //       This sink should undergo a refactor to utilize the `HttpService`
@@ -72,12 +86,18 @@ pub struct ElasticsearchService {
         BoxFuture<'static, Result<http::Request<Bytes>, crate::Error>>,
         ElasticsearchRequest,
     >,
+    rej_rpt: RejectionReport,
+    compression: Compression,
+    telemetry: Telemetry,
 }
 
 impl ElasticsearchService {
     pub fn new(
         http_client: HttpClient<Body>,
         http_request_builder: HttpRequestBuilder,
+        rej_rpt: RejectionReport,
+        compression: Compression,
+        telemetry: Telemetry,
     ) -> ElasticsearchService {
         let http_request_builder = Arc::new(http_request_builder);
         let batch_service = HttpBatchService::new(http_client, move |req| {
@@ -86,7 +106,7 @@ impl ElasticsearchService {
                 Box::pin(async move { request_builder.build_request(req).await });
             future
         });
-        ElasticsearchService { batch_service }
+        ElasticsearchService { batch_service, rej_rpt, compression, telemetry }
     }
 }
 
@@ -187,13 +207,20 @@ impl Service<ElasticsearchRequest> for ElasticsearchService {
     // Emission of internal events for errors and dropped events is handled upstream by the caller.
     fn call(&mut self, mut req: ElasticsearchRequest) -> Self::Future {
         let mut http_service = self.batch_service.clone();
+        let rej_rpt = self.rej_rpt.clone();
+        let req_for_rpt = if rej_rpt.needs_request() {
+            Some((req.clone(), self.compression.clone()))
+        } else {
+            None
+        };
+        let telemetry = self.telemetry.clone();
         Box::pin(async move {
             http_service.ready().await?;
             let events_byte_size =
                 std::mem::take(req.metadata_mut()).into_events_estimated_json_encoded_byte_size();
             let http_response = http_service.call(req).await?;
 
-            let event_status = get_event_status(&http_response);
+            let event_status = get_event_status(&http_response, req_for_rpt, rej_rpt, telemetry);
             Ok(ElasticsearchResponse {
                 event_status,
                 http_response,
@@ -203,34 +230,147 @@ impl Service<ElasticsearchRequest> for ElasticsearchService {
     }
 }
 
-// This event is not part of the event framework but is kept because some users were depending on it
-// to identify the number of errors returned by Elasticsearch. It can be dropped when we have better
-// telemetry. Ref: #15886
-fn emit_bad_response_error(response: &Response<Bytes>) {
-    let error_code = format!("http_response_{}", response.status().as_u16());
+const ES_REJ_RPT: &str = "es_rej_rpt";
 
-    error!(
-        message =  "Response contained errors.",
-        error_code = error_code,
-        response = ?response,
-    );
+fn response_frag(key: &str, val_prefix: &str) -> String {
+    format!("\"{key}\":{val_prefix}")
 }
 
-fn get_event_status(response: &Response<Bytes>) -> EventStatus {
+#[derive(Debug, PartialEq)]
+struct ErrSummary {
+    error_code: String,
+    msg: String,
+    indexed: u64,
+    rejected: u64,
+}
+
+fn err_summary(response: &Response<Bytes>) -> ErrSummary {
+    let body = String::from_utf8_lossy(response.body());
+    let i =
+        body
+            .match_indices(response_frag("status", "201").as_str())
+            .count()
+            .try_into()
+            .unwrap();
+    let r =
+        body
+            .match_indices(response_frag("status", "400").as_str())
+            .count()
+            .try_into()
+            .unwrap();
+    ErrSummary {
+        error_code: format!("http_response_{}", response.status().as_u16()),
+        msg: format!("Request contained errors (indexed: {i}, rejected: {r})."),
+        indexed: i,
+        rejected: r
+    }
+}
+
+fn emit_bad_response_error(
+    response: &Response<Bytes>,
+    request: Option<(ElasticsearchRequest, Compression)>,
+    rej_rpt: RejectionReport,
+    telemetry: Telemetry,
+) {
+    let err_summary = err_summary(response);
+    telemetry.indexed.increment(err_summary.indexed);
+    telemetry.rejected.increment(err_summary.rejected);
+
+    match (rej_rpt, request) {
+        (RejectionReport::RequestResponse, Some((req, comp))) => {
+            let decomp = Decompressor::from(comp);
+            let req_data = match decomp.decompress(req.payload) {
+                Ok(data) => data,
+                Err(err) => format!("- decompression failed({comp}): '{err}' -").into()
+            };
+
+            error!(
+                category = ES_REJ_RPT,
+                message = err_summary.msg,
+                error_code = err_summary.error_code,
+                response = ?response,
+                request = %String::from_utf8_lossy(&req_data),
+            );
+        }
+        (RejectionReport::Stats, _) => {
+            error!(
+                category = ES_REJ_RPT,
+                message = err_summary.msg,
+                error_code = err_summary.error_code,
+            );
+        }
+        _ => {
+            error!(
+                category = ES_REJ_RPT,
+                message = err_summary.msg,
+                error_code = err_summary.error_code,
+                response = ?response,
+            );
+        }
+    };
+}
+
+fn get_event_status(
+    response: &Response<Bytes>,
+    request: Option<(ElasticsearchRequest, Compression)>,
+    rej_rpt: RejectionReport,
+    telemetry: Telemetry,
+) -> EventStatus {
     let status = response.status();
     if status.is_success() {
         let body = String::from_utf8_lossy(response.body());
-        if body.contains("\"errors\":true") {
-            emit_bad_response_error(response);
+        if body.contains(response_frag("errors", "true").as_str()) {
+            emit_bad_response_error(response, request, rej_rpt, telemetry);
             EventStatus::Rejected
         } else {
             EventStatus::Delivered
         }
     } else if status.is_server_error() {
-        emit_bad_response_error(response);
+        let rej_rpt = if rej_rpt == RejectionReport::RequestResponse {
+            RejectionReport::Response
+        } else {
+            rej_rpt
+        };
+        emit_bad_response_error(response, None, rej_rpt, telemetry);
         EventStatus::Errored
     } else {
-        emit_bad_response_error(response);
+        emit_bad_response_error(response, request, rej_rpt, telemetry);
         EventStatus::Rejected
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use std::{fs::File, io::Read};
+    use super::*;
+
+    fn contents(path: &str) -> Bytes {
+        let mut file = File::open(path).expect("Unable to open file");
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents).expect("Unable to read file");
+        Bytes::from(contents)
+    }
+
+    #[test]
+    fn test_error_summary() {
+        let res = Response::new(
+            contents("tests/data/elasticsearch_bulk.response.body.json"));
+
+        // <json file> | jq -c '.items | map(.index.status | "\(.)") | histo'
+        // {"201":259,"400":5}
+
+        let body = String::from_utf8_lossy(res.body());
+
+        // assert we detect error
+        assert!(body.contains(response_frag("errors", "true").as_str()));
+
+        assert_eq!(
+            err_summary(&res),
+            ErrSummary {
+                error_code: "http_response_200".into(),
+                msg: "Request contained errors (indexed: 259, rejected: 5).".to_string(),
+                indexed: 259,
+                rejected: 5})
     }
 }

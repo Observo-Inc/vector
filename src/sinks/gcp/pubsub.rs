@@ -125,7 +125,8 @@ impl SinkConfig for PubsubConfig {
             .into_batch_settings()?;
         let request_settings = self.request.into_settings();
         let tls_settings = TlsSettings::from_options(self.tls.as_ref())?;
-        let client = HttpClient::new(tls_settings, cx.proxy())?;
+        let app_info = crate::app_info();
+        let client = HttpClient::new(tls_settings, cx.proxy(), &app_info)?;
 
         let healthcheck = healthcheck(client.clone(), sink.uri("")?, sink.auth.clone()).boxed();
         sink.auth.spawn_regenerate_token();

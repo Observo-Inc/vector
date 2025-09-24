@@ -315,7 +315,8 @@ mod tests {
         endpoint: String,
         acknowledgements_config: HecClientAcknowledgementsConfig,
     ) -> HecService<BoxService<HecRequest, http::Response<Bytes>, crate::Error>> {
-        let client = HttpClient::new(None, &ProxyConfig::default()).unwrap();
+        let app_info = crate::app_info();
+        let client = HttpClient::new(None, &ProxyConfig::default(), &app_info).unwrap();
         let http_request_builder = Arc::new(HttpRequestBuilder::new(
             endpoint,
             EndpointTarget::default(),

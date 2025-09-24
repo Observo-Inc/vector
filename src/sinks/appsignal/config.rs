@@ -86,7 +86,8 @@ impl SinkBatchSettings for AppsignalDefaultBatchSettings {
 impl AppsignalConfig {
     pub(super) fn build_client(&self, proxy: &ProxyConfig) -> crate::Result<HttpClient> {
         let tls = MaybeTlsSettings::from_config(self.tls.as_ref(), false)?;
-        let client = HttpClient::new(tls, proxy)?;
+        let app_info = crate::app_info();
+        let client = HttpClient::new(tls, proxy, &app_info)?;
         Ok(client)
     }
 

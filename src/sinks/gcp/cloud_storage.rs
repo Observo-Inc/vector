@@ -1,4 +1,5 @@
 use std::{collections::HashMap, convert::TryFrom, io};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use chrono::{FixedOffset, Utc};
@@ -17,7 +18,7 @@ use vector_lib::{request_metadata::RequestMetadata, TimeZone};
 use crate::sinks::util::metadata::RequestMetadataBuilder;
 use crate::sinks::util::service::TowerRequestConfigDefaults;
 use crate::{
-    codecs::{Encoder, EncodingConfigWithFraming, SinkType, Transformer},
+    codecs::{Encoder, EncodingConfigWithFraming, SinkType},
     config::{AcknowledgementsConfig, DataType, GenerateConfig, Input, SinkConfig, SinkContext},
     event::Event,
     gcp::{GcpAuthConfig, GcpAuthenticator, Scope},
@@ -237,7 +238,8 @@ impl SinkConfig for GcsSinkConfig {
         let auth = self.auth.build(Scope::DevStorageReadWrite).await?;
         let base_url = format!("{}/{}/", self.endpoint, self.bucket);
         let tls = TlsSettings::from_options(self.tls.as_ref())?;
-        let client = HttpClient::new(tls, cx.proxy())?;
+        let app_info = crate::app_info();
+        let client = HttpClient::new(tls, cx.proxy(), &app_info)?;
         let healthcheck = build_healthcheck(
             self.bucket.clone(),
             client.clone(),
@@ -298,7 +300,7 @@ impl GcsSinkConfig {
 // Settings required to produce a request that do not change per
 // request. All possible values are pre-computed for direct use in
 // producing a request.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct RequestSettings {
     acl: Option<HeaderValue>,
     content_type: HeaderValue,
@@ -308,7 +310,7 @@ struct RequestSettings {
     extension: String,
     time_format: String,
     append_uuid: bool,
-    encoder: (Transformer, Encoder<Framer>),
+    encoder: Arc<dyn crate::sinks::util::encoding::Encoder<Vec<Event>> + Send + Sync>,
     compression: Compression,
     tz_offset: Option<FixedOffset>,
 }
@@ -316,7 +318,7 @@ struct RequestSettings {
 impl RequestBuilder<(String, Vec<Event>)> for RequestSettings {
     type Metadata = (String, EventFinalizers);
     type Events = Vec<Event>;
-    type Encoder = (Transformer, Encoder<Framer>);
+    type Encoder = Arc<dyn crate::sinks::util::encoding::Encoder<Vec<Event>> + Send + Sync>;
     type Payload = Bytes;
     type Request = GcsRequest;
     type Error = io::Error;
@@ -386,12 +388,20 @@ impl RequestBuilder<(String, Vec<Event>)> for RequestSettings {
 impl RequestSettings {
     fn new(config: &GcsSinkConfig, cx: SinkContext) -> crate::Result<Self> {
         let transformer = config.encoding.transformer();
-        let (framer, serializer) = config.encoding.build(SinkType::MessageBased)?;
-        let encoder = Encoder::<Framer>::new(framer, serializer);
+        let mut content_type_value = "parquet";
+        let encoder = if let Some(serializer) = config.encoding.build_batched()? {
+            Arc::new((transformer, serializer))
+                as Arc<dyn crate::sinks::util::encoding::Encoder<Vec<Event>> + Send + Sync>
+        } else {
+            let (framer, serializer) = config.encoding.build(SinkType::MessageBased)?;
+            let encoder = Encoder::<Framer>::new(framer, serializer);
+            content_type_value = encoder.content_type();
+            Arc::new((transformer, encoder)) as _
+        };
         let acl = config
             .acl
             .map(|acl| HeaderValue::from_str(&to_string(acl)).unwrap());
-        let content_type = HeaderValue::from_str(encoder.content_type()).unwrap();
+        let content_type = HeaderValue::from_str(content_type_value).unwrap();
         let content_encoding = config
             .compression
             .content_encoding()
@@ -429,7 +439,7 @@ impl RequestSettings {
             time_format,
             append_uuid,
             compression: config.compression,
-            encoder: (transformer, encoder),
+            encoder: encoder,
             tz_offset: offset,
         })
     }
@@ -474,8 +484,9 @@ mod tests {
         let context = SinkContext::default();
 
         let tls = TlsSettings::default();
+        let app_info = crate::app_info();
         let client =
-            HttpClient::new(tls, context.proxy()).expect("should not fail to create HTTP client");
+            HttpClient::new(tls, context.proxy(), &app_info).expect("should not fail to create HTTP client");
 
         let config =
             default_config((None::<FramingConfig>, JsonSerializerConfig::default()).into());

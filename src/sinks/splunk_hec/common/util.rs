@@ -47,7 +47,8 @@ pub fn create_client(
     proxy_config: &ProxyConfig,
 ) -> crate::Result<HttpClient> {
     let tls_settings = TlsSettings::from_options(tls)?;
-    Ok(HttpClient::new(tls_settings, proxy_config)?)
+    let app_info = crate::app_info();
+    Ok(HttpClient::new(tls_settings, proxy_config, &app_info)?)
 }
 
 // TODO: `HttpBatchService` has been deprecated for direct use in sinks.

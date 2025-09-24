@@ -156,7 +156,8 @@ fn apache_metrics(
             .map(move |_| stream::iter(urls.clone()))
             .flatten()
             .map(move |url| {
-                let client = HttpClient::new(None, &proxy).expect("HTTPS initialization failed");
+                let app_info = crate::app_info();
+                let client = HttpClient::new(None, &proxy, &app_info).expect("HTTPS initialization failed");
                 let sanitized_url = url.to_sanitized_string();
 
                 let request = Request::get(&url)

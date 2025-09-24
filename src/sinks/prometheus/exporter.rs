@@ -937,7 +937,8 @@ mod tests {
         }
 
         let proxy = ProxyConfig::default();
-        let result = HttpClient::new(client_settings, &proxy)
+        let app_info = crate::app_info();
+        let result = HttpClient::new(client_settings, &proxy, &app_info)
             .unwrap()
             .send(request)
             .await
@@ -1020,7 +1021,8 @@ mod tests {
         }
 
         let proxy = ProxyConfig::default();
-        let result = HttpClient::new(client_settings, &proxy)
+        let app_info = crate::app_info();
+        let result = HttpClient::new(client_settings, &proxy, &app_info)
             .unwrap()
             .send(request)
             .await
@@ -1476,7 +1478,11 @@ mod integration_tests {
             .body(Body::empty())
             .expect("Error creating request.");
         let proxy = ProxyConfig::default();
-        let result = HttpClient::new(None, &proxy)
+        let app_info = crate::http::AppInfo {
+            name: "vector-integration-tests".to_string(),
+            version: "0.1.0".to_string(),
+        };
+        let result = HttpClient::new(None, &proxy, &app_info)
             .unwrap()
             .send(request)
             .await
@@ -1497,7 +1503,11 @@ mod integration_tests {
             .body(Body::empty())
             .expect("Error creating request.");
         let proxy = ProxyConfig::default();
-        let result = HttpClient::new(None, &proxy)
+        let app_info = crate::http::AppInfo {
+            name: "vector-integration-tests".to_string(),
+            version: "0.1.0".to_string(),
+        };
+        let result = HttpClient::new(None, &proxy, &app_info)
             .unwrap()
             .send(request)
             .await

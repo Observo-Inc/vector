@@ -79,3 +79,9 @@ Every command group/namespace has its own directory with a `cli` module, includi
 Unit tests can be run by calling `cargo vdev test`.
 
 Integration tests are not run by default when running`cargo vdev test`. Instead, they are accessible via the integration subcommand (example: `cargo vdev int test aws` runs aws-related integration tests). You can find the list of available integration tests using `cargo vdev int show`. Integration tests require docker or podman to run.
+
+
+## Observo specific setup for running
+* Replace vrl dependency url with `git://<docker NAT GW>/vrl` and kill the branch name. It should look like `vrl = { git = "git://172.17.0.1/vrl", features = ["arbitrary", "cli", "test", "test_framework"] }`.
+* Serve vrl, like so: `$ cd ../vrl  && git checkout <desired_branch> && ./server.sh`
+* Run tests... Eg. `$ cargo vdev int test gcp`

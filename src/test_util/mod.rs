@@ -6,7 +6,7 @@ use std::{
     future::{ready, Future},
     io::Read,
     iter,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::SocketAddr,
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
@@ -20,7 +20,6 @@ use chrono::{DateTime, SubsecRound, Utc};
 use flate2::read::MultiGzDecoder;
 use futures::{stream, task::noop_waker_ref, FutureExt, SinkExt, Stream, StreamExt, TryStreamExt};
 use openssl::ssl::{SslConnector, SslFiletype, SslMethod, SslVerifyMode};
-use portpicker::pick_unused_port;
 use rand::{thread_rng, Rng};
 use rand_distr::Alphanumeric;
 use tokio::{
@@ -111,18 +110,8 @@ pub fn open_fixture(path: impl AsRef<Path>) -> crate::Result<serde_json::Value> 
     Ok(value)
 }
 
-pub fn next_addr_for_ip(ip: IpAddr) -> SocketAddr {
-    let port = pick_unused_port(ip);
-    SocketAddr::new(ip, port)
-}
-
-pub fn next_addr() -> SocketAddr {
-    next_addr_for_ip(IpAddr::V4(Ipv4Addr::LOCALHOST))
-}
-
-pub fn next_addr_v6() -> SocketAddr {
-    next_addr_for_ip(IpAddr::V6(Ipv6Addr::LOCALHOST))
-}
+#[cfg(test)]
+pub use vector_lib::inet_test_util::*;
 
 pub fn trace_init() {
     #[cfg(unix)]

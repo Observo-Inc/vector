@@ -9,6 +9,7 @@ passthrough = [
     "VECTOR_BUILD_DESC",
     "JEMALLOC_SYS_WITH_LG_PAGE",
     "JEMALLOC_SYS_WITH_LG_HUGEPAGE",
+    "RUSTFLAGS"
 ]
 
 [target.x86_64-unknown-linux-gnu]

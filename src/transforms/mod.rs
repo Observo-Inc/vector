@@ -30,6 +30,9 @@ pub mod tag_cardinality_limit;
 #[cfg(feature = "transforms-throttle")]
 pub mod throttle;
 
+#[cfg(feature = "transforms-hash_replace")]
+pub mod hash_replace;
+
 pub use vector_lib::transform::{
     FunctionTransform, OutputBuffer, SyncTransform, TaskTransform, Transform, TransformOutputs,
     TransformOutputsBuf,

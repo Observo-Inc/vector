@@ -2,6 +2,7 @@ use std::{fs::DirBuilder, path::PathBuf, time::Duration};
 
 use snafu::{ResultExt, Snafu};
 use vector_common::TimeZone;
+use crate::chkpts::StoreConfig as CheckpointConfig;
 use vector_config::configurable_component;
 
 use super::super::default_data_dir;
@@ -103,6 +104,10 @@ pub struct GlobalOptions {
     /// that metrics live long enough to be emitted and captured,
     #[serde(skip_serializing_if = "crate::serde::is_default")]
     pub expire_metrics_secs: Option<f64>,
+
+    /// Configuration for the checkpoint store.
+    #[serde(skip_serializing_if = "crate::serde::is_default")]
+    pub checkpoint: Option<CheckpointConfig>,
 }
 
 impl GlobalOptions {
@@ -220,6 +225,13 @@ impl GlobalOptions {
         let mut telemetry = self.telemetry.clone();
         telemetry.merge(&with.telemetry);
 
+        let checkpoint: Option<CheckpointConfig> = match (&self.checkpoint, with.checkpoint) {
+            (Some(self_cfg), Some(with_cfg)) => Some(self_cfg.merge(&with_cfg)),
+            (None, None) => None,
+            (Some(self_cfg), None) => Some(self_cfg.clone()),
+            (None, Some(with_cfg)) => Some(with_cfg),
+        };
+
         if errors.is_empty() {
             Ok(Self {
                 data_dir,
@@ -230,6 +242,7 @@ impl GlobalOptions {
                 proxy: self.proxy.merge(&with.proxy),
                 expire_metrics: self.expire_metrics.or(with.expire_metrics),
                 expire_metrics_secs: self.expire_metrics_secs.or(with.expire_metrics_secs),
+                checkpoint,
             })
         } else {
             Err(errors)

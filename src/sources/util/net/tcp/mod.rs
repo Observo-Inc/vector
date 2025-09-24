@@ -2,7 +2,6 @@ pub mod request_limiter;
 
 use std::{io, mem::drop, net::SocketAddr, time::Duration};
 
-use bytes::Bytes;
 use futures::{future::BoxFuture, FutureExt, StreamExt};
 use futures_util::future::OptionFuture;
 use ipnet::IpNet;
@@ -26,7 +25,6 @@ use vector_lib::{
 use vrl::value::ObjectMap;
 
 use self::request_limiter::RequestLimiter;
-use super::SocketListenAddr;
 use crate::{
     codecs::ReadyFrames,
     config::SourceContext,
@@ -42,6 +40,7 @@ use crate::{
     tls::{CertificateMetadata, MaybeTlsIncomingStream, MaybeTlsListener, MaybeTlsSettings},
     SourceSender,
 };
+pub use vector_lib::net::*;
 
 pub const MAX_IN_FLIGHT_EVENTS_TARGET: usize = 100_000;
 
@@ -63,27 +62,6 @@ pub async fn try_bind_tcp_listener(
         },
     }
     .map(|listener| listener.with_allowlist(allowlist))
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub enum TcpSourceAck {
-    Ack,
-    Error,
-    Reject,
-}
-
-pub trait TcpSourceAcker {
-    fn build_ack(self, ack: TcpSourceAck) -> Option<Bytes>;
-}
-
-pub struct TcpNullAcker;
-
-impl TcpSourceAcker for TcpNullAcker {
-    // This function builds an acknowledgement from the source data in
-    // the acker and the given acknowledgement code.
-    fn build_ack(self, _ack: TcpSourceAck) -> Option<Bytes> {
-        None
-    }
 }
 
 pub trait TcpSource: Clone + Send + Sync + 'static

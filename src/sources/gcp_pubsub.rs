@@ -983,7 +983,8 @@ mod integration_tests {
         components::init_test();
 
         let tls_settings = TlsSettings::from_options(None).unwrap();
-        let client = HttpClient::new(tls_settings, &ProxyConfig::default()).unwrap();
+        let app_info = crate::app_info();
+        let client = HttpClient::new(tls_settings, &ProxyConfig::default(), &app_info).unwrap();
         let tester = Tester::new(client).await;
 
         let (rx, shutdown) = tester.spawn_source(status).await;

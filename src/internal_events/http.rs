@@ -1,44 +1,11 @@
-use std::{error::Error, time::Duration};
+use std::error::Error;
 
-use http::Response;
 use metrics::{counter, histogram};
 use vector_lib::internal_event::InternalEvent;
 use vector_lib::{
     internal_event::{error_stage, error_type},
     json_size::JsonSize,
 };
-
-const HTTP_STATUS_LABEL: &str = "status";
-
-#[derive(Debug)]
-pub struct HttpServerRequestReceived;
-
-impl InternalEvent for HttpServerRequestReceived {
-    fn emit(self) {
-        debug!(
-            message = "Received HTTP request.",
-            internal_log_rate_limit = true
-        );
-        counter!("http_server_requests_received_total").increment(1);
-    }
-}
-
-#[derive(Debug)]
-pub struct HttpServerResponseSent<'a, B> {
-    pub response: &'a Response<B>,
-    pub latency: Duration,
-}
-
-impl<B> InternalEvent for HttpServerResponseSent<'_, B> {
-    fn emit(self) {
-        let labels = &[(
-            HTTP_STATUS_LABEL,
-            self.response.status().as_u16().to_string(),
-        )];
-        counter!("http_server_responses_sent_total", labels).increment(1);
-        histogram!("http_server_handler_duration_seconds", labels).record(self.latency);
-    }
-}
 
 #[derive(Debug)]
 pub struct HttpBytesReceived<'a> {

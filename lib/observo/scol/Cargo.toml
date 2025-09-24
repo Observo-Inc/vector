@@ -1,0 +1,78 @@
+#This file is NOT part of the open-source components licensed under the Mozilla Public License, v. 2.0 (MPL-2.0).
+#Proprietary and Confidential – © 2025 Observo Inc.
+#Unauthorized copying, modification, distribution, or disclosure of this file, via any medium, is strictly prohibited.
+#This file is distributed separately and is not subject to the terms of the MPL-2.0.
+[package]
+name = "scol"
+version = "0.1.0"
+authors = ["Observo <observo-all@observo.ai>"]
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+arc-swap = { version = "1.7", default-features = false }
+dashmap = { version = "5.5" }
+mlua = { version = "0.10.2", default-features = false, features = ["lua54", "send", "vendored", "macros"]}
+serde.workspace = true
+serde_json.workspace = true
+snafu.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+vector-common = { path = "../../vector-common", default-features = false, features = ["test"] }
+vector-config = { path = "../../vector-config", default-features = false }
+vector-config-macros = { path = "../../vector-config-macros", default-features = false }
+vector-core = { path = "../../vector-core", default-features = false }
+vector-lib = { path = "../../vector-lib", default-features = false, features = ["lua", "observo"] }
+sauth = { path = "../sauth" }
+base64 = "0.13.1"
+async-channel = { version = "2.3.1" }
+serde_with.workspace = true
+serde-toml-merge = { version = "0.3.8", default-features = false }
+toml.workspace = true
+futures.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+mlua-json = "1.0.0"
+metrics.workspace = true
+smallvec = { version = "1", default-features = false, features = ["union", "serde"] }
+bytes = { version = "1.9.0", default-features = false, features = ["serde"] }
+http.workspace = true
+rusqlite.workspace = true
+keyed_priority_queue = { version = "0.4.2" }
+once_cell = { version = "1.21" }
+url.workspace = true
+rand.workspace = true
+chrono.workspace = true
+bstr = { version = "1.0", features = ["std"], default-features = false }
+hyper.workspace = true
+itertools.workspace = true
+async-recursion = "1.1.1"
+inventory.workspace = true
+
+# Optional dependencies for testing (below)
+textwrap = { version = "0.16", optional = true }
+rstest = { version = "0.24.0", optional = true}
+oxide-auth = { version = "0.6", path = "../vendor/oxide-auth/oxide-auth", optional = true}
+oxide-auth-poem = { version = "0.3.0", path = "../vendor/oxide-auth/oxide-auth-poem", optional = true}
+tempfile = { version = "3.15.0", optional = true }
+assert_matches = { version = "1.5", optional = true}
+pathsearch = {version = "0.2.0", optional = true}
+
+[dev-dependencies]
+assert_matches = { version = "1.5" }
+regex = "1"
+serde_urlencoded = "0.7"
+tempfile = "3.15.0"
+tracing-test = { version = "0.2.5" }
+test-case = { version = "3.3" }
+tokio = { version = "1.43.0", features = ["test-util"] }
+scol = { path = ".", features = ["test-scenarios"] }
+chkpts = { path = "../chkpts" }
+
+[features]
+test-scenarios = ["dep:textwrap", "dep:rstest", "dep:oxide-auth", "dep:oxide-auth-poem", "dep:tempfile", "dep:assert_matches", "sauth/test-support", "dep:pathsearch"]
+default = []

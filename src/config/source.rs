@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use dyn_clone::DynClone;
@@ -7,6 +8,7 @@ use vector_config::{Configurable, GenerateError, Metadata, NamedComponent};
 use vector_config_common::attributes::CustomAttribute;
 use vector_config_common::schema::{SchemaGenerator, SchemaObject};
 use vector_config_macros::configurable_component;
+use vector_lib::chkpts::{Accessor, Store};
 use vector_lib::{
     config::{
         AcknowledgementsConfig, GlobalOptions, LogNamespace, SourceAcknowledgementsConfig,
@@ -19,6 +21,8 @@ use super::{dot_graph::GraphConfig, schema, ComponentKey, ProxyConfig, Resource}
 use crate::{extra_context::ExtraContext, shutdown::ShutdownSignal, SourceSender};
 
 pub type BoxedSource = Box<dyn SourceConfig>;
+
+type CheckpointStore = Box<dyn Store>;
 
 impl Configurable for BoxedSource {
     fn referenceable_name() -> Option<&'static str> {
@@ -139,9 +143,36 @@ pub struct SourceContext {
     /// Extra context data provided by the running app and shared across all components. This can be
     /// used to pass shared settings or other data from outside the components.
     pub extra_context: ExtraContext,
+    checkpoint_store: Arc<Mutex<Option<CheckpointStore>>>,
 }
 
 impl SourceContext {
+    pub fn new(
+        key: ComponentKey,
+        globals: GlobalOptions,
+        shutdown: ShutdownSignal,
+        out: SourceSender,
+        proxy: ProxyConfig,
+        acknowledgements: bool,
+        schema: schema::Options,
+        schema_definitions: HashMap<Option<String>, schema::Definition>,
+        extra_context: ExtraContext,
+        checkpoint_store: Arc<Mutex<Option<CheckpointStore>>>,
+    ) -> SourceContext {
+        SourceContext {
+            key,
+            globals,
+            shutdown,
+            out,
+            proxy,
+            acknowledgements,
+            schema_definitions,
+            schema,
+            extra_context,
+            checkpoint_store,
+        }
+    }
+
     #[cfg(any(test, feature = "test-utils"))]
     pub fn new_shutdown(
         key: &ComponentKey,
@@ -160,6 +191,7 @@ impl SourceContext {
                 schema_definitions: HashMap::default(),
                 schema: Default::default(),
                 extra_context: Default::default(),
+                checkpoint_store: Arc::new(Mutex::new(None)),
             },
             shutdown,
         )
@@ -180,6 +212,7 @@ impl SourceContext {
             schema_definitions: schema_definitions.unwrap_or_default(),
             schema: Default::default(),
             extra_context: Default::default(),
+            checkpoint_store: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -205,5 +238,21 @@ impl SourceContext {
             .or(self.schema.log_namespace)
             .unwrap_or(false)
             .into()
+    }
+
+    pub fn checkpoint_accessor(
+        &self,
+    ) -> Option<Box<dyn Accessor>> {
+        self.checkpoint_store
+            .lock()
+            .unwrap_or_else(|e| {
+                error!(
+                    message = "Found checkpoint store lock poisoned",
+                    error = format!("Err: {:?}", e),
+                    discovering_component = self.key.id());
+                e.into_inner()
+            })
+            .as_ref()
+            .map(|store| store.accessor(self.key.clone()))
     }
 }

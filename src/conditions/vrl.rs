@@ -47,6 +47,8 @@ impl ConditionalConfig for VrlConfig {
             .chain(vector_lib::enrichment::vrl_functions());
         #[cfg(feature = "sources-dnstap")]
         let functions = functions.chain(dnstap_parser::vrl_functions());
+        #[cfg(feature = "observo-vrl")]
+        let functions = functions.chain(obvrl::all());
 
         let functions = functions
             .chain(vector_vrl_functions::all())
@@ -200,6 +202,12 @@ mod test {
             (
                 log_event!["foo" => true, "bar" => false],
                 "to_bool(.bar || .foo) ?? false",
+                Ok(()),
+                Ok(()),
+            ),
+            #[cfg(feature = "observo-vrl")] (
+                log_event!["foo" => true, "bar" => false],
+                "_, err = parse_xml_winlog(\"<xml></xml>\") \n err != null",
                 Ok(()),
                 Ok(()),
             ),

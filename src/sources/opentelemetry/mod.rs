@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use futures::{future::join, FutureExt, TryFutureExt};
 use tonic::codec::CompressionEncoding;
 use vector_lib::lookup::{owned_value_path, OwnedTargetPath};
-use vector_lib::opentelemetry::convert::{
+use vector_lib::opentelemetry::logs::{
     ATTRIBUTES_KEY, DROPPED_ATTRIBUTES_COUNT_KEY, FLAGS_KEY, OBSERVED_TIMESTAMP_KEY, RESOURCE_KEY,
     SEVERITY_NUMBER_KEY, SEVERITY_TEXT_KEY, SPAN_ID_KEY, TRACE_ID_KEY,
 };
@@ -23,6 +23,7 @@ use vector_lib::configurable::configurable_component;
 use vector_lib::internal_event::{BytesReceived, EventsReceived, Protocol};
 use vector_lib::opentelemetry::proto::collector::{
     logs::v1::logs_service_server::LogsServiceServer,
+    metrics::v1::metrics_service_server::MetricsServiceServer,
     trace::v1::trace_service_server::TraceServiceServer,
 };
 use vector_lib::{
@@ -49,6 +50,7 @@ use crate::{
 use super::http_server::{build_param_matcher, remove_duplicates};
 
 pub const LOGS: &str = "logs";
+pub const METRICS: &str = "metrics";
 pub const TRACES: &str = "traces";
 
 /// Configuration for the `opentelemetry` source.
@@ -57,10 +59,10 @@ pub const TRACES: &str = "traces";
 #[serde(deny_unknown_fields)]
 pub struct OpentelemetryConfig {
     #[configurable(derived)]
-    grpc: GrpcConfig,
+    grpc: Option<GrpcConfig>,
 
     #[configurable(derived)]
-    http: HttpConfig,
+    http: Option<HttpConfig>,
 
     #[configurable(derived)]
     #[serde(default, deserialize_with = "bool_or_struct")]
@@ -143,8 +145,8 @@ fn example_http_config() -> HttpConfig {
 impl GenerateConfig for OpentelemetryConfig {
     fn generate_config() -> toml::Value {
         toml::Value::try_from(Self {
-            grpc: example_grpc_config(),
-            http: example_http_config(),
+            grpc: Option::from(example_grpc_config()),
+            http: Option::from(example_http_config()),
             acknowledgements: Default::default(),
             log_namespace: None,
         })
@@ -156,11 +158,17 @@ impl GenerateConfig for OpentelemetryConfig {
 #[typetag::serde(name = "opentelemetry")]
 impl SourceConfig for OpentelemetryConfig {
     async fn build(&self, cx: SourceContext) -> crate::Result<Source> {
+
+        let grpc_config_exists = self.grpc.is_some();
+        let http_config_exists = self.http.is_some();
+
+        if !grpc_config_exists && !http_config_exists {
+            error!(message = "one of http or grpc must be configured for the opentelemetry source.");
+        }
+
         let acknowledgements = cx.do_acknowledgements(self.acknowledgements);
         let events_received = register!(EventsReceived);
         let log_namespace = cx.log_namespace(self.log_namespace);
-
-        let grpc_tls_settings = MaybeTlsSettings::from_config(self.grpc.tls.as_ref(), true)?;
 
         let log_service = LogsServiceServer::new(Service {
             pipeline: cx.out.clone(),
@@ -180,40 +188,73 @@ impl SourceConfig for OpentelemetryConfig {
         .accept_compressed(CompressionEncoding::Gzip)
         .max_decoding_message_size(usize::MAX);
 
-        let mut builder = RoutesBuilder::default();
-        builder.add_service(log_service).add_service(trace_service);
-        let grpc_source = run_grpc_server_with_routes(
-            self.grpc.address,
-            grpc_tls_settings,
-            builder.routes(),
-            cx.shutdown.clone(),
-        )
-        .map_err(|error| {
-            error!(message = "Source future failed.", %error);
-        });
-
-        let http_tls_settings = MaybeTlsSettings::from_config(self.http.tls.as_ref(), true)?;
-        let protocol = http_tls_settings.http_protocol_name();
-        let bytes_received = register!(BytesReceived::from(Protocol::from(protocol)));
-        let headers =
-            build_param_matcher(&remove_duplicates(self.http.headers.clone(), "headers"))?;
-        let filters = build_warp_filter(
+        let metrics_service = MetricsServiceServer::new(Service {
+            pipeline: cx.out.clone(),
             acknowledgements,
             log_namespace,
-            cx.out,
-            bytes_received,
-            events_received,
-            headers,
-        );
-        let http_source = run_http_server(
-            self.http.address,
-            http_tls_settings,
-            filters,
-            cx.shutdown,
-            self.http.keepalive.clone(),
-        );
+            events_received: events_received.clone(),
+        })
+        .accept_compressed(CompressionEncoding::Gzip)
+        .max_decoding_message_size(usize::MAX);
 
-        Ok(join(grpc_source, http_source).map(|_| Ok(())).boxed())
+        let mut builder = RoutesBuilder::default();
+        builder
+            .add_service(log_service)
+            .add_service(metrics_service)
+            .add_service(trace_service);
+
+
+        let grpc_source = if let Some(grpc_config) = &self.grpc {
+            let grpc_tls_settings = MaybeTlsSettings::from_config(grpc_config.tls.as_ref(), true)?;
+            Some(run_grpc_server_with_routes(
+                grpc_config.address,
+                grpc_tls_settings,
+                builder.routes(),
+                cx.shutdown.clone(),
+            )
+            .map_err(|error| {
+                error!(message = "Source future failed.", %error);
+            }))
+        } else {
+            None
+        };
+
+
+        let http_source = if let Some(http_config) = &self.http {
+            let http_tls_settings = MaybeTlsSettings::from_config(http_config.tls.as_ref(), true)?;
+            let protocol = http_tls_settings.http_protocol_name();
+            let bytes_received = register!(BytesReceived::from(Protocol::from(protocol)));
+            let headers = build_param_matcher(&remove_duplicates(http_config.headers.clone(), "headers"))?;
+            let filters = build_warp_filter(
+                acknowledgements,
+                log_namespace,
+                cx.out,
+                bytes_received,
+                events_received,
+                headers,
+            );
+            Some(run_http_server(
+                http_config.address,
+                http_tls_settings,
+                filters,
+                cx.shutdown,
+                http_config.keepalive.clone(),
+            ))
+        } else {
+            None
+        };
+
+
+        // Combine the futures that are Some
+        let combined = match (grpc_source, http_source) {
+            (Some(grpc), Some(http)) => join(grpc, http).map(|_| Ok(())).boxed(),
+            (Some(grpc), None) => grpc.map(|_| Ok(())).boxed(),
+            (None, Some(http)) => http.map(|_| Ok(())).boxed(),
+            (None, None) => return Err("At least one of grpc or http must be configured.".into()),
+        };
+
+        Ok(combined)
+
     }
 
     // TODO: appropriately handle "severity" meaning across both "severity_text" and "severity_number",
@@ -308,15 +349,20 @@ impl SourceConfig for OpentelemetryConfig {
 
         vec![
             SourceOutput::new_maybe_logs(DataType::Log, schema_definition).with_port(LOGS),
+            SourceOutput::new_metrics().with_port(METRICS),
             SourceOutput::new_traces().with_port(TRACES),
         ]
     }
 
     fn resources(&self) -> Vec<Resource> {
-        vec![
-            Resource::tcp(self.grpc.address),
-            Resource::tcp(self.http.address),
-        ]
+        let mut resource_vector = vec![];
+        if let Some(grpc) = &self.grpc {
+            resource_vector.push(Resource::tcp(grpc.address));
+        }
+        if let Some(http) = &self.http {
+            resource_vector.push(Resource::tcp(http.address));
+        }
+        resource_vector
     }
 
     fn can_acknowledge(&self) -> bool {

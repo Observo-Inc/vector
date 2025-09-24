@@ -24,7 +24,7 @@ pub use framing::{
     ChunkedGelfDecoderConfig, ChunkedGelfDecoderOptions, FramingError, LengthDelimitedDecoder,
     LengthDelimitedDecoderConfig, NewlineDelimitedDecoder, NewlineDelimitedDecoderConfig,
     NewlineDelimitedDecoderOptions, OctetCountingDecoder, OctetCountingDecoderConfig,
-    OctetCountingDecoderOptions,
+    OctetCountingDecoderOptions, NetflowDecoderOptions, NetflowDecoder, NetflowDecoderConfig
 };
 use smallvec::SmallVec;
 use std::fmt::Debug;
@@ -90,6 +90,12 @@ pub enum FramingConfig {
     /// Byte frames which are delimited by a chosen character.
     CharacterDelimited(CharacterDelimitedDecoderConfig),
 
+    /// Byte frames for netflow.
+    Netflow {
+        /// Options for the netflow decoder.
+        netflow_decoder: NetflowDecoderOptions,
+    },
+
     /// Byte frames which are prefixed by an unsigned big-endian 32-bit integer indicating the length.
     LengthDelimited(LengthDelimitedDecoderConfig),
 
@@ -143,6 +149,14 @@ impl From<ChunkedGelfDecoderConfig> for FramingConfig {
     }
 }
 
+impl From<NetflowDecoderConfig> for FramingConfig {
+    fn from(config: NetflowDecoderConfig) -> Self {
+        Self::Netflow {
+            netflow_decoder: config.netflow_decoder_options,
+        }
+    }
+}
+
 impl FramingConfig {
     /// Build the `Framer` from this configuration.
     pub fn build(&self) -> Framer {
@@ -150,6 +164,12 @@ impl FramingConfig {
             FramingConfig::Bytes => Framer::Bytes(BytesDecoderConfig.build()),
             FramingConfig::CharacterDelimited(config) => Framer::CharacterDelimited(config.build()),
             FramingConfig::LengthDelimited(config) => Framer::LengthDelimited(config.build()),
+            FramingConfig::Netflow {
+                netflow_decoder
+              } => Framer::Netflow (NetflowDecoderConfig {
+                  netflow_decoder_options: netflow_decoder.clone(),
+              }.build(),
+              ),
             FramingConfig::NewlineDelimited(config) => Framer::NewlineDelimited(config.build()),
             FramingConfig::OctetCounting(config) => Framer::OctetCounting(config.build()),
             FramingConfig::ChunkedGelf(config) => Framer::ChunkedGelf(config.build()),
@@ -170,6 +190,8 @@ pub enum Framer {
     NewlineDelimited(NewlineDelimitedDecoder),
     /// Uses a `OctetCountingDecoder` for framing.
     OctetCounting(OctetCountingDecoder),
+    /// Uses a `NetflowDecoder` for framing.
+    Netflow(NetflowDecoder),
     /// Uses an opaque `Framer` implementation for framing.
     Boxed(BoxedFramer),
     /// Uses a `ChunkedGelfDecoder` for framing.
@@ -187,6 +209,7 @@ impl tokio_util::codec::Decoder for Framer {
             Framer::LengthDelimited(framer) => framer.decode(src),
             Framer::NewlineDelimited(framer) => framer.decode(src),
             Framer::OctetCounting(framer) => framer.decode(src),
+            Framer::Netflow(framer) => framer.decode(src),
             Framer::Boxed(framer) => framer.decode(src),
             Framer::ChunkedGelf(framer) => framer.decode(src),
         }
@@ -199,6 +222,7 @@ impl tokio_util::codec::Decoder for Framer {
             Framer::LengthDelimited(framer) => framer.decode_eof(src),
             Framer::NewlineDelimited(framer) => framer.decode_eof(src),
             Framer::OctetCounting(framer) => framer.decode_eof(src),
+            Framer::Netflow(framer) => framer.decode(src),
             Framer::Boxed(framer) => framer.decode_eof(src),
             Framer::ChunkedGelf(framer) => framer.decode_eof(src),
         }

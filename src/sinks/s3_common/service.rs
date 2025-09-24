@@ -8,7 +8,7 @@ use aws_smithy_types::byte_stream::ByteStream;
 use base64::prelude::{Engine as _, BASE64_STANDARD};
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use md5::Digest;
+use openssl::sha::sha256;
 use tower::Service;
 use tracing::Instrument;
 use vector_lib::event::{EventFinalizers, EventStatus, Finalizable};
@@ -109,7 +109,7 @@ impl Service<S3Request> for S3Service {
             .content_type
             .or_else(|| Some("text/x-log".to_owned()));
 
-        let content_md5 = BASE64_STANDARD.encode(md5::Md5::digest(&request.body));
+        let checksum_sha256 = BASE64_STANDARD.encode(sha256(&request.body));
 
         let tagging = options.tags.map(|tags| {
             let mut tagging = url::form_urlencoded::Serializer::new(String::new());
@@ -142,7 +142,7 @@ impl Service<S3Request> for S3Service {
                 .set_ssekms_key_id(options.ssekms_key_id)
                 .set_storage_class(Some(options.storage_class.into()))
                 .set_tagging(tagging)
-                .content_md5(content_md5);
+                .set_checksum_sha256(Some(checksum_sha256));
 
             let result = request.send().in_current_span().await;
 

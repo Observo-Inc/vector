@@ -1,16 +1,16 @@
+use std::{cmp::Ordering, mem};
 #[cfg(test)]
 use std::borrow::Borrow;
-
 use std::borrow::Cow;
-use std::collections::{hash_map::DefaultHasher, BTreeMap};
+use std::collections::{BTreeMap, hash_map::DefaultHasher};
 use std::fmt::Display;
 use std::hash::{Hash, Hasher};
-use std::{cmp::Ordering, mem};
 
 use indexmap::IndexSet;
-use serde::{ser::SerializeSeq, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, ser::SerializeSeq, Serialize, Serializer};
+
 use vector_common::byte_size_of::ByteSizeOf;
-use vector_config::{configurable_component, Configurable};
+use vector_config::{Configurable, configurable_component};
 
 /// A single tag value, either a bare tag or a value.
 #[derive(Clone, Configurable, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -507,6 +507,10 @@ impl MetricTags {
 
     pub fn get(&self, name: &str) -> Option<&str> {
         self.0.get(name).and_then(TagValueSet::as_single)
+    }
+
+    pub fn get_tag_set(&self, name: &str) -> Option<&TagValueSet> {
+        self.0.get(name)
     }
 
     /// Add a value to a tag. This does not replace any existing tags unless the value is a
