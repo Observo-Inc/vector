@@ -14,6 +14,10 @@ else
     export OPERATING_SYSTEM := $(shell uname)  # same as "uname -s"
     export RUST_TARGET ?= "x86_64-unknown-linux-gnu"
     export FEATURES ?= default
+	export EXCLUDE_WORKSPACES ?= --exclude sauth --exclude scol --exclude chkpts --exclude lv3 --exclude stcp --exclude obvrl
+	ifneq ($(findstring observo,$(FEATURES)),)
+		override EXCLUDE_WORKSPACES =
+	endif
     export DNSTAP_BENCHES := dnstap-benches
 endif
 
@@ -163,6 +167,9 @@ define ENVIRONMENT_PREPARE
 $(error "Please install a container tool such as Docker or Podman")
 endef
 endif
+define GET_LIB_PATH
+$(if $(findstring x86_64,$(1)),/usr/local/x86_64-linux-gnu/lib,$(if $(findstring aarch64,$(1)),/usr/local/aarch64-linux-gnu/lib,/usr/lib64))
+endef
 
 .PHONY: check-container-tool
 check-container-tool: ## Checks what container tool is installed
@@ -275,7 +282,7 @@ cross-%: cargo-install-cross
 		$(if $(findstring release,$(PROFILE)),--release,) \
 		--target ${TRIPLE} \
 		--no-default-features \
-		--features target-${TRIPLE}
+		--features target-${TRIPLE},${BUILD_FEATURES}
 
 target/%/vector: export PAIR =$(subst /, ,$(@:target/%/vector=%))
 target/%/vector: export TRIPLE ?=$(word 1,${PAIR})
@@ -287,7 +294,7 @@ target/%/vector: cargo-install-cross CARGO_HANDLES_FRESHNESS
 		$(if $(findstring release,$(PROFILE)),--release,) \
 		--target ${TRIPLE} \
 		--no-default-features \
-		--features target-${TRIPLE}
+		--features target-${TRIPLE},${BUILD_FEATURES}
 
 target/%/vector.tar.gz: export PAIR =$(subst /, ,$(@:target/%/vector.tar.gz=%))
 target/%/vector.tar.gz: export TRIPLE ?=$(word 1,${PAIR})
@@ -332,11 +339,11 @@ target/%/vector.tar.gz: target/%/vector CARGO_HANDLES_FRESHNESS
 # https://github.com/rust-lang/cargo/issues/6454
 .PHONY: test
 test: ## Run the unit test suite
-	${MAYBE_ENVIRONMENT_EXEC} cargo nextest run --workspace --no-fail-fast --no-default-features --features "${FEATURES}" ${SCOPE}
+	${MAYBE_ENVIRONMENT_EXEC} cargo nextest run --workspace ${EXCLUDE_WORKSPACES} --no-fail-fast --no-default-features --features "${FEATURES}" ${SCOPE}
 
 .PHONY: test-docs
 test-docs: ## Run the docs test suite
-	${MAYBE_ENVIRONMENT_EXEC} cargo test --doc --workspace --no-fail-fast --no-default-features --features "${FEATURES}" ${SCOPE}
+	${MAYBE_ENVIRONMENT_EXEC} cargo test --doc --workspace ${EXCLUDE_WORKSPACES} --no-fail-fast --no-default-features --features "${FEATURES}" ${SCOPE}
 
 .PHONY: test-all
 test-all: test test-docs test-behavior test-integration test-component-validation ## Runs all tests: unit, docs, behavioral, integration, and component validation.
@@ -700,3 +707,10 @@ cargo-install-%:
 .PHONY: ci-generate-publish-metadata
 ci-generate-publish-metadata: ## Generates the necessary metadata required for building/publishing Vector.
 	cargo vdev build publish-metadata
+
+.PHONY: test-lib-path
+test-lib-path:
+	@echo "x86_64-unknown-linux-gnu -> $(call GET_LIB_PATH,x86_64-unknown-linux-gnu)"
+	@echo "aarch64-unknown-linux-gnu -> $(call GET_LIB_PATH,aarch64-unknown-linux-gnu)"
+	@echo "armv7-unknown-linux-gnueabihf -> $(call GET_LIB_PATH,armv7-unknown-linux-gnueabihf)"
+	@echo "x86_64-unknown-linux-musl -> $(call GET_LIB_PATH,x86_64-unknown-linux-musl)"

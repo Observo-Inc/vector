@@ -204,7 +204,8 @@ impl GenerateConfig for LokiConfig {
 impl LokiConfig {
     pub(super) fn build_client(&self, cx: SinkContext) -> crate::Result<HttpClient> {
         let tls = TlsSettings::from_options(self.tls.as_ref())?;
-        let client = HttpClient::new(tls, cx.proxy())?;
+        let app_info = crate::app_info();
+        let client = HttpClient::new(tls, cx.proxy(), &app_info)?;
         Ok(client)
     }
 }

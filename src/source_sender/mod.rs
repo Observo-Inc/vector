@@ -23,11 +23,9 @@ use vector_lib::{
 };
 use vrl::value::Value;
 
-mod errors;
-
 use crate::config::{ComponentKey, OutputId};
 use crate::schema::Definition;
-pub use errors::{ClosedError, StreamSendError};
+pub use vector_lib::sender::{ClosedError, StreamSendError};
 
 pub(crate) const CHUNK_SIZE: usize = 1000;
 

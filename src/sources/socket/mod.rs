@@ -322,7 +322,7 @@ mod test {
         net::{SocketAddr, UdpSocket},
         sync::{
             atomic::{AtomicBool, Ordering},
-            Arc,
+            Arc, Mutex,
         },
         thread,
     };
@@ -988,17 +988,17 @@ mod test {
         };
 
         let server = SocketConfig::from(config)
-            .build(SourceContext {
-                key: source_key.clone(),
-                globals: GlobalOptions::default(),
-                shutdown: shutdown_signal,
-                out: sender,
-                proxy: Default::default(),
-                acknowledgements: false,
-                schema: Default::default(),
-                schema_definitions: HashMap::default(),
-                extra_context: Default::default(),
-            })
+            .build(SourceContext::new(
+                source_key.clone(),
+                GlobalOptions::default(),
+                shutdown_signal,
+                sender,
+                Default::default(),
+                false,
+                Default::default(),
+                HashMap::default(),
+                Default::default(),
+                Arc::new(Mutex::new(None))))
             .await
             .unwrap();
         let source_handle = tokio::spawn(server);

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::{future::ready, num::NonZeroUsize, panic, sync::Arc, sync::LazyLock};
-
+use std::time::Duration;
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::Client as S3Client;
 use aws_sdk_sqs::operation::delete_message_batch::{
@@ -49,6 +49,8 @@ use crate::{
 use vector_lib::config::{log_schema, LegacyKey, LogNamespace};
 use vector_lib::event::MaybeAsLogMut;
 use vector_lib::lookup::{metadata_path, path, PathPrefix};
+use crate::sinks::util::retries::ExponentialBackoff;
+use super::sqs_message_parsers;
 
 static SUPPORTED_S3_EVENT_VERSION: LazyLock<semver::VersionReq> =
     LazyLock::new(|| semver::VersionReq::parse("~2").unwrap());
@@ -147,6 +149,10 @@ pub(super) struct Config {
     #[serde(default)]
     #[serde(flatten)]
     pub(super) timeout: Option<AwsTimeout>,
+
+    #[configurable(derived)]
+    #[serde(default)]
+    pub message_format: SqsMessageFormat,
 }
 
 const fn default_poll_secs() -> u32 {
@@ -163,6 +169,21 @@ const fn default_max_number_of_messages() -> u32 {
 
 const fn default_true() -> bool {
     true
+}
+
+/// Format of messages received from SQS.
+/// Determines how the SQS message should be parsed.
+#[configurable_component]
+#[derive(Clone, Copy, Debug, Derivative, PartialEq)]
+#[derivative(Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SqsMessageFormat {
+    /// Standard AWS S3 event notifications.
+    #[derivative(Default)]
+    Default,
+
+    /// CrowdStrike event format.
+    Crowdstrike,
 }
 
 #[derive(Debug, Snafu)]
@@ -244,6 +265,7 @@ pub struct State {
     delete_message: bool,
     delete_failed_message: bool,
     decoder: Decoder,
+    pub message_format: SqsMessageFormat,
 }
 
 pub(super) struct Ingestor {
@@ -285,6 +307,7 @@ impl Ingestor {
             delete_message: config.delete_message,
             delete_failed_message: config.delete_failed_message,
             decoder,
+            message_format: config.message_format,
         });
 
         Ok(Ingestor { state })
@@ -335,6 +358,14 @@ pub struct IngestorProcess {
     events_received: Registered<EventsReceived>,
 }
 
+
+const fn fresh_backoff() -> ExponentialBackoff {
+    // TODO: make configurable
+    ExponentialBackoff::from_millis(2)
+        .factor(250)
+        .max_delay(Duration::from_secs(60))
+}
+
 impl IngestorProcess {
     pub fn new(
         state: Arc<State>,
@@ -358,28 +389,47 @@ impl IngestorProcess {
         let shutdown = self.shutdown.clone().fuse();
         pin!(shutdown);
 
+        let mut backoff = fresh_backoff();
         loop {
             select! {
-                _ = &mut shutdown => break,
-                _ = self.run_once() => {},
-            }
+            _ = &mut shutdown => break,
+            result = self.run_once() => {
+                match result {
+                    Ok(()) => {
+                        // Reset backoff on success
+                        backoff.reset();
+                    }
+                    Err(err) => {
+                        let delay= backoff.next().unwrap_or(Duration::from_secs(1));
+                        error!(
+                                message = "Error occurred when connecting to sqs. Retrying with backoff.",
+                                delay_ms = delay.as_millis(),
+                                error = &err.to_string());
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+            },
+        }
         }
     }
 
-    async fn run_once(&mut self) {
+    async fn run_once(&mut self) -> crate::Result<()> {
         let messages = self.receive_messages().await;
-        let messages = messages
-            .inspect(|messages| {
+        let messages = match messages {
+            Ok(messages) => {
                 emit!(SqsMessageReceiveSucceeded {
                     count: messages.len(),
                 });
-            })
-            .inspect_err(|err| {
-                emit!(SqsMessageReceiveError { error: err });
-            })
-            .unwrap_or_default();
+                messages
+            }
+            Err(err) => {
+                emit!(SqsMessageReceiveError { error: &err });
+                return Err(err.into());
+            }
+        };
 
         let mut delete_entries = Vec::new();
+
         for message in messages {
             let receipt_handle = match message.receipt_handle {
                 None => {
@@ -447,25 +497,39 @@ impl IngestorProcess {
                 Err(err) => {
                     emit!(SqsMessageDeleteBatchError {
                         entries: cloned_entries,
-                        error: err,
+                        error: &err,
                     });
+                    return Err(err.into());
                 }
             }
         }
+
+        Ok(())
     }
 
     async fn handle_sqs_message(&mut self, message: Message) -> Result<(), ProcessingError> {
+        match self.state.message_format {
+            SqsMessageFormat::Crowdstrike => {
+                let s3_event = sqs_message_parsers::parse_crowdstrike_sqs_message(message, self.state.region.as_ref())?;
+                self.handle_s3_event(s3_event).await
+            },
+            SqsMessageFormat::Default => self.handle_sqs_message_default(message).await,
+        }
+    }
+
+    // Process a standard AWS S3 SQS message
+    async fn handle_sqs_message_default(&mut self, message: Message) -> Result<(), ProcessingError> {
         let sqs_body = message.body.unwrap_or_default();
         let sqs_body = serde_json::from_str::<SnsNotification>(sqs_body.as_ref())
             .map(|notification| notification.message)
             .unwrap_or(sqs_body);
-        let s3_event: SqsEvent =
-            serde_json::from_str(sqs_body.as_ref()).context(InvalidSqsMessageSnafu {
-                message_id: message
-                    .message_id
-                    .clone()
-                    .unwrap_or_else(|| "<empty>".to_owned()),
-            })?;
+
+        let s3_event: SqsEvent = serde_json::from_str(sqs_body.as_ref()).context(InvalidSqsMessageSnafu {
+            message_id: message
+                .message_id
+                .clone()
+                .unwrap_or_else(|| "<empty>".to_owned()),
+        })?;
 
         match s3_event {
             SqsEvent::TestEvent(_s3_test_event) => {
@@ -531,10 +595,10 @@ impl IngestorProcess {
 
         let object = object_result?;
 
-        debug!(
+        info!(
             message = "Got S3 object from SQS notification.",
             bucket = s3_event.s3.bucket.name,
-            key = s3_event.s3.object.key,
+            key = s3_event.s3.object.key
         );
 
         let metadata = object.metadata;
@@ -662,7 +726,7 @@ impl IngestorProcess {
                     let result = receiver.await;
                     match result {
                         BatchStatus::Delivered => {
-                            debug!(
+                            info!(
                                 message = "S3 object from SQS delivered.",
                                 bucket = s3_event.s3.bucket.name,
                                 key = s3_event.s3.object.key,

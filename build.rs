@@ -107,6 +107,12 @@ fn git_short_hash() -> std::io::Result<String> {
 }
 
 fn main() {
+    let target_arch = env::var("TARGET").expect("TARGET not set by Cargo");
+    let host_arch = env::var("HOST").expect("HOST not set by Cargo");
+
+    println!("cargo:warning=Host architecture: {}", host_arch);
+    println!("cargo:warning=Target architecture: {}", target_arch);
+
     // Always rerun if the build script itself changes.
     println!("cargo:rerun-if-changed=build.rs");
 

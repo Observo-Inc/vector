@@ -39,7 +39,9 @@ pub mod sink;
 pub mod source;
 pub mod tcp;
 #[cfg(test)]
-mod test_util;
+pub mod test_util;
+#[cfg(any(test, feature = "test" ))]
+pub mod inet_test_util;
 pub mod time;
 pub mod tls;
 pub mod transform;
@@ -73,7 +75,7 @@ pub(crate) fn float_eq(l_value: f64, r_value: f64) -> bool {
 #[macro_export]
 macro_rules! emit {
     ($event:expr) => {
-        vector_lib::internal_event::emit(vector_lib::internal_event::DefaultName {
+        vector_common::internal_event::emit(vector_common::internal_event::DefaultName {
             event: $event,
             name: stringify!($event),
         })
@@ -84,7 +86,7 @@ macro_rules! emit {
 #[macro_export]
 macro_rules! emit {
     ($event:expr) => {
-        vector_lib::internal_event::emit($event)
+        vector_common::internal_event::emit($event)
     };
 }
 
@@ -92,7 +94,7 @@ macro_rules! emit {
 #[macro_export]
 macro_rules! register {
     ($event:expr) => {
-        vector_lib::internal_event::register(vector_lib::internal_event::DefaultName {
+        vector_common::internal_event::register(vector_common::internal_event::DefaultName {
             event: $event,
             name: stringify!($event),
         })
@@ -103,6 +105,15 @@ macro_rules! register {
 #[macro_export]
 macro_rules! register {
     ($event:expr) => {
-        vector_lib::internal_event::register($event)
+        vector_common::internal_event::register($event)
     };
 }
+
+
+pub mod http;
+pub use vector_common::internal_event;
+pub mod sender;
+pub mod chkpts;
+
+#[cfg(feature = "lua")]
+pub mod lua_err;

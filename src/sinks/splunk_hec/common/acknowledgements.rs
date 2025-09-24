@@ -302,7 +302,8 @@ mod tests {
     };
 
     fn get_ack_client(retry_limit: u8) -> HecAckClient {
-        let client = HttpClient::new(None, &ProxyConfig::default()).unwrap();
+        let app_info = crate::app_info();
+        let client = HttpClient::new(None, &ProxyConfig::default(), &app_info).unwrap();
         let http_request_builder = HttpRequestBuilder::new(
             String::from(""),
             EndpointTarget::default(),

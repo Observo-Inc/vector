@@ -56,6 +56,10 @@ pub mod kafka;
 pub mod kubernetes_logs;
 #[cfg(feature = "sources-logstash")]
 pub mod logstash;
+#[cfg(feature = "sources-scol")]
+pub mod scol;
+#[cfg(all(feature = "sources-stcp"))]
+pub mod stcp;
 #[cfg(feature = "sources-mongodb_metrics")]
 pub mod mongodb_metrics;
 #[cfg(feature = "sources-nats")]

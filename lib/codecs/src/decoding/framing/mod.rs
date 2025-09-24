@@ -9,6 +9,7 @@ mod chunked_gelf;
 mod length_delimited;
 mod newline_delimited;
 mod octet_counting;
+mod netflow;
 
 use std::{any::Any, fmt::Debug};
 
@@ -28,6 +29,11 @@ pub use octet_counting::{
 use tokio_util::codec::LinesCodecError;
 
 pub use self::bytes::{BytesDecoder, BytesDecoderConfig};
+
+pub use self::netflow::{
+    NetflowDecoder, NetflowDecoderConfig, NetflowDecoderOptions,
+};
+
 use super::StreamDecodingError;
 
 /// An error that occurred while producing byte frames from a byte stream / byte

@@ -98,6 +98,23 @@ pub struct ReduceConfig {
     /// If this condition resolves to `true` for an event, the previous transaction is flushed
     /// (without this event) and a new transaction is started.
     pub starts_when: Option<AnyCondition>,
+
+    /// A map of data type names to custom merge strategies.
+    ///
+    /// For each data type specified, the given strategy is used for combining events rather than
+    /// the default behavior.
+    ///
+    /// The default behavior is as follows:
+    ///
+    /// - The first value of a string field is kept and subsequent values are discarded.
+    /// - For timestamp fields the first is kept and a new field `[field-name]_end` is added with
+    ///   the last received timestamp value.
+    /// - Numeric values are summed.
+    #[serde(default)]
+    #[configurable(metadata(
+        docs::additional_props_description = "An individual data type merge strategy."
+    ))]
+    pub default_merge_strategies: Option<IndexMap<String, MergeStrategy>>,
 }
 
 const fn default_expire_after_ms() -> Duration {
@@ -167,6 +184,10 @@ impl TransformConfig for ReduceConfig {
                     let unknown_kind = input_kind.clone();
                     Kind::array(Collection::empty().with_unknown(unknown_kind))
                 }
+                MergeStrategy::ArraySquash => {
+                    let unknown_kind = input_kind.clone();
+                    Kind::array(Collection::empty().with_unknown(unknown_kind))
+                }
                 MergeStrategy::Concat => {
                     let mut new_kind = Kind::never();
 
@@ -184,6 +205,14 @@ impl TransformConfig for ReduceConfig {
                 MergeStrategy::ConcatNewline | MergeStrategy::ConcatRaw => {
                     // can only produce bytes (or undefined)
                     if input_kind.contains_bytes() {
+                        Kind::bytes()
+                    } else {
+                        Kind::undefined()
+                    }
+                }
+                MergeStrategy::ConcatSquashNewline => {
+                    // can only produce bytes (or undefined)
+                    if input_kind.contains_any_defined() {
                         Kind::bytes()
                     } else {
                         Kind::undefined()

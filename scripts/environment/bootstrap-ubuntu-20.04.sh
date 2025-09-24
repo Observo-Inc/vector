@@ -20,9 +20,12 @@ apt-get install --yes \
   apt-utils \
   apt-transport-https
 
+apt upgrade --yes
+
+snap install aws-cli --classic
+
 # Deps
 apt-get install --yes --no-install-recommends \
-    awscli \
     build-essential \
     ca-certificates \
     cmake \

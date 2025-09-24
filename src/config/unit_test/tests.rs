@@ -1232,7 +1232,7 @@ async fn test_task_transform() {
     .unwrap();
 
     let mut tests = build_unit_tests(config).await.unwrap();
-    assert!(tests.remove(0).run().await.errors.is_empty());
+    assert_eq!(tests.remove(0).run().await.errors, Vec::<String>::new());
     assert!(!tests.remove(0).run().await.errors.is_empty());
 }
 

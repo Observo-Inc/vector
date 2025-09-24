@@ -140,7 +140,8 @@ impl SinkConfig for RemoteWriteConfig {
         let quantiles = self.quantiles.clone();
         let default_namespace = self.default_namespace.clone();
 
-        let client = HttpClient::new(tls_settings, cx.proxy())?;
+        let app_info = crate::app_info();
+        let client = HttpClient::new(tls_settings, cx.proxy(), &app_info)?;
 
         let auth = match &self.auth {
             Some(PrometheusRemoteWriteAuth::Basic { user, password }) => {

@@ -1,13 +1,18 @@
-use std::io;
+use std::{io, sync::Arc};
 
 use bytes::BytesMut;
 use itertools::{Itertools, Position};
 use tokio_util::codec::Encoder as _;
 use vector_lib::codecs::encoding::Framer;
+use vector_lib::json_size::JsonSize;
 use vector_lib::request_metadata::GroupedCountByteSize;
 use vector_lib::{config::telemetry, EstimatedJsonEncodedSizeOf};
 
-use crate::{codecs::Transformer, event::Event, internal_events::EncoderWriteError};
+use crate::{
+    codecs::Transformer,
+    event::Event,
+    internal_events::{EncoderSerializeError, EncoderWriteError},
+};
 
 pub trait Encoder<T> {
     /// Encodes the input into the provided writer.
@@ -89,6 +94,45 @@ impl Encoder<Event> for (Transformer, crate::codecs::Encoder<()>) {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         write_all(writer, 1, &bytes)?;
         Ok((bytes.len(), byte_size))
+    }
+}
+
+impl<T, D: Encoder<T> + ?Sized> Encoder<T> for Arc<D> {
+    fn encode_input(&self, input: T, writer: &mut dyn io::Write) -> io::Result<(usize, GroupedCountByteSize)> {
+        (**self).encode_input(input, writer)
+    }
+}
+
+impl Encoder<Vec<Event>> for (Transformer, vector_lib::codecs::encoding::BatchSerializer) {
+    fn encode_input(
+        &self,
+        mut events: Vec<Event>,
+        writer: &mut dyn io::Write,
+    ) -> io::Result<(usize, GroupedCountByteSize)> {
+        let mut encoder = self.1.clone();
+        let n_events_pending = events.len();
+
+        for event in &mut events {
+            self.0.transform(event);
+        }
+
+        let mut bytes = BytesMut::new();
+        encoder.encode(events, &mut bytes).map_err(|error| {
+            let error: crate::Error = error.into();
+            emit!(EncoderSerializeError { error: &error });
+            io::Error::new(io::ErrorKind::InvalidData, error)
+        })?;
+
+        write_all(writer, n_events_pending, &bytes)?;
+        let num_bytes = bytes.len();
+
+        // TODO: https://observo.atlassian.net/browse/OB-5913
+        let mut grp_sz = GroupedCountByteSize::new_untagged();
+        grp_sz
+            .bulk_add(n_events_pending, JsonSize::new(num_bytes))
+            .expect("Couldn't bulk-add untagged-events");
+
+        Ok((num_bytes, grp_sz))
     }
 }
 

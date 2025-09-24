@@ -30,6 +30,7 @@ use vector_lib::{
     },
     schema::Definition,
     EstimatedJsonEncodedSizeOf,
+    chkpts::Store as CheckpointStore
 };
 
 use super::{
@@ -57,6 +58,9 @@ use crate::{
 
 static ENRICHMENT_TABLES: LazyLock<vector_lib::enrichment::TableRegistry> =
     LazyLock::new(vector_lib::enrichment::TableRegistry::default);
+
+static CHECKPT_STORE: LazyLock<Arc<Mutex<Option<Box<dyn CheckpointStore>>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(None::<Box<dyn CheckpointStore>>)));
 
 pub(crate) static SOURCE_SENDER_BUFFER_SIZE: LazyLock<usize> =
     LazyLock::new(|| *TRANSFORM_CONCURRENCY_LIMIT * CHUNK_SIZE);
@@ -111,7 +115,8 @@ impl<'a> Builder<'a> {
     /// Builds the new pieces of the topology found in `self.diff`.
     async fn build(mut self) -> Result<TopologyPieces, Vec<String>> {
         let enrichment_tables = self.load_enrichment_tables().await;
-        let source_tasks = self.build_sources().await;
+        let chkpt_store = self.load_checkpoint_store();
+        let source_tasks = self.build_sources(chkpt_store).await;
         self.build_transforms(enrichment_tables).await;
         self.build_sinks(enrichment_tables).await;
 
@@ -147,6 +152,38 @@ impl<'a> Builder<'a> {
         }
 
         finalized_outputs
+    }
+
+    fn load_checkpoint_store(&mut self) -> Arc<Mutex<Option<Box<dyn CheckpointStore>>>> {
+        let cfg = self.config.global.checkpoint.clone();
+        if let Ok(mut store) = CHECKPT_STORE.lock() {
+            if let Some(s) = store.as_mut() {
+                match cfg {
+                    Some(cfg) =>
+                        if let Err(e) = s.reload(cfg, self.config.global.data_dir.clone()) {
+                            self.errors.push(format!("Checkpoint Store: {}", e));
+                        },
+                    None => {
+                        warn!("Checkpoint store config has been dropped but unload is not supported. Restart process to unload (if necessary).");
+                    }
+                }
+            } else {
+                match cfg {
+                    Some(cfg) => {
+                        match cfg.build(self.config.global.data_dir.clone()) {
+                            Ok(s) => {
+                                *store = Some(s);
+                            },
+                            Err(error) => {
+                                self.errors.push(format!("Checkpoint Store: {}", error));
+                            }
+                        }
+                    }
+                    None => {}
+                }
+            }
+        }
+        CHECKPT_STORE.clone()
     }
 
     /// Loads, or reloads the enrichment tables.
@@ -203,7 +240,7 @@ impl<'a> Builder<'a> {
         &ENRICHMENT_TABLES
     }
 
-    async fn build_sources(&mut self) -> HashMap<ComponentKey, Task> {
+    async fn build_sources(&mut self, chkpt_store: Arc<Mutex<Option<Box<dyn CheckpointStore>>>>) -> HashMap<ComponentKey, Task> {
         let mut source_tasks = HashMap::new();
 
         for (key, source) in self
@@ -319,17 +356,17 @@ impl<'a> Builder<'a> {
                 .shutdown_coordinator
                 .register_source(key, INTERNAL_SOURCES.contains(&typetag));
 
-            let context = SourceContext {
-                key: key.clone(),
-                globals: self.config.global.clone(),
-                shutdown: shutdown_signal,
-                out: pipeline,
-                proxy: ProxyConfig::merge_with_env(&self.config.global.proxy, &source.proxy),
-                acknowledgements: source.sink_acknowledgements,
+            let context = SourceContext::new(
+                key.clone(),
+                self.config.global.clone(),
+                shutdown_signal,
+                pipeline,
+                ProxyConfig::merge_with_env(&self.config.global.proxy, &source.proxy),
+                source.sink_acknowledgements,
+                self.config.schema,
                 schema_definitions,
-                schema: self.config.schema,
-                extra_context: self.extra_context.clone(),
-            };
+                self.extra_context.clone(),
+                chkpt_store.clone());
             let source = source.inner.build(context).await;
             let server = match source {
                 Err(error) => {

@@ -79,7 +79,8 @@ impl ElasticsearchCommon {
         }
 
         let proxy = ProxyConfig::default();
-        let client = HttpClient::new(self.tls_settings.clone(), &proxy)
+        let app_info = crate::app_info();
+        let client = HttpClient::new(self.tls_settings.clone(), &proxy, &app_info)
             .expect("Could not build client to flush");
         let response = client.send(request.map(SdkBody::from)).await?;
 

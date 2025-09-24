@@ -44,6 +44,7 @@ pub use buffer::{
 };
 pub use builder::SinkBuilderExt;
 pub use compressor::Compressor;
+pub use compressor::Decompressor;
 pub use normalizer::Normalizer;
 pub use request_builder::{IncrementalRequestBuilder, RequestBuilder};
 pub use service::{

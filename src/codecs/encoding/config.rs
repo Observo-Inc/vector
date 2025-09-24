@@ -1,6 +1,6 @@
 use crate::codecs::Transformer;
 use vector_lib::codecs::{
-    encoding::{Framer, FramingConfig, Serializer, SerializerConfig},
+    encoding::{BatchSerializer, Framer, FramingConfig, Serializer, SerializerConfig},
     CharacterDelimitedEncoder, LengthDelimitedEncoder, NewlineDelimitedEncoder,
 };
 use vector_lib::configurable::configurable_component;
@@ -129,6 +129,13 @@ impl EncodingConfigWithFraming {
         };
 
         Ok((framer, serializer))
+    }
+
+    /// Build `BatchSerializer` for this config.
+    /// None if serializer is not batched.
+    pub fn build_batched(&self) -> crate::Result<Option<BatchSerializer>> {
+        let serializer = self.encoding.config().build_batched()?;
+        Ok(serializer)
     }
 }
 

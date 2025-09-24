@@ -36,11 +36,15 @@ pub mod conversion {
     pub use vrl::compiler::conversion::*;
 }
 
+pub mod chkpts;
+
 pub mod event_data_eq;
 pub use event_data_eq::EventDataEq;
 
 #[cfg(any(test, feature = "test"))]
 pub mod event_test_util;
+#[cfg(any(test, feature = "test"))]
+pub mod wait_utils;
 
 pub mod finalization;
 pub mod finalizer;
@@ -69,3 +73,22 @@ pub type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
 /// Vector's basic result type, defined in terms of [`Error`] and generic over
 /// `T`.
 pub type Result<T> = std::result::Result<T, Error>;
+
+// Name and version of the application.
+pub struct AppInfo {
+    pub name: &'static str,
+    pub version: String,
+}
+
+/// Returns the host name of the current system.
+/// The hostname can be overridden by setting the VECTOR_HOSTNAME environment variable.
+pub fn get_hostname() -> std::io::Result<String> {
+    Ok(if let Ok(hostname) = std::env::var("VECTOR_HOSTNAME") {
+        hostname.to_string()
+    } else {
+        hostname::get()?.to_string_lossy().into_owned()
+    })
+}
+
+
+pub mod net;

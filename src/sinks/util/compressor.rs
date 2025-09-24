@@ -1,9 +1,13 @@
-use std::{io, io::BufWriter};
+use std::{io, io::Read, io::BufWriter};
 
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, BytesMut, Bytes, Buf};
 use flate2::write::{GzEncoder, ZlibEncoder};
+use flate2::read::{GzDecoder, ZlibDecoder};
 
-use super::{snappy::SnappyEncoder, zstd::ZstdEncoder, Compression};
+use super::{
+    snappy::SnappyEncoder, snappy::SnappyDecoder,
+    zstd::ZstdEncoder, zstd::ZstdDecoder,
+    Compression};
 
 const GZIP_INPUT_BUFFER_CAPACITY: usize = 4_096;
 const ZLIB_INPUT_BUFFER_CAPACITY: usize = 4_096;
@@ -185,5 +189,116 @@ impl From<Compression> for Compressor {
             compression,
             inner: compression.into(),
         }
+    }
+}
+
+pub enum Decompressor {
+    Plain,
+    Gzip,
+    Zlib,
+    Zstd,
+    Snappy,
+}
+
+impl Decompressor {
+    pub fn decompress(&self, bytes: Bytes) -> io::Result<Bytes> {
+        match self {
+            Decompressor::Plain => Ok(bytes),
+            Decompressor::Gzip => {
+                let mut decoder = GzDecoder::new(std::io::Cursor::new(bytes));
+                let mut buff: Vec<u8> = Vec::with_capacity(OUTPUT_BUFFER_CAPACITY);
+                Read::read_to_end(&mut decoder, &mut buff)?;
+                Ok(buff.into())
+            },
+            Decompressor::Zlib => {
+                let mut decoder = ZlibDecoder::new(bytes.reader());
+                let mut buff: Vec<u8> = Vec::with_capacity(OUTPUT_BUFFER_CAPACITY);
+                Read::read_to_end(&mut decoder, &mut buff)?;
+                Ok(buff.into())
+            },
+            Decompressor::Zstd => {
+                let mut decoder = ZstdDecoder::new(bytes.reader())?;
+                let mut buff: Vec<u8> = Vec::with_capacity(OUTPUT_BUFFER_CAPACITY);
+                Read::read_to_end(&mut decoder, &mut buff)?;
+                Ok(buff.into())
+            },
+            Decompressor::Snappy => {
+                let mut decoder = SnappyDecoder::new(bytes.reader());
+                let mut buff: Vec<u8> = Vec::with_capacity(OUTPUT_BUFFER_CAPACITY);
+                Read::read_to_end(&mut decoder, &mut buff)?;
+                Ok(buff.into())
+            },
+        }
+    }
+}
+
+impl From<Compression> for Decompressor {
+    fn from(compression: Compression) -> Self {
+        match compression {
+            Compression::None => Decompressor::Plain,
+            Compression::Gzip(_) => Decompressor::Gzip,
+            Compression::Zlib(_) => Decompressor::Zlib,
+            Compression::Zstd(_) => Decompressor::Zstd,
+            Compression::Snappy => Decompressor::Snappy,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use crate::sinks::util::buffer::compression::CompressionLevel;
+
+    use super::{Compression, Compressor, Decompressor};
+
+    fn big_str() -> Vec<u8> {
+        let mut data = Vec::new();
+        for i in 0..20 {
+            data.extend_from_slice(format!("Hello, world! {}", i).as_bytes());
+        }
+        data
+    }
+
+    fn run_test(c: Compression, eq: bool) {
+        let data = big_str();
+        let mut writer = Compressor::from(c);
+        writer.write_all(&data).unwrap();
+        writer.flush().unwrap();
+        let compressed_data = writer.into_inner().freeze();
+        if eq {
+            assert_eq!(compressed_data.len(), data.len());
+        } else {
+            assert!(compressed_data.len() < data.len());
+            assert_ne!(data, &compressed_data[..]);
+        }
+        let decompressor = Decompressor::from(c);
+        let decompressed_data = decompressor.decompress(compressed_data).unwrap();
+        assert_eq!(data, &decompressed_data[..]);
+    }
+
+    #[test]
+    fn test_plain_compress_and_decompress() {
+        run_test(Compression::None, true);
+    }
+
+    #[test]
+    fn test_gz_compress_and_decompress() {
+        run_test(Compression::Gzip(CompressionLevel::Default), false);
+    }
+
+    #[test]
+    fn test_zlib_compress_and_decompress() {
+        run_test(Compression::Zlib(CompressionLevel::Default), false);
+    }
+
+    #[test]
+    fn test_zstd_compress_and_decompress() {
+        run_test(Compression::Zstd(CompressionLevel::Default), false);
+    }
+
+    #[test]
+    fn test_snappy_compress_and_decompress() {
+        run_test(Compression::Snappy, false);
     }
 }

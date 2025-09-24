@@ -140,7 +140,8 @@ impl SinkConfig for NewRelicConfig {
 
         let request_limits = self.request.into_settings();
         let tls_settings = TlsSettings::from_options(None)?;
-        let client = HttpClient::new(tls_settings, &cx.proxy)?;
+        let app_info = crate::app_info();
+        let client = HttpClient::new(tls_settings, &cx.proxy, &app_info)?;
         let credentials = Arc::from(NewRelicCredentials::from(self));
 
         let healthcheck = self.build_healthcheck(client.clone(), Arc::clone(&credentials))?;

@@ -922,7 +922,11 @@ mod integration_tests {
             token: TOKEN.to_string().into(),
         });
         let proxy = ProxyConfig::default();
-        let client = HttpClient::new(None, &proxy).unwrap();
+        let app_info = crate::http::AppInfo {
+            name: "vector-integration-tests".to_string(),
+            version: "0.1.0".to_string(),
+        };
+        let client = HttpClient::new(None, &proxy, &app_info).unwrap();
 
         healthcheck(endpoint, influxdb1_settings, influxdb2_settings, client)
             .unwrap()
@@ -943,7 +947,11 @@ mod integration_tests {
             token: TOKEN.to_string().into(),
         });
         let proxy = ProxyConfig::default();
-        let client = HttpClient::new(None, &proxy).unwrap();
+        let app_info = crate::http::AppInfo {
+            name: "vector-integration-tests".to_string(),
+            version: "0.1.0".to_string(),
+        };
+        let client = HttpClient::new(None, &proxy, &app_info).unwrap();
 
         healthcheck(endpoint, influxdb1_settings, influxdb2_settings, client)
             .unwrap()
@@ -964,7 +972,11 @@ mod integration_tests {
         });
         let influxdb2_settings = None;
         let proxy = ProxyConfig::default();
-        let client = HttpClient::new(None, &proxy).unwrap();
+        let app_info = crate::http::AppInfo {
+            name: "vector-integration-tests".to_string(),
+            version: "0.1.0".to_string(),
+        };
+        let client = HttpClient::new(None, &proxy, &app_info).unwrap();
 
         healthcheck(endpoint, influxdb1_settings, influxdb2_settings, client)
             .unwrap()
@@ -985,7 +997,11 @@ mod integration_tests {
         });
         let influxdb2_settings = None;
         let proxy = ProxyConfig::default();
-        let client = HttpClient::new(None, &proxy).unwrap();
+        let app_info = crate::http::AppInfo {
+            name: "vector-integration-tests".to_string(),
+            version: "0.1.0".to_string(),
+        };
+        let client = HttpClient::new(None, &proxy, &app_info).unwrap();
 
         healthcheck(endpoint, influxdb1_settings, influxdb2_settings, client)
             .unwrap()

@@ -53,7 +53,12 @@ impl ReduceState {
         }
     }
 
-    fn add_event(&mut self, e: LogEvent, strategies: &IndexMap<OwnedTargetPath, MergeStrategy>) {
+    fn add_event(
+        &mut self,
+        e: LogEvent,
+        strategies: &IndexMap<OwnedTargetPath, MergeStrategy>,
+        default_strategies: &IndexMap<String, MergeStrategy>,
+    ) {
         self.metadata.merge(e.metadata().clone());
 
         for (path, strategy) in strategies {
@@ -86,6 +91,9 @@ impl ReduceState {
                         continue;
                     }
                 };
+
+                let type_strategy = default_strategies.get(value.kind_str());
+
                 if is_covered_by_strategy(&parsed_path, strategies) {
                     continue;
                 }
@@ -103,7 +111,18 @@ impl ReduceState {
                                 }
                             }
                         } else {
-                            entry.insert(value.clone().into());
+                            if let Some(strat) = type_strategy {
+                                match get_value_merger(value.clone(), strat) {
+                                    Ok(m) => {
+                                        entry.insert(m);
+                                    }
+                                    Err(error) => {
+                                        warn!(message = "Failed to merge value.", %error);
+                                    }
+                                }
+                            } else {
+                                entry.insert(value.clone().into());
+                            }
                         }
                     }
                     Entry::Occupied(mut entry) => {
@@ -139,6 +158,7 @@ pub struct Reduce {
     end_every_period: Option<Duration>,
     group_by: Vec<String>,
     merge_strategies: IndexMap<OwnedTargetPath, MergeStrategy>,
+    default_merge_strategies: IndexMap<String, MergeStrategy>,
     reduce_merge_states: HashMap<Discriminant, ReduceState>,
     ends_when: Option<Condition>,
     starts_when: Option<Condition>,
@@ -207,6 +227,10 @@ impl Reduce {
                     parsed_path.map(|path| (path, strategy.clone()))
                 })
                 .collect(),
+            default_merge_strategies: config
+                .default_merge_strategies
+                .clone()
+                .unwrap_or(IndexMap::new()),
             reduce_merge_states: HashMap::new(),
             ends_when,
             starts_when,
@@ -246,11 +270,11 @@ impl Reduce {
         match self.reduce_merge_states.entry(discriminant) {
             hash_map::Entry::Vacant(entry) => {
                 let mut state = ReduceState::new();
-                state.add_event(event, &self.merge_strategies);
+                state.add_event(event, &self.merge_strategies, &self.default_merge_strategies);
                 entry.insert(state);
             }
             hash_map::Entry::Occupied(mut entry) => {
-                entry.get_mut().add_event(event, &self.merge_strategies);
+                entry.get_mut().add_event(event, &self.merge_strategies, &self.default_merge_strategies);
             }
         };
     }
@@ -289,12 +313,12 @@ impl Reduce {
         } else if ends_here {
             emitter.emit(match self.reduce_merge_states.remove(&discriminant) {
                 Some(mut state) => {
-                    state.add_event(event, &self.merge_strategies);
+                    state.add_event(event, &self.merge_strategies, &self.default_merge_strategies);
                     state.flush().into()
                 }
                 None => {
                     let mut state = ReduceState::new();
-                    state.add_event(event, &self.merge_strategies);
+                    state.add_event(event, &self.merge_strategies, &self.default_merge_strategies);
                     state.flush().into()
                 }
             });
@@ -354,6 +378,22 @@ mod test {
 
     use super::*;
 
+    fn expected_schema(
+        cfg: &ReduceConfig,
+    ) -> Arc<Definition> {
+        Arc::new(
+            cfg
+                .outputs(
+                TableRegistry::default(),
+                &[(OutputId::from("in"), Definition::default_legacy_namespace())],
+                LogNamespace::Legacy)[0]
+                .clone()
+                .log_schema_definitions
+                .get(&OutputId::from("in"))
+                .unwrap()
+                .clone())
+    }
+
     #[tokio::test]
     async fn reduce_from_condition() {
         let reduce_config = toml::from_str::<ReduceConfig>(
@@ -392,16 +432,7 @@ group_by = [ "request_id" ]
                 .schema_definitions(true)
                 .clone();
 
-            let new_schema_definition = reduce_config.outputs(
-                TableRegistry::default(),
-                &[(OutputId::from("in"), Definition::default_legacy_namespace())],
-                LogNamespace::Legacy,
-            )[0]
-            .clone()
-            .log_schema_definitions
-            .get(&OutputId::from("in"))
-            .unwrap()
-            .clone();
+            let new_schema_definition = expected_schema(&reduce_config);
 
             let (tx, rx) = mpsc::channel(1);
             let (topology, mut out) = create_topology(ReceiverStream::new(rx), reduce_config).await;
@@ -411,14 +442,14 @@ group_by = [ "request_id" ]
             e_1.insert("request_id", "1");
             let mut metadata_1 = e_1.metadata().clone();
             metadata_1.set_upstream_id(Arc::new(OutputId::from("transform")));
-            metadata_1.set_schema_definition(&Arc::new(new_schema_definition.clone()));
+            metadata_1.set_schema_definition(&new_schema_definition);
 
             let mut e_2 = LogEvent::from("test message 2");
             e_2.insert("counter", 2);
             e_2.insert("request_id", "2");
             let mut metadata_2 = e_2.metadata().clone();
             metadata_2.set_upstream_id(Arc::new(OutputId::from("transform")));
-            metadata_2.set_schema_definition(&Arc::new(new_schema_definition.clone()));
+            metadata_2.set_schema_definition(&new_schema_definition);
 
             let mut e_3 = LogEvent::from("test message 3");
             e_3.insert("counter", 3);
@@ -483,16 +514,7 @@ merge_strategies.baz = "max"
         assert_transform_compliance(async move {
             let (tx, rx) = mpsc::channel(1);
 
-            let new_schema_definition = reduce_config.outputs(
-                TableRegistry::default(),
-                &[(OutputId::from("in"), Definition::default_legacy_namespace())],
-                LogNamespace::Legacy,
-            )[0]
-            .clone()
-            .log_schema_definitions
-            .get(&OutputId::from("in"))
-            .unwrap()
-            .clone();
+            let new_schema_definition = expected_schema(&reduce_config);
 
             let (topology, mut out) = create_topology(ReceiverStream::new(rx), reduce_config).await;
 
@@ -503,7 +525,7 @@ merge_strategies.baz = "max"
             e_1.insert("request_id", "1");
             let mut metadata = e_1.metadata().clone();
             metadata.set_upstream_id(Arc::new(OutputId::from("transform")));
-            metadata.set_schema_definition(&Arc::new(new_schema_definition.clone()));
+            metadata.set_schema_definition(&new_schema_definition);
             tx.send(e_1.into()).await.unwrap();
 
             let mut e_2 = LogEvent::from("test message 2");
@@ -539,6 +561,226 @@ merge_strategies.baz = "max"
     }
 
     #[tokio::test]
+    async fn reduce_merge_default_strategies() {
+        let reduce_config = toml::from_str::<ReduceConfig>(
+            r#"
+group_by = [ "request_id" ]
+
+merge_strategies.foo = "concat"
+merge_strategies.bar = "array"
+merge_strategies.baz = "max"
+
+default_merge_strategies.string = "concat_squash_newline"
+default_merge_strategies.integer = "array"
+
+[ends_when]
+  type = "vrl"
+  source = "exists(.test_end)"
+"#,
+        )
+            .unwrap();
+
+        assert_transform_compliance(async move {
+            let (tx, rx) = mpsc::channel(1);
+
+            let new_schema_definition = expected_schema(&reduce_config);
+
+            let (topology, mut out) = create_topology(ReceiverStream::new(rx), reduce_config).await;
+
+            let mut e_1 = LogEvent::from("test message 1");
+            e_1.insert("foo", "first foo");
+            e_1.insert("bar", "first bar");
+            e_1.insert("foobar", "foobar");
+            e_1.insert("baz", 2);
+            e_1.insert("numbaz", 2);
+            e_1.insert("request_id", "1");
+            let mut metadata = e_1.metadata().clone();
+            metadata.set_upstream_id(Arc::new(OutputId::from("transform")));
+            metadata.set_schema_definition(&new_schema_definition);
+            tx.send(e_1.into()).await.unwrap();
+
+            let mut e_2 = LogEvent::from("test message 2");
+            e_2.insert("foo", "second foo");
+            e_2.insert("bar", 2);
+            e_2.insert("foobar", "foobar");
+            e_2.insert("baz", "not number");
+            e_2.insert("numbaz", 3);
+            e_2.insert("request_id", "1");
+            tx.send(e_2.into()).await.unwrap();
+
+            let mut e_3 = LogEvent::from("test message 3");
+            e_3.insert("foo", 10);
+            e_3.insert("bar", "third bar");
+            e_3.insert("foobar", "foobar");
+            e_3.insert("baz", 3);
+            e_3.insert("numbaz", 4);
+            e_3.insert("request_id", "1");
+            e_3.insert("test_end", "yep");
+            tx.send(e_3.into()).await.unwrap();
+
+            let output_1 = out.recv().await.unwrap().into_log();
+            assert_eq!(output_1["message"], "test message 1\ntest message 2\ntest message 3".into());
+            assert_eq!(output_1["foo"], "first foo second foo".into());
+            assert_eq!(
+                output_1["bar"],
+                Value::Array(vec!["first bar".into(), 2.into(), "third bar".into()]),
+            );
+            assert_eq!(output_1["foobar"], "foobar".into());
+            assert_eq!(
+                output_1["numbaz"],
+                Value::Array(vec![2.into(), 3.into(), 4.into()]),
+            );
+            assert_eq!(output_1["baz"], 3.into());
+            assert_eq!(output_1.metadata(), &metadata);
+
+            drop(tx);
+            topology.stop().await;
+            assert_eq!(out.recv().await, None);
+        })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn reduce_merge_strategies_concat_squash() {
+        let reduce_config = toml::from_str::<ReduceConfig>(
+            r#"
+group_by = [ "request_id" ]
+
+merge_strategies.foo = "concat_squash_newline"
+merge_strategies.bar = "array"
+merge_strategies.baz = "max"
+merge_strategies.foobar = "concat_squash_newline"
+
+[ends_when]
+  type = "vrl"
+  source = "exists(.test_end)"
+"#,
+        )
+        .unwrap();
+
+        assert_transform_compliance(async move {
+            let (tx, rx) = mpsc::channel(1);
+            let new_schema_definition = expected_schema(&reduce_config);
+            let (topology, mut out) = create_topology(ReceiverStream::new(rx), reduce_config).await;
+
+            let mut e_1 = LogEvent::from("test message 1");
+            e_1.insert("foo", "first foo");
+            e_1.insert("bar", "first bar");
+            e_1.insert("foobar", "foobar");
+            e_1.insert("baz", 2);
+            e_1.insert("request_id", "1");
+            let mut metadata = e_1.metadata().clone();
+            metadata.set_upstream_id(Arc::new(OutputId::from("transform")));
+            metadata.set_schema_definition(&new_schema_definition);
+            tx.send(e_1.into()).await.unwrap();
+
+            let mut e_2 = LogEvent::from("test message 2");
+            e_2.insert("foo", "second foo");
+            e_2.insert("bar", 2);
+            e_2.insert("foobar", "foobar");
+            e_2.insert("baz", "not number");
+            e_2.insert("request_id", "1");
+            tx.send(e_2.into()).await.unwrap();
+
+            let mut e_3 = LogEvent::from("test message 3");
+            e_3.insert("foo", 10);
+            e_3.insert("bar", "third bar");
+            e_3.insert("foobar", "foobar");
+            e_3.insert("baz", 3);
+            e_3.insert("request_id", "1");
+            e_3.insert("test_end", "yep");
+            tx.send(e_3.into()).await.unwrap();
+
+            let output_1 = out.recv().await.unwrap().into_log();
+            assert_eq!(output_1["message"], "test message 1".into());
+            assert_eq!(output_1["foo"], "first foo\nsecond foo\n10".into());
+            assert_eq!(output_1["foobar"], "foobar".into());
+            assert_eq!(
+                output_1["bar"],
+                Value::Array(vec!["first bar".into(), 2.into(), "third bar".into()]),
+            );
+            assert_eq!(output_1["baz"], 3.into());
+            assert_eq!(output_1.metadata(), &metadata);
+
+            drop(tx);
+            topology.stop().await;
+            assert_eq!(out.recv().await, None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn reduce_merge_strategies_array_squash() {
+        let reduce_config = toml::from_str::<ReduceConfig>(
+            r#"
+group_by = [ "request_id" ]
+
+merge_strategies.foo = "array_squash"
+merge_strategies.bar = "array"
+merge_strategies.baz = "max"
+merge_strategies.foobar = "array_squash"
+
+[ends_when]
+  type = "vrl"
+  source = "exists(.test_end)"
+"#,
+        )
+            .unwrap();
+
+        assert_transform_compliance(async move {
+            let (tx, rx) = mpsc::channel(1);
+            let new_schema_definition = expected_schema(&reduce_config);
+            let (topology, mut out) = create_topology(ReceiverStream::new(rx), reduce_config).await;
+
+            let mut e_1 = LogEvent::from("test message 1");
+            e_1.insert("foo", "first foo");
+            e_1.insert("bar", "first bar");
+            e_1.insert("foobar", "foobar");
+            e_1.insert("baz", 2);
+            e_1.insert("request_id", "1");
+            let mut metadata = e_1.metadata().clone();
+            metadata.set_upstream_id(Arc::new(OutputId::from("transform")));
+            metadata.set_schema_definition(&new_schema_definition);
+            tx.send(e_1.into()).await.unwrap();
+
+            let mut e_2 = LogEvent::from("test message 2");
+            e_2.insert("foo", "second foo");
+            e_2.insert("bar", 2);
+            e_2.insert("foobar", "foobar");
+            e_2.insert("baz", "not number");
+            e_2.insert("request_id", "1");
+            tx.send(e_2.into()).await.unwrap();
+
+            let mut e_3 = LogEvent::from("test message 3");
+            e_3.insert("foo", 10);
+            e_3.insert("bar", "third bar");
+            e_3.insert("foobar", "foobar");
+            e_3.insert("baz", 3);
+            e_3.insert("request_id", "1");
+            e_3.insert("test_end", "yep");
+            tx.send(e_3.into()).await.unwrap();
+
+            let output_1 = out.recv().await.unwrap().into_log();
+            assert_eq!(output_1["message"], "test message 1".into());
+            assert_eq!(output_1["foo"],
+                       Value::Array(vec!["first foo".into(), "second foo".into(), 10.into()])
+            );
+            assert_eq!(output_1["foobar"], Value::Array(vec!["foobar".into()]));
+            assert_eq!(
+                output_1["bar"],
+                Value::Array(vec!["first bar".into(), 2.into(), "third bar".into()]),
+            );
+            assert_eq!(output_1["baz"], 3.into());
+            assert_eq!(output_1.metadata(), &metadata);
+
+            drop(tx);
+            topology.stop().await;
+            assert_eq!(out.recv().await, None);
+        })
+            .await;
+    }
+
+    #[tokio::test]
     async fn missing_group_by() {
         let reduce_config = toml::from_str::<ReduceConfig>(
             r#"
@@ -553,16 +795,7 @@ group_by = [ "request_id" ]
 
         assert_transform_compliance(async move {
             let (tx, rx) = mpsc::channel(1);
-            let new_schema_definition = reduce_config.outputs(
-                TableRegistry::default(),
-                &[(OutputId::from("in"), Definition::default_legacy_namespace())],
-                LogNamespace::Legacy,
-            )[0]
-            .clone()
-            .log_schema_definitions
-            .get(&OutputId::from("in"))
-            .unwrap()
-            .clone();
+            let new_schema_definition = expected_schema(&reduce_config);
 
             let (topology, mut out) = create_topology(ReceiverStream::new(rx), reduce_config).await;
 
@@ -571,14 +804,14 @@ group_by = [ "request_id" ]
             e_1.insert("request_id", "1");
             let mut metadata_1 = e_1.metadata().clone();
             metadata_1.set_upstream_id(Arc::new(OutputId::from("transform")));
-            metadata_1.set_schema_definition(&Arc::new(new_schema_definition.clone()));
+            metadata_1.set_schema_definition(&new_schema_definition);
             tx.send(e_1.into()).await.unwrap();
 
             let mut e_2 = LogEvent::from("test message 2");
             e_2.insert("counter", 2);
             let mut metadata_2 = e_2.metadata().clone();
             metadata_2.set_upstream_id(Arc::new(OutputId::from("transform")));
-            metadata_2.set_schema_definition(&Arc::new(new_schema_definition));
+            metadata_2.set_schema_definition(&new_schema_definition);
             tx.send(e_2.into()).await.unwrap();
 
             let mut e_3 = LogEvent::from("test message 3");
@@ -761,16 +994,7 @@ merge_strategies.bar = "concat"
         assert_transform_compliance(async move {
             let (tx, rx) = mpsc::channel(1);
 
-            let new_schema_definition = reduce_config.outputs(
-                TableRegistry::default(),
-                &[(OutputId::from("in"), Definition::default_legacy_namespace())],
-                LogNamespace::Legacy,
-            )[0]
-            .clone()
-            .log_schema_definitions
-            .get(&OutputId::from("in"))
-            .unwrap()
-            .clone();
+            let new_schema_definition = expected_schema(&reduce_config);
 
             let (topology, mut out) = create_topology(ReceiverStream::new(rx), reduce_config).await;
 
@@ -780,7 +1004,7 @@ merge_strategies.bar = "concat"
             e_1.insert("request_id", "1");
             let mut metadata_1 = e_1.metadata().clone();
             metadata_1.set_upstream_id(Arc::new(OutputId::from("transform")));
-            metadata_1.set_schema_definition(&Arc::new(new_schema_definition.clone()));
+            metadata_1.set_schema_definition(&new_schema_definition);
 
             tx.send(e_1.into()).await.unwrap();
 
@@ -790,7 +1014,7 @@ merge_strategies.bar = "concat"
             e_2.insert("request_id", "2");
             let mut metadata_2 = e_2.metadata().clone();
             metadata_2.set_upstream_id(Arc::new(OutputId::from("transform")));
-            metadata_2.set_schema_definition(&Arc::new(new_schema_definition));
+            metadata_2.set_schema_definition(&new_schema_definition);
             tx.send(e_2.into()).await.unwrap();
 
             let mut e_3 = LogEvent::from("test message 3");

@@ -1,0 +1,200 @@
+name: Publish
+
+on:
+  workflow_call:
+    inputs:
+      git_ref:
+        type: string
+        required: true
+        # channel is the dir/namespace packages are organized into.
+        # Options are release/nightly/custom.
+      channel:
+        type: string
+        required: true
+
+env:
+  VERBOSE: true
+  CI: true
+  DISABLE_MOLD: true
+  DEBIAN_FRONTEND: noninteractive
+  CONTAINER_TOOL: docker
+  CARGO_PROFILE_RELEASE_LTO: fat
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 1
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
+  CHANNEL: ${{ inputs.channel }}
+  GH_ACCESS_TOKEN: ${{ secrets.C3PO_ACCESS_TOKEN }}
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  generate-publish-metadata:
+    runs-on: ubuntu-latest
+    name: Generate Publish-related Metadata
+    outputs:
+      vector_version: ${{ steps.generate-publish-metadata.outputs.vector_version }}
+      vector_build_desc: ${{ steps.generate-publish-metadata.outputs.vector_build_desc }}
+      vector_release_channel: ${{ steps.generate-publish-metadata.outputs.vector_release_channel }}
+    steps:
+      - name: Checkout Vector
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ inputs.git_ref }}
+      - name: update git
+        run: |
+          git config --global user.name "c3po007"
+          git config --global user.email "obserbot007@gmail.com"
+          git config --global url."https://c3po007:${GH_ACCESS_TOKEN}@github.com/Observo-Inc/dataplane-private.git".insteadOf "git@github.com:Observo-Inc/dataplane-private.git"
+          git submodule update --init --recursive
+      - name: Generate publish metadata
+        id: generate-publish-metadata
+        run: make ci-generate-publish-metadata
+
+  build-x86_64-unknown-linux-gnu-packages:
+    name: Build Vector for x86_64-unknown-linux-gnu (.tar.gz, DEB, RPM)
+    runs-on: ubuntu-latest-8-cores
+    needs: generate-publish-metadata
+    env:
+      VECTOR_VERSION: ${{ needs.generate-publish-metadata.outputs.vector_version }}
+      VECTOR_BUILD_DESC: ${{ needs.generate-publish-metadata.outputs.vector_build_desc }}
+      CHANNEL: ${{ needs.generate-publish-metadata.outputs.vector_release_channel }}
+    steps:
+      - name: Checkout Vector
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ inputs.git_ref }}
+      - name: update git
+        run: |
+          git config --global user.name "c3po007"
+          git config --global user.email "obserbot007@gmail.com"
+          git config --global url."https://c3po007:${GH_ACCESS_TOKEN}@github.com/Observo-Inc/dataplane-private.git".insteadOf "git@github.com:Observo-Inc/dataplane-private.git"
+          git submodule update --init --recursive
+      - name: Bootstrap runner environment (generic)
+        run: bash scripts/environment/observo-prepare.sh
+      - name: Build Vector
+        run: make package-x86_64-unknown-linux-gnu BUILD_FEATURES=observo
+      - name: Stage package artifacts for publish
+        uses: actions/upload-artifact@v4
+        with:
+          name: vector-${{ env.VECTOR_VERSION }}-x86_64-unknown-linux-gnu
+          path: target/artifacts/vector*
+
+  build-aarch64-unknown-linux-gnu-packages:
+    name: Build Vector for aarch64-unknown-linux-gnu (.tar.gz)
+    runs-on: ubuntu-latest-8-cores
+    needs: generate-publish-metadata
+    env:
+      VECTOR_VERSION: ${{ needs.generate-publish-metadata.outputs.vector_version }}
+      VECTOR_BUILD_DESC: ${{ needs.generate-publish-metadata.outputs.vector_build_desc }}
+      CHANNEL: ${{ needs.generate-publish-metadata.outputs.vector_release_channel }}
+    steps:
+      - name: Checkout Vector
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ inputs.git_ref }}
+      - name: update git
+        run: |
+          git config --global user.name "c3po007"
+          git config --global user.email "obserbot007@gmail.com"
+          git config --global url."https://c3po007:${GH_ACCESS_TOKEN}@github.com/Observo-Inc/dataplane-private.git".insteadOf "git@github.com:Observo-Inc/dataplane-private.git"
+          git submodule update --init --recursive
+      - name: Bootstrap runner environment (generic)
+        run: bash scripts/environment/observo-prepare.sh
+      - name: Build Vector
+        env:
+          DOCKER_PRIVILEGED: "true"
+        run: make package-aarch64-unknown-linux-gnu BUILD_FEATURES=observo
+      - name: Stage package artifacts for publish
+        uses: actions/upload-artifact@v4
+        with:
+          name: vector-${{ env.VECTOR_VERSION }}-aarch64-unknown-linux-gnu
+          path: target/artifacts/vector*
+  publish-docker:
+    name: Publish to Docker
+    runs-on: ubuntu-latest
+    needs:
+      - generate-publish-metadata
+      - build-aarch64-unknown-linux-gnu-packages
+      - build-x86_64-unknown-linux-gnu-packages
+    env:
+      VECTOR_VERSION: ${{ needs.generate-publish-metadata.outputs.vector_version }}
+      VECTOR_BUILD_DESC: ${{ needs.generate-publish-metadata.outputs.vector_build_desc }}
+      CHANNEL: ${{ needs.generate-publish-metadata.outputs.vector_release_channel }}
+      REPO: ${{ secrets.AWS_ACCOUNT_ID_ECR }}.dkr.ecr.us-east-1.amazonaws.com/vector
+    steps:
+      - name: Checkout Vector
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ inputs.git_ref }}
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v2.9.1
+        with:
+          version: latest
+          install: true
+      - name: Download staged package artifacts (aarch64-unknown-linux-gnu)
+        uses: actions/download-artifact@v4
+        with:
+          name: vector-${{ env.VECTOR_VERSION }}-aarch64-unknown-linux-gnu
+          path: target/artifacts
+      - name: Download staged package artifacts (x86_64-unknown-linux-gnu)
+        uses: actions/download-artifact@v4
+        with:
+          name: vector-${{ env.VECTOR_VERSION }}-x86_64-unknown-linux-gnu
+          path: target/artifacts
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+      - name: Docker Login # aws credentials required to be present as env
+        run: |
+          docker login -u AWS -p $(aws ecr get-login-password --region us-east-1) ${{ secrets.AWS_ACCOUNT_ID_ECR }}.dkr.ecr.us-east-1.amazonaws.com
+
+      - name: Build and publish Docker images
+        env:
+          PLATFORM: "linux/amd64,linux/arm64"
+        run: |
+          bash scripts/build-docker.sh
+
+  publish-github:
+    name: Publish to GitHub
+    runs-on: ubuntu-latest
+    needs:
+      - generate-publish-metadata
+      - build-aarch64-unknown-linux-gnu-packages
+      - build-x86_64-unknown-linux-gnu-packages
+    env:
+      VECTOR_VERSION: ${{ needs.generate-publish-metadata.outputs.vector_version }}
+    steps:
+      - name: Checkout Vector
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ inputs.git_ref }}
+      - name: update git
+        run: |
+          git config --global user.name "c3po007"
+          git config --global user.email "obserbot007@gmail.com"
+          git config --global url."https://c3po007:${GH_ACCESS_TOKEN}@github.com/Observo-Inc/dataplane-private.git".insteadOf "git@github.com:Observo-Inc/dataplane-private.git"
+          git submodule update --init --recursive
+
+      - name: Download staged package artifacts (aarch64-unknown-linux-gnu)
+        uses: actions/download-artifact@v4
+        with:
+          name: vector-${{ env.VECTOR_VERSION }}-aarch64-unknown-linux-gnu
+          path: target/artifacts
+      - name: Download staged package artifacts (x86_64-unknown-linux-gnu)
+        uses: actions/download-artifact@v4
+        with:
+          name: vector-${{ env.VECTOR_VERSION }}-x86_64-unknown-linux-gnu
+          path: target/artifacts
+      - name: Publish release to GitHub
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          make release-github

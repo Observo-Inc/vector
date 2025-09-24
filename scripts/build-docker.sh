@@ -23,6 +23,7 @@ declare -A SUPPORTED_PLATFORMS=(
   [alpine]="linux/amd64,linux/arm/v6,linux/arm/v7,linux/arm64/v8"
   [distroless-static]="linux/amd64,linux/arm/v7,linux/arm64/v8"
   [distroless-libc]="linux/amd64,linux/arm/v7,linux/arm64/v8"
+  [ubi-fips]="linux/amd64,linux/arm64/v8"
 )
 
 #
@@ -99,6 +100,7 @@ if [[ "$CHANNEL" == "release" ]]; then
     build debian "$VERSION_TAG"
     build distroless-static "$VERSION_TAG"
     build distroless-libc "$VERSION_TAG"
+    build ubi-fips "$VERSION_TAG"
   done
 elif [[ "$CHANNEL" == "nightly" ]]; then
   for VERSION_TAG in "nightly-$DATE" nightly; do
@@ -106,14 +108,14 @@ elif [[ "$CHANNEL" == "nightly" ]]; then
     build debian "$VERSION_TAG"
     build distroless-static "$VERSION_TAG"
     build distroless-libc "$VERSION_TAG"
+    build ubi-fips "$VERSION_TAG"
   done
 elif [[ "$CHANNEL" == "custom" ]]; then
-  build alpine "$VERSION"
   build debian "$VERSION"
-  build distroless-static "$VERSION"
-  build distroless-libc "$VERSION"
+  build ubi-fips "$VERSION"
 elif [[ "$CHANNEL" == "test" ]]; then
   build "${BASE:-"alpine"}" "${TAG:-"test"}"
   build "${BASE:-"distroless-libc"}" "${TAG:-"test"}"
   build "${BASE:-"distroless-static"}" "${TAG:-"test"}"
+  build "${BASE:-"ubi-fips"}" "${TAG:-"test"}"
 fi

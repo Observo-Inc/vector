@@ -80,7 +80,7 @@ pub mod extra_context;
 pub mod gcp;
 pub(crate) mod graph;
 pub mod heartbeat;
-pub mod http;
+
 #[allow(unreachable_pub)]
 #[cfg(any(feature = "sources-kafka", feature = "sinks-kafka"))]
 pub mod kafka;
@@ -129,6 +129,15 @@ pub mod vector_windows;
 pub use source_sender::SourceSender;
 pub use vector_lib::{event, metrics, schema, tcp, tls};
 pub use vector_lib::{shutdown, Error, Result};
+pub use vector_lib::{http, AppInfo, sender};
+
+/// Returns the application name and version information.
+pub fn app_info() -> AppInfo {
+    AppInfo {
+        name: get_app_name(),
+        version: get_version(),
+    }
+}
 
 static APP_NAME_SLUG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
@@ -198,15 +207,7 @@ pub mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
 }
 
-/// Returns the host name of the current system.
-/// The hostname can be overridden by setting the VECTOR_HOSTNAME environment variable.
-pub fn get_hostname() -> std::io::Result<String> {
-    Ok(if let Ok(hostname) = std::env::var("VECTOR_HOSTNAME") {
-        hostname.to_string()
-    } else {
-        hostname::get()?.to_string_lossy().into_owned()
-    })
-}
+pub use vector_lib::get_hostname;
 
 /// Spawn a task with the given name. The name is only used if
 /// built with [`tokio_unstable`][tokio_unstable].
