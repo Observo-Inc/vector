@@ -10,6 +10,11 @@ pub mod collector {
             tonic::include_proto!("opentelemetry.proto.collector.logs.v1");
         }
     }
+    pub mod metrics {
+        pub mod v1 {
+            tonic::include_proto!("opentelemetry.proto.collector.metrics.v1");
+        }
+    }
 }
 
 /// Common types used across all event types.
@@ -26,6 +31,13 @@ pub mod logs {
     }
 }
 
+/// Generated types used for metrics.
+pub mod metrics {
+    pub mod v1 {
+        tonic::include_proto!("opentelemetry.proto.metrics.v1");
+    }
+}
+
 /// Generated types used for trace.
 pub mod trace {
     pub mod v1 {
@@ -39,3 +51,6 @@ pub mod resource {
         tonic::include_proto!("opentelemetry.proto.resource.v1");
     }
 }
+
+/// The raw descriptor bytes for all the above.
+include!(concat!(env!("OUT_DIR"), "/opentelemetry-proto.rs"));
