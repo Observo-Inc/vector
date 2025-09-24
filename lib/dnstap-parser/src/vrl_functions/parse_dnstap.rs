@@ -1,6 +1,6 @@
 use crate::parser::DnstapParser;
 use crate::schema::DnstapEventSchema;
-use base64::prelude::{Engine as _, BASE64_STANDARD};
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use dnsmsg_parser::dns_message_parser::DnsParserOptions;
 use vector_lib::event::LogEvent;
 use vrl::prelude::*;
@@ -120,7 +120,7 @@ impl Function for ParseDnstap {
                                     "questionTypeId": 6
                                 }
                             ],
-                            "rcodeName": "BADSIG"
+                            "rcodeName": "BADVERS"
                         },
                         "responseAddress": "2001:502:7094::30",
                         "responsePort": 53,
@@ -295,7 +295,7 @@ mod tests {
                             questionTypeId: 6,
                         }
                         ],
-                        rcodeName: "BADSIG",
+                        rcodeName: "BADVERS",
                     },
                     responseAddress: "2001:502:7094::30",
                     responsePort: 53,
