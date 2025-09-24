@@ -9,9 +9,8 @@ use crate::{enrichment_tables::EnrichmentTables, providers::Providers, secrets::
 #[cfg(feature = "api")]
 use super::api;
 use super::{
-    compiler, schema, BoxedSink, BoxedSource, BoxedTransform, ComponentKey, Config,
-    EnrichmentTableOuter, HealthcheckOptions, SinkOuter, SourceOuter, TestDefinition,
-    TransformOuter,
+    BoxedSink, BoxedSource, BoxedTransform, ComponentKey, Config, EnrichmentTableOuter,
+    HealthcheckOptions, SinkOuter, SourceOuter, TestDefinition, TransformOuter, compiler, schema,
 };
 
 /// A complete Vector configuration.
@@ -38,7 +37,7 @@ pub struct ConfigBuilder {
 
     /// All configured enrichment tables.
     #[serde(default)]
-    pub enrichment_tables: IndexMap<ComponentKey, EnrichmentTableOuter>,
+    pub enrichment_tables: IndexMap<ComponentKey, EnrichmentTableOuter<String>>,
 
     /// All configured sources.
     #[serde(default)]
@@ -106,6 +105,11 @@ impl From<Config> for ConfigBuilder {
             .map(|(key, sink)| (key, sink.map_inputs(ToString::to_string)))
             .collect();
 
+        let enrichment_tables = enrichment_tables
+            .into_iter()
+            .map(|(key, table)| (key, table.map_inputs(ToString::to_string)))
+            .collect();
+
         let tests = tests.into_iter().map(TestDefinition::stringify).collect();
 
         ConfigBuilder {
@@ -145,11 +149,16 @@ impl ConfigBuilder {
     pub fn add_enrichment_table<K: Into<String>, E: Into<EnrichmentTables>>(
         &mut self,
         key: K,
+        inputs: &[&str],
         enrichment_table: E,
     ) {
+        let inputs = inputs
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>();
         self.enrichment_tables.insert(
             ComponentKey::from(key.into()),
-            EnrichmentTableOuter::new(enrichment_table),
+            EnrichmentTableOuter::new(inputs, enrichment_table),
         );
     }
 
@@ -221,22 +230,22 @@ impl ConfigBuilder {
 
         with.enrichment_tables.keys().for_each(|k| {
             if self.enrichment_tables.contains_key(k) {
-                errors.push(format!("duplicate enrichment_table name found: {}", k));
+                errors.push(format!("duplicate enrichment_table name found: {k}"));
             }
         });
         with.sources.keys().for_each(|k| {
             if self.sources.contains_key(k) {
-                errors.push(format!("duplicate source id found: {}", k));
+                errors.push(format!("duplicate source id found: {k}"));
             }
         });
         with.sinks.keys().for_each(|k| {
             if self.sinks.contains_key(k) {
-                errors.push(format!("duplicate sink id found: {}", k));
+                errors.push(format!("duplicate sink id found: {k}"));
             }
         });
         with.transforms.keys().for_each(|k| {
             if self.transforms.contains_key(k) {
-                errors.push(format!("duplicate transform id found: {}", k));
+                errors.push(format!("duplicate transform id found: {k}"));
             }
         });
         with.tests.iter().for_each(|wt| {
@@ -246,7 +255,7 @@ impl ConfigBuilder {
         });
         with.secret.keys().for_each(|k| {
             if self.secret.contains_key(k) {
-                errors.push(format!("duplicate secret id found: {}", k));
+                errors.push(format!("duplicate secret id found: {k}"));
             }
         });
         if !errors.is_empty() {

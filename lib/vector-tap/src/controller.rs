@@ -3,7 +3,7 @@ use std::{
     num::NonZeroUsize,
 };
 
-use futures::{future::try_join_all, FutureExt};
+use futures::{FutureExt, future::try_join_all};
 use tokio::sync::{
     mpsc as tokio_mpsc,
     mpsc::error::{SendError, TrySendError},
@@ -11,7 +11,7 @@ use tokio::sync::{
 };
 use tracing::{Instrument, Span};
 use uuid::Uuid;
-use vector_buffers::{topology::builder::TopologyBuilder, WhenFull};
+use vector_buffers::{WhenFull, topology::builder::TopologyBuilder};
 use vector_common::config::ComponentKey;
 use vector_core::event::{EventArray, LogArray, MetricArray, TraceArray};
 use vector_core::fanout;
@@ -26,7 +26,7 @@ type TapSender = tokio_mpsc::Sender<TapPayload>;
 type ShutdownTx = oneshot::Sender<()>;
 type ShutdownRx = oneshot::Receiver<()>;
 
-const TAP_BUFFER_SIZE: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(100) };
+const TAP_BUFFER_SIZE: NonZeroUsize = NonZeroUsize::new(100).unwrap();
 
 /// Clients can supply glob patterns to find matched topology components.
 trait GlobMatcher<T> {
@@ -123,7 +123,9 @@ impl TapPayload {
         invalid_matches: Vec<String>,
     ) -> Self {
         let pattern = pattern.into();
-        let message = format!("[tap] Warning: source inputs cannot be tapped. Input pattern '{}' matches sources {:?}", pattern, invalid_matches);
+        let message = format!(
+            "[tap] Warning: source inputs cannot be tapped. Input pattern '{pattern}' matches sources {invalid_matches:?}"
+        );
         Self::Notification(Notification::InvalidMatch(InvalidMatch::new(
             message,
             pattern,
@@ -138,8 +140,7 @@ impl TapPayload {
     ) -> Self {
         let pattern = pattern.into();
         let message = format!(
-            "[tap] Warning: sink outputs cannot be tapped. Output pattern '{}' matches sinks {:?}",
-            pattern, invalid_matches
+            "[tap] Warning: sink outputs cannot be tapped. Output pattern '{pattern}' matches sinks {invalid_matches:?}"
         );
         Self::Notification(Notification::InvalidMatch(InvalidMatch::new(
             message,
