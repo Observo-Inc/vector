@@ -1,6 +1,3 @@
 [submodule "lib/observo/private"]
 	path = lib/observo/private
 	url = git@github.com:Observo-Inc/dataplane-private.git
-[submodule "lib/observo/lib/observo/private"]
-	path = lib/observo/lib/observo/private
-	url = https://github.com/janmejay/oxide-auth.git
