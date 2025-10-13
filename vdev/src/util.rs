@@ -40,6 +40,11 @@ pub fn get_version() -> Result<String> {
         .or_else(|_| read_version())
 }
 
+pub fn get_repo() -> Result<String> {
+    std::env::var("GH_RELEASE_REPO")
+        .or_else(|_| Ok("Observo-Inc/vector".into()))
+}
+
 pub fn git_head() -> Result<Output> {
     Command::new("git")
         .args(["describe", "--exact-match", "--tags", "HEAD"])

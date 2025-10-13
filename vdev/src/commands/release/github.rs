@@ -21,13 +21,14 @@ impl Cli {
             .map_err(|e| anyhow!("failed to turn path into string: {:?}", e))?;
 
         let version = util::get_version()?;
+        let repo = util::get_repo()?;
         let mut command = Command::new("gh");
         command.in_repo();
         command.args(
             [
                 "release",
                 "--repo",
-                "Observo-Inc/vector",
+                repo.as_str(),
                 "create",
                 &format!("v{version}"),
                 "--title",
