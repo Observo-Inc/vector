@@ -32,6 +32,7 @@
             lldb
             cue
             mold
+            nodejs
           ];
           hardeningDisable = [ "fortify" ];
 
