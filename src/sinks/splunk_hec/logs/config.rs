@@ -141,6 +141,9 @@ pub struct HecLogsSinkConfig {
     //       empty string to a `None` path internally.
     pub timestamp_key: Option<OptionalTargetPath>,
 
+
+    pub timestamp_configurations: Option<TimestampConfigurations>,
+
     /// Passes the `auto_extract_timestamp` option to Splunk.
     ///
     /// This option is only relevant to Splunk v8.x and above, and is only applied when
@@ -158,8 +161,55 @@ pub struct HecLogsSinkConfig {
     pub endpoint_target: EndpointTarget,
 }
 
+
+pub struct TimestampConfigurations {
+    pub remove : bool,
+    pub settings: Option<TimestampSettings>,
+}
+
+pub struct TimestampSettings {
+    pub format: TimestampFormat,
+    pub key: Option<OptionalTargetPath>,
+}
+
+#[configurable_component]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+/// The format in which a timestamp should be represented.
+pub enum TimestampFormat {
+    /// Represent the timestamp as a Unix timestamp.
+    Unix,
+
+    /// Represent the timestamp as a RFC 3339 timestamp.
+    Rfc3339,
+
+    /// Represent the timestamp as a Unix timestamp in milliseconds.
+    UnixMs,
+
+    /// Represent the timestamp as a Unix timestamp in microseconds
+    UnixUs,
+
+    /// Represeunknt the timestamp as a Unix timestamp in nanoseconds.
+    UnixNs,
+
+    /// Represent the timestamp as a Unix timestamp in floating point.
+    UnixFloat,
+
+    Default,
+}
+
 const fn default_endpoint_target() -> EndpointTarget {
     EndpointTarget::Event
+}
+
+const fn default_timestamp_configurations() -> Option<TimestampConfigurations> {
+    Some(TimestampConfigurations {
+        remove: true,
+        settings: Some(TimestampSettings {
+            format: TimestampFormat::Default,
+            key: None,
+        })
+    })
 }
 
 impl GenerateConfig for HecLogsSinkConfig {
