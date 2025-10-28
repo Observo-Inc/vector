@@ -5,6 +5,10 @@ use vector_config_common::{
     schema::{visit::Visitor, *},
 };
 
+use super::scoped_visit::{
+    visit_schema_object_scoped, SchemaReference, SchemaScopeStack, ScopedVisitor,
+};
+
 /// A visitor that generates a human-friendly name for enum variants and fields as metadata.
 ///
 /// Generally, we rely on rich documentation to provide human-friendly descriptions of types and
@@ -25,11 +29,11 @@ use vector_config_common::{
 /// themselves. Whenever the visitor sees that the metadata annotation is already present, it will
 /// skip generating it.
 #[derive(Debug, Default)]
-pub struct GenerateHumanFriendlyNameVisitor;
+pub struct GenerateHumanFriendlyNameVisitor(SchemaScopeStack);
 
 impl GenerateHumanFriendlyNameVisitor {
     pub fn from_settings(_: &SchemaSettings) -> Self {
-        Self
+        Self(SchemaScopeStack::default())
     }
 }
 
@@ -40,7 +44,7 @@ impl Visitor for GenerateHumanFriendlyNameVisitor {
         schema: &mut SchemaObject,
     ) {
         // Recursively visit this schema first.
-        visit::visit_schema_object(self, definitions, schema);
+        visit_schema_object_scoped(self, definitions, schema);
 
         // Skip this schema if it already has a human-friendly name defined.
         if has_schema_metadata_attr_str(schema, constants::DOCS_META_HUMAN_NAME) {
@@ -77,6 +81,20 @@ impl Visitor for GenerateHumanFriendlyNameVisitor {
     }
 }
 
+impl ScopedVisitor for GenerateHumanFriendlyNameVisitor {
+    fn push_schema_scope<S: Into<SchemaReference>>(&mut self, scope: S) -> bool {
+        self.0.push(scope.into())
+    }
+
+    fn pop_schema_scope(&mut self) {
+        self.0.pop().expect("stack was empty during pop");
+    }
+
+    fn get_current_schema_scope(&self) -> &SchemaReference {
+        self.0.current().unwrap_or(&SchemaReference::Root)
+    }
+}
+
 fn has_schema_metadata_attr_str(schema: &SchemaObject, key: &str) -> bool {
     get_schema_metadata_attr_str(schema, key).is_some()
 }
@@ -104,7 +122,6 @@ fn set_schema_metadata_attr_str(schema: &mut SchemaObject, key: &str, value: Str
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use vector_config_common::schema::visit::Visitor;
 
     use crate::schema::visitors::test::{as_schema, assert_schemas_eq};
 

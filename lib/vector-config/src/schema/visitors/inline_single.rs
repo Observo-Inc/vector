@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
-use tracing::debug;
+use tracing::{debug, enabled, Level};
 use vector_config_common::schema::{visit::Visitor, *};
 
 use crate::schema::visitors::merge::Mergeable;
@@ -24,12 +24,14 @@ use super::scoped_visit::{
 /// deleting the schema definition from the root definitions.
 #[derive(Debug, Default)]
 pub struct InlineSingleUseReferencesVisitor {
+    scope_stack: SchemaScopeStack,
     eligible_to_inline: HashSet<String>,
 }
 
 impl InlineSingleUseReferencesVisitor {
     pub fn from_settings(_: &SchemaSettings) -> Self {
         Self {
+            scope_stack: SchemaScopeStack::default(),
             eligible_to_inline: HashSet::new(),
         }
     }
@@ -43,6 +45,11 @@ impl Visitor for InlineSingleUseReferencesVisitor {
         occurrence_visitor.visit_root_schema(root);
         let occurrence_map = occurrence_visitor.into_occurrences();
 
+        if enabled!(Level::DEBUG) {
+            occurrence_map.iter().for_each(|(s, c)| {
+                debug!("Occurance count({s:?}) = {c}");
+            });
+        }
         self.eligible_to_inline = occurrence_map
             .into_iter()
             // Filter out any schemas which have more than one occurrence, as naturally, we're
@@ -90,7 +97,7 @@ impl Visitor for InlineSingleUseReferencesVisitor {
         schema: &mut SchemaObject,
     ) {
         // Recursively visit this schema first.
-        visit::visit_schema_object(self, definitions, schema);
+        visit_schema_object_scoped(self, definitions, schema);
 
         // If this schema has a schema reference, see if it's in our inline eligibility map. If so,
         // we remove the referenced schema from the definitions, and then merge it into the current
@@ -113,6 +120,20 @@ impl Visitor for InlineSingleUseReferencesVisitor {
                 }
             }
         }
+    }
+}
+
+impl ScopedVisitor for InlineSingleUseReferencesVisitor {
+    fn push_schema_scope<S: Into<SchemaReference>>(&mut self, scope: S) -> bool {
+        self.scope_stack.push(scope.into())
+    }
+
+    fn pop_schema_scope(&mut self) {
+        self.scope_stack.pop().expect("stack was empty during pop");
+    }
+
+    fn get_current_schema_scope(&self) -> &SchemaReference {
+        self.scope_stack.current().unwrap_or(&SchemaReference::Root)
     }
 }
 
@@ -184,8 +205,8 @@ impl Visitor for OccurrenceVisitor {
 }
 
 impl ScopedVisitor for OccurrenceVisitor {
-    fn push_schema_scope<S: Into<SchemaReference>>(&mut self, scope: S) {
-        self.scope_stack.push(scope.into());
+    fn push_schema_scope<S: Into<SchemaReference>>(&mut self, scope: S) -> bool {
+        self.scope_stack.push(scope.into())
     }
 
     fn pop_schema_scope(&mut self) {
