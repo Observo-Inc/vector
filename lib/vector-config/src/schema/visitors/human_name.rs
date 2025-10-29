@@ -123,9 +123,14 @@ fn set_schema_metadata_attr_str(schema: &mut SchemaObject, key: &str, value: Str
 mod tests {
     use serde_json::json;
 
-    use crate::schema::visitors::test::{as_schema, assert_schemas_eq};
+    use crate::schema::visitors::{
+        scoped_visit::SchemaScopeStack,
+        test::{as_schema, assert_schemas_eq},
+    };
 
     use super::GenerateHumanFriendlyNameVisitor;
+
+    use vector_config_common::schema::visit::Visitor;
 
     #[test]
     fn logical_name() {
@@ -144,7 +149,7 @@ mod tests {
             }
         }));
 
-        let mut visitor = GenerateHumanFriendlyNameVisitor;
+        let mut visitor = GenerateHumanFriendlyNameVisitor(SchemaScopeStack::default());
         visitor.visit_root_schema(&mut actual_schema);
 
         assert_schemas_eq(expected_schema, actual_schema);
@@ -167,7 +172,7 @@ mod tests {
             }
         }));
 
-        let mut visitor = GenerateHumanFriendlyNameVisitor;
+        let mut visitor = GenerateHumanFriendlyNameVisitor(SchemaScopeStack::default());
         visitor.visit_root_schema(&mut actual_schema);
 
         assert_schemas_eq(expected_schema, actual_schema);
@@ -194,7 +199,7 @@ mod tests {
             }
         }));
 
-        let mut visitor = GenerateHumanFriendlyNameVisitor;
+        let mut visitor = GenerateHumanFriendlyNameVisitor(SchemaScopeStack::default());
         visitor.visit_root_schema(&mut actual_schema);
 
         assert_schemas_eq(expected_schema, actual_schema);
@@ -221,7 +226,7 @@ mod tests {
             }
         }));
 
-        let mut visitor = GenerateHumanFriendlyNameVisitor;
+        let mut visitor = GenerateHumanFriendlyNameVisitor(SchemaScopeStack::default());
         visitor.visit_root_schema(&mut actual_schema);
 
         assert_schemas_eq(expected_schema, actual_schema);
@@ -239,7 +244,7 @@ mod tests {
 
         let expected_schema = actual_schema.clone();
 
-        let mut visitor = GenerateHumanFriendlyNameVisitor;
+        let mut visitor = GenerateHumanFriendlyNameVisitor(SchemaScopeStack::default());
         visitor.visit_root_schema(&mut actual_schema);
 
         assert_schemas_eq(expected_schema, actual_schema);
@@ -261,7 +266,7 @@ mod tests {
 
         let expected_schema = actual_schema.clone();
 
-        let mut visitor = GenerateHumanFriendlyNameVisitor;
+        let mut visitor = GenerateHumanFriendlyNameVisitor(SchemaScopeStack::default());
         visitor.visit_root_schema(&mut actual_schema);
 
         assert_schemas_eq(expected_schema, actual_schema);
@@ -295,7 +300,7 @@ mod tests {
             }
         }));
 
-        let mut visitor = GenerateHumanFriendlyNameVisitor;
+        let mut visitor = GenerateHumanFriendlyNameVisitor(SchemaScopeStack::default());
         visitor.visit_root_schema(&mut actual_schema);
 
         assert_schemas_eq(expected_schema, actual_schema);
