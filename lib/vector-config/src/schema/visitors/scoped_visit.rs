@@ -1,5 +1,6 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
+use tracing::debug;
 use vector_config_common::schema::{visit::Visitor, *};
 
 /// A schema reference which can refer to either a schema definition or the root schema itself.
@@ -47,25 +48,38 @@ impl AsRef<str> for SchemaReference {
 /// Once the visitor recurses back out of the resolved schema, it is popped from the stack.
 #[derive(Debug, Default)]
 pub struct SchemaScopeStack {
+    in_path: HashSet<SchemaReference>,
     stack: VecDeque<SchemaReference>,
 }
 
 impl SchemaScopeStack {
-    pub fn push<S: Into<SchemaReference>>(&mut self, scope: S) {
-        self.stack.push_front(scope.into());
+    pub fn push<S: Into<SchemaReference>>(&mut self, scope: S) -> bool {
+        let scope = scope.into();
+        if self.in_path.contains(&scope) {
+            false
+        } else {
+            debug!("Pushing on stack {scope:?}");
+            self.stack.push_front(scope.clone());
+            self.in_path.insert(scope);
+            true
+        }
     }
 
     pub fn pop(&mut self) -> Option<SchemaReference> {
-        self.stack.pop_front()
+        let scope = self.stack.pop_front();
+        debug!("Popping off stack {scope:?}");
+        scope
     }
 
     pub fn current(&self) -> Option<&SchemaReference> {
-        self.stack.front()
+        let scope = self.stack.front();
+        debug!("Current scope: {scope:?}");
+        scope
     }
 }
 
 pub trait ScopedVisitor: Visitor {
-    fn push_schema_scope<S: Into<SchemaReference>>(&mut self, scope: S);
+    fn push_schema_scope<S: Into<SchemaReference>>(&mut self, scope: S) -> bool;
 
     fn pop_schema_scope(&mut self);
 
@@ -85,11 +99,11 @@ pub fn visit_schema_object_scoped<SV: ScopedVisitor + ?Sized>(
             .expect("schema reference should exist");
 
         if let Schema::Object(referenced_schema) = &mut referenced_schema {
-            sv.push_schema_scope(schema_def_key);
+            if sv.push_schema_scope(schema_def_key) {
+                sv.visit_schema_object(definitions, referenced_schema);
 
-            sv.visit_schema_object(definitions, referenced_schema);
-
-            sv.pop_schema_scope();
+                sv.pop_schema_scope();
+            }
         }
 
         definitions.insert(schema_def_key.to_string(), referenced_schema);
