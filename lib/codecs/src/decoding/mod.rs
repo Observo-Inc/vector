@@ -22,9 +22,9 @@ pub use framing::{
     BoxedFramer, BoxedFramingError, BytesDecoder, BytesDecoderConfig, CharacterDelimitedDecoder,
     CharacterDelimitedDecoderConfig, CharacterDelimitedDecoderOptions, ChunkedGelfDecoder,
     ChunkedGelfDecoderConfig, ChunkedGelfDecoderOptions, FramingError, LengthDelimitedDecoder,
-    LengthDelimitedDecoderConfig, NewlineDelimitedDecoder, NewlineDelimitedDecoderConfig,
-    NewlineDelimitedDecoderOptions, OctetCountingDecoder, OctetCountingDecoderConfig,
-    OctetCountingDecoderOptions, NetflowDecoderOptions, NetflowDecoder, NetflowDecoderConfig
+    LengthDelimitedDecoderConfig, NetflowDecoder, NetflowDecoderConfig, NetflowDecoderOptions,
+    NewlineDelimitedDecoder, NewlineDelimitedDecoderConfig, NewlineDelimitedDecoderOptions,
+    OctetCountingDecoder, OctetCountingDecoderConfig, OctetCountingDecoderOptions,
 };
 use smallvec::SmallVec;
 use std::fmt::Debug;
@@ -80,7 +80,7 @@ impl StreamDecodingError for Error {
 /// a frame that must be prefixed, or delimited, in a way that marks where an event begins and
 /// ends within the byte stream.
 #[configurable_component]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "method", rename_all = "snake_case")]
 #[configurable(metadata(docs::enum_tag_description = "The framing method."))]
 pub enum FramingConfig {
@@ -164,12 +164,12 @@ impl FramingConfig {
             FramingConfig::Bytes => Framer::Bytes(BytesDecoderConfig.build()),
             FramingConfig::CharacterDelimited(config) => Framer::CharacterDelimited(config.build()),
             FramingConfig::LengthDelimited(config) => Framer::LengthDelimited(config.build()),
-            FramingConfig::Netflow {
-                netflow_decoder
-              } => Framer::Netflow (NetflowDecoderConfig {
-                  netflow_decoder_options: netflow_decoder.clone(),
-              }.build(),
-              ),
+            FramingConfig::Netflow { netflow_decoder } => Framer::Netflow(
+                NetflowDecoderConfig {
+                    netflow_decoder_options: netflow_decoder.clone(),
+                }
+                .build(),
+            ),
             FramingConfig::NewlineDelimited(config) => Framer::NewlineDelimited(config.build()),
             FramingConfig::OctetCounting(config) => Framer::OctetCounting(config.build()),
             FramingConfig::ChunkedGelf(config) => Framer::ChunkedGelf(config.build()),
@@ -231,7 +231,7 @@ impl tokio_util::codec::Decoder for Framer {
 
 /// Deserializer configuration.
 #[configurable_component]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "codec", rename_all = "snake_case")]
 #[configurable(description = "Configures how events are decoded from raw bytes.")]
 #[configurable(metadata(docs::enum_tag_description = "The codec to use for decoding events."))]

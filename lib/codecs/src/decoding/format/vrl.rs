@@ -14,7 +14,7 @@ use vrl::value::Kind;
 
 /// Config used to build a `VrlDeserializer`.
 #[configurable_component]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VrlDeserializerConfig {
     /// VRL-specific decoding options.
     pub vrl: VrlDeserializerOptions,

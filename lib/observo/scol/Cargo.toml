@@ -81,5 +81,5 @@ chkpts = { path = "../chkpts" }
 
 
 [features]
-test-scenarios = ["dep:textwrap", "dep:rstest", "dep:oxide-auth", "dep:oxide-auth-poem", "dep:tempfile", "dep:assert_matches", "sauth/test-support", "dep:pathsearch"]
+test-scenarios = ["vector-lib/test", "dep:textwrap", "dep:rstest", "dep:oxide-auth", "dep:oxide-auth-poem", "dep:tempfile", "dep:assert_matches", "sauth/test-support", "dep:pathsearch"]
 default = []

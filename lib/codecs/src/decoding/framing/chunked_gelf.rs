@@ -26,7 +26,7 @@ const fn default_timeout_secs() -> f64 {
 
 /// Config used to build a `ChunkedGelfDecoder`.
 #[configurable_component]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChunkedGelfDecoderConfig {
     /// Options for the chunked GELF decoder.
     #[serde(default)]
@@ -79,6 +79,19 @@ pub struct ChunkedGelfDecoderOptions {
     #[serde(default, skip_serializing_if = "vector_core::serde::is_default")]
     pub decompression: ChunkedGelfDecompressionConfig,
 }
+
+impl PartialEq for ChunkedGelfDecoderOptions {
+    fn eq(&self, other: &Self) -> bool {
+        !self.timeout_secs.is_nan()
+            && !other.timeout_secs.is_nan()
+            && (self.timeout_secs - other.timeout_secs).abs() < 1e-8
+            && self.pending_messages_limit == other.pending_messages_limit
+            && self.max_length == other.max_length
+            && self.decompression == other.decompression
+    }
+}
+
+impl Eq for ChunkedGelfDecoderOptions {}
 
 /// Decompression options for ChunkedGelfDecoder.
 #[configurable_component]

@@ -18,7 +18,7 @@ use super::{default_lossy, Deserializer};
 
 /// Config used to build a `SyslogDeserializer`.
 #[configurable_component]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SyslogDeserializerConfig {
     #[serde(skip)]
     source: Option<&'static str>,
