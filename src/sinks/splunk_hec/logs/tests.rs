@@ -31,6 +31,7 @@ use crate::{
     template::Template,
     test_util::next_addr,
 };
+use crate::sinks::splunk_hec::logs::config::{TimestampConfiguration, TimestampFormat};
 
 #[derive(Deserialize, Debug)]
 struct HecEventJson {
@@ -98,6 +99,14 @@ fn get_processed_event_timestamp(
         }
     }
 
+    let timestamp_configuration = TimestampConfiguration {
+        timestamp_key: timestamp_key.clone(),
+        auto_extract_timestamp: Some(auto_extract_timestamp),
+        remove_from_event: true,
+        format: TimestampFormat::Default
+    };
+
+
     let sourcetype = Template::try_from("{{ event_sourcetype }}".to_string()).ok();
     let source = Template::try_from("{{ event_source }}".to_string()).ok();
     let index = Template::try_from("{{ event_index }}".to_string()).ok();
@@ -118,9 +127,9 @@ fn get_processed_event_timestamp(
             }),
             indexed_fields: indexed_fields.as_slice(),
             timestamp_nanos_key: timestamp_nanos_key.as_ref(),
-            timestamp_key,
             endpoint_target: EndpointTarget::Event,
             auto_extract_timestamp,
+            timestamp_configuration: Some(timestamp_configuration),
         },
     )
 }
@@ -238,6 +247,7 @@ async fn splunk_passthrough_token() {
         timestamp_key: None,
         auto_extract_timestamp: None,
         endpoint_target: EndpointTarget::Event,
+        timestamp_configuration: None
     };
     let cx = SinkContext::default();
 
@@ -376,9 +386,9 @@ fn splunk_encode_log_event_semantic_meanings() {
             host_key: None,
             indexed_fields: &[],
             timestamp_nanos_key: None,
-            timestamp_key: None,
             endpoint_target: EndpointTarget::Event,
             auto_extract_timestamp: false,
+            timestamp_configuration: None,
         },
     );
 

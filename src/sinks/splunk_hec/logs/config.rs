@@ -156,6 +156,61 @@ pub struct HecLogsSinkConfig {
     #[configurable(metadata(docs::advanced))]
     #[serde(default = "default_endpoint_target")]
     pub endpoint_target: EndpointTarget,
+
+    #[configurable(derived)]
+    #[serde(default = "default_timestamp_configuration")]
+    pub timestamp_configuration: Option<TimestampConfiguration>,
+}
+
+
+#[configurable_component]
+#[derive(Clone, Debug)]
+/// Configuration for timestamp extraction and formatting.
+pub struct TimestampConfiguration {
+    #[configurable(derived)]
+    pub timestamp_key: Option<OptionalTargetPath>,
+    #[configurable(derived)]
+    #[serde(default = "default_timestamp_format")]
+    pub format: TimestampFormat,
+    /// Whether to automatically extract timestamps from event messages.
+    pub auto_extract_timestamp: Option<bool>,
+
+    /// Whether to remove the timestamp field from the event after extraction.
+    pub remove_from_event: bool,
+}
+
+#[configurable_component]
+#[derive(Clone, Debug)]
+/// The format of the timestamp.
+pub enum TimestampFormat {
+    /// Use the default vector time format.
+    Default,
+    /// Nanoseconds timestamp.
+    Nanos,
+
+    /// Seconds timestamp.
+    Seconds,
+
+    /// Milliseconds timestamp.
+    MilliSeconds,
+
+    /// Regular expression to extract timestamp.
+    Regex(String),
+}
+
+const fn default_timestamp_configuration() -> Option<TimestampConfiguration> {
+    return Some(
+        TimestampConfiguration {
+            timestamp_key: None,
+            format: TimestampFormat::Default,
+            auto_extract_timestamp: None,
+            remove_from_event: true,
+        }
+    )
+}
+
+const fn default_timestamp_format() -> TimestampFormat {
+    TimestampFormat::Default
 }
 
 const fn default_endpoint_target() -> EndpointTarget {
@@ -183,6 +238,7 @@ impl GenerateConfig for HecLogsSinkConfig {
             timestamp_key: None,
             auto_extract_timestamp: None,
             endpoint_target: EndpointTarget::Event,
+            timestamp_configuration: None,
         })
         .unwrap()
     }
@@ -281,9 +337,9 @@ impl HecLogsSinkConfig {
                 .collect(),
             host_key: self.host_key.clone(),
             timestamp_nanos_key: self.timestamp_nanos_key.clone(),
-            timestamp_key: self.timestamp_key.clone(),
             endpoint_target: self.endpoint_target,
             auto_extract_timestamp: self.auto_extract_timestamp.unwrap_or_default(),
+            timestamp_configuration: self.timestamp_configuration.clone()
         };
 
         Ok(VectorSink::from_event_streamsink(sink))
@@ -351,6 +407,7 @@ mod tests {
                 timestamp_key: None,
                 auto_extract_timestamp: None,
                 endpoint_target: EndpointTarget::Raw,
+                timestamp_configuration: None,
             };
 
             let endpoint = format!("{endpoint}/services/collector/raw");

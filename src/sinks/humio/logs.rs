@@ -25,6 +25,8 @@ use crate::{
     template::Template,
     tls::TlsConfig,
 };
+use crate::sinks::splunk_hec::logs::config::TimestampFormat;
+use crate::sinks::splunk_hec::logs::config::TimestampConfiguration;
 
 pub(super) const HOST: &str = "https://cloud.humio.com";
 
@@ -213,6 +215,12 @@ impl HumioLogsConfig {
             endpoint_target: EndpointTarget::Event,
             auto_extract_timestamp: None,
             path: None,
+            timestamp_configuration: Some(TimestampConfiguration {
+                timestamp_key: Some(config_timestamp_key_target_path()),
+                format: TimestampFormat::Default,
+                auto_extract_timestamp:None,
+                remove_from_event: true,
+            })
         }
     }
 }

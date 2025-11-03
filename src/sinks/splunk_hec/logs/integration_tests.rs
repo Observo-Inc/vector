@@ -133,6 +133,8 @@ async fn config(
         timestamp_key: None,
         auto_extract_timestamp: None,
         endpoint_target: EndpointTarget::Event,
+        timestamp_configuration: None,
+        path: None
     }
 }
 

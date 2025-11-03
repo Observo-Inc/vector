@@ -19,6 +19,7 @@ use vector_lib::{
     schema::meaning,
 };
 use vrl::path::OwnedTargetPath;
+use crate::sinks::splunk_hec::logs::config::TimestampConfiguration;
 
 // NOTE: The `OptionalTargetPath`s are wrapped in an `Option` in order to distinguish between a true
 //       `None` type and an empty string. This is necessary because `OptionalTargetPath` deserializes an
@@ -33,9 +34,9 @@ pub struct HecLogsSink<S> {
     pub indexed_fields: Vec<OwnedValuePath>,
     pub host_key: Option<OptionalTargetPath>,
     pub timestamp_nanos_key: Option<String>,
-    pub timestamp_key: Option<OptionalTargetPath>,
     pub endpoint_target: EndpointTarget,
     pub auto_extract_timestamp: bool,
+    pub timestamp_configuration: Option<TimestampConfiguration>,
 }
 
 pub struct HecLogData<'a> {
@@ -45,9 +46,9 @@ pub struct HecLogData<'a> {
     pub indexed_fields: &'a [OwnedValuePath],
     pub host_key: Option<OptionalTargetPath>,
     pub timestamp_nanos_key: Option<&'a String>,
-    pub timestamp_key: Option<OptionalTargetPath>,
     pub endpoint_target: EndpointTarget,
     pub auto_extract_timestamp: bool,
+    pub timestamp_configuration: Option<TimestampConfiguration>,
 }
 
 impl<S> HecLogsSink<S>
@@ -65,9 +66,9 @@ where
             indexed_fields: self.indexed_fields.as_slice(),
             host_key: self.host_key.clone(),
             timestamp_nanos_key: self.timestamp_nanos_key.as_ref(),
-            timestamp_key: self.timestamp_key.clone(),
             endpoint_target: self.endpoint_target,
             auto_extract_timestamp: self.auto_extract_timestamp,
+            timestamp_configuration: self.timestamp_configuration.clone(),
         };
         let batch_settings = self.batch_settings;
 
@@ -279,14 +280,26 @@ pub fn process_log(event: Event, data: &HecLogData) -> HecProcessedEvent {
     // the timestamp in the event as-is, and let Splunk do the extraction).
     let timestamp = if EndpointTarget::Event == data.endpoint_target && !data.auto_extract_timestamp
     {
-        user_or_namespaced_path(
+
+        let timestamp_configuration = data.timestamp_configuration.as_ref();
+        let timestamp_key = timestamp_configuration
+            .and_then(|config| config.timestamp_key.as_ref());
+        let _remove_from_event = timestamp_configuration
+            .map(|config| config.remove_from_event)
+            .unwrap_or(true);
+
+        // determine the actual path first
+        let timestamp_path_opt = user_or_namespaced_path(
             &log,
-            data.timestamp_key.as_ref(),
+            timestamp_key,
             meaning::TIMESTAMP,
             log_schema().timestamp_key_target_path(),
-        )
-        .and_then(|timestamp_path| {
-            match log.remove(&timestamp_path) {
+        );
+
+
+        let ts = timestamp_path_opt.as_ref().and_then(|timestamp_path| {
+            let value_opt = log.get(timestamp_path).cloned();
+            match value_opt {
                 Some(Value::Timestamp(ts)) => {
                     // set nanos in log if valid timestamp in event and timestamp_nanos_key is configured
                     if let Some(key) = data.timestamp_nanos_key {
@@ -305,7 +318,11 @@ pub fn process_log(event: Event, data: &HecLogData) -> HecProcessedEvent {
                     None
                 }
             }
-        })
+        });
+        if _remove_from_event && timestamp_path_opt.is_some(){
+            let _ = log.remove(timestamp_path_opt.as_ref().unwrap());
+        }
+        ts
     } else {
         None
     };
