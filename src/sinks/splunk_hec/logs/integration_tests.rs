@@ -495,7 +495,7 @@ async fn splunk_auto_extracted_timestamp() {
             timestamp_configuration: Some(TimestampConfiguration{
                 timestamp_key:Some(OptionalTargetPath {
                         path: Some(OwnedTargetPath::event(lookup::owned_value_path!(
-                            "timesatamp"
+                            "timestamp"
                         ))),
                     }),
                 format: TimestampFormat::Native,

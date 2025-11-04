@@ -201,7 +201,7 @@ pub enum TimePrecision {
 }
 
 const fn default_timestamp_configuration() -> Option<TimestampConfiguration> {
-    return Some(
+    Some(
         TimestampConfiguration {
             timestamp_key: None,
             format: TimestampFormat::Native,

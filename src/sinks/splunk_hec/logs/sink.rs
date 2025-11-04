@@ -45,7 +45,6 @@ pub struct HecLogData<'a> {
     pub index: Option<&'a Template>,
     pub indexed_fields: &'a [OwnedValuePath],
     pub host_key: Option<OptionalTargetPath>,
-    // pub timestamp_nanos_key: Option<&'a String>,
     pub endpoint_target: EndpointTarget,
     pub auto_extract_timestamp: bool,
     pub timestamp_configuration: Option<TimestampConfiguration>,
