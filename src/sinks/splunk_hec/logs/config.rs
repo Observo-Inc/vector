@@ -122,25 +122,6 @@ pub struct HecLogsSinkConfig {
     #[serde(default)]
     pub path: Option<String>,
 
-    // This settings is relevant only for the `humio_logs` sink and should be left as `None`
-    // everywhere else.
-    #[serde(skip)]
-    pub timestamp_nanos_key: Option<String>,
-
-    /// Overrides the name of the log field used to retrieve the timestamp to send to Splunk HEC.
-    /// When set to `“”`, a timestamp is not set in the events sent to Splunk HEC.
-    ///
-    /// By default, either the [global `log_schema.timestamp_key` option][global_timestamp_key] is used
-    /// if log events are Legacy namespaced, or the semantic meaning of "timestamp" is used, if defined.
-    ///
-    /// [global_timestamp_key]: https://vector.dev/docs/reference/configuration/global-options/#log_schema.timestamp_key
-    #[configurable(metadata(docs::advanced))]
-    #[configurable(metadata(docs::examples = "timestamp", docs::examples = ""))]
-    // NOTE: The `OptionalTargetPath` is wrapped in an `Option` in order to distinguish between a true
-    //       `None` type and an empty string. This is necessary because `OptionalTargetPath` deserializes an
-    //       empty string to a `None` path internally.
-    pub timestamp_key: Option<OptionalTargetPath>,
-
     /// Passes the `auto_extract_timestamp` option to Splunk.
     ///
     /// This option is only relevant to Splunk v8.x and above, and is only applied when
@@ -167,50 +148,71 @@ pub struct HecLogsSinkConfig {
 #[derive(Clone, Debug)]
 /// Configuration for timestamp extraction and formatting.
 pub struct TimestampConfiguration {
-    #[configurable(derived)]
+    /// Overrides the name of the log field used to retrieve the timestamp to send to Splunk HEC.
+    /// When set to `“”`, a timestamp is not set in the events sent to Splunk HEC.
+    ///
+    /// By default, either the [global `log_schema.timestamp_key` option][global_timestamp_key] is used
+    /// if log events are Legacy namespaced, or the semantic meaning of "timestamp" is used, if defined.
+    ///
+    /// [global_timestamp_key]: https://vector.dev/docs/reference/configuration/global-options/#log_schema.timestamp_key
+    #[configurable(metadata(docs::advanced))]
+    #[configurable(metadata(docs::examples = "timestamp", docs::examples = ""))]
+    // NOTE: The `OptionalTargetPath` is wrapped in an `Option` in order to distinguish between a true
+    //       `None` type and an empty string. This is necessary because `OptionalTargetPath` deserializes an
+    //       empty string to a `None` path internally.
     pub timestamp_key: Option<OptionalTargetPath>,
     #[configurable(derived)]
     #[serde(default = "default_timestamp_format")]
     pub format: TimestampFormat,
-    /// Whether to automatically extract timestamps from event messages.
-    pub auto_extract_timestamp: Option<bool>,
-
-    /// Whether to remove the timestamp field from the event after extraction.
-    pub remove_from_event: bool,
+    // This settings is relevant only for the `humio_logs` sink and should be left as `None`
+    // everywhere else.
+    #[serde(skip)]
+    pub timestamp_nanos_key: Option<String>,
+    /// Whether to preserve the timestamp field in the event after extraction.
+    pub preserve_timestamp_key: bool,
 }
 
 #[configurable_component]
 #[derive(Clone, Debug)]
+#[serde(rename_all = "snake_case")]
 /// The format of the timestamp.
 pub enum TimestampFormat {
     /// Use the default vector time format.
-    Default,
-    /// Nanoseconds timestamp.
-    Nanos,
+    Native,
+    /// Numeric timestamp with configurable precision
+    Numeric (TimePrecision),
+    /// `strftime`-style format string to format or parse timestamps.
+    Strftime(String),
+}
 
-    /// Seconds timestamp.
+#[configurable_component]
+#[derive(Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+/// Precision levels for numeric timestamps
+pub enum TimePrecision {
+    /// Nanosecond precision (1/1,000,000,000 second)
+    Nanoseconds,
+    /// Microseconds precision (1/1,000,000 second)
+    Microseconds,
+    /// Millisecond precision (1/1,000 second)
+    Milliseconds,
+    /// Second precision
     Seconds,
-
-    /// Milliseconds timestamp.
-    MilliSeconds,
-
-    /// Regular expression to extract timestamp.
-    Regex(String),
 }
 
 const fn default_timestamp_configuration() -> Option<TimestampConfiguration> {
     return Some(
         TimestampConfiguration {
             timestamp_key: None,
-            format: TimestampFormat::Default,
-            auto_extract_timestamp: None,
-            remove_from_event: true,
+            format: TimestampFormat::Native,
+            timestamp_nanos_key: None,
+            preserve_timestamp_key: false
         }
     )
 }
 
 const fn default_timestamp_format() -> TimestampFormat {
-    TimestampFormat::Default
+    TimestampFormat::Native
 }
 
 const fn default_endpoint_target() -> EndpointTarget {
@@ -234,8 +236,6 @@ impl GenerateConfig for HecLogsSinkConfig {
             tls: None,
             acknowledgements: Default::default(),
             path: None,
-            timestamp_nanos_key: None,
-            timestamp_key: None,
             auto_extract_timestamp: None,
             endpoint_target: EndpointTarget::Event,
             timestamp_configuration: None,
@@ -336,7 +336,6 @@ impl HecLogsSinkConfig {
                 .map(|config_path| config_path.0.clone())
                 .collect(),
             host_key: self.host_key.clone(),
-            timestamp_nanos_key: self.timestamp_nanos_key.clone(),
             endpoint_target: self.endpoint_target,
             auto_extract_timestamp: self.auto_extract_timestamp.unwrap_or_default(),
             timestamp_configuration: self.timestamp_configuration.clone()
@@ -403,8 +402,6 @@ mod tests {
                     ..Default::default()
                 },
                 path: None,
-                timestamp_nanos_key: None,
-                timestamp_key: None,
                 auto_extract_timestamp: None,
                 endpoint_target: EndpointTarget::Raw,
                 timestamp_configuration: None,

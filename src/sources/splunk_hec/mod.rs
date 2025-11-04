@@ -1355,8 +1355,6 @@ mod tests {
             tls: None,
             acknowledgements: Default::default(),
             path: None,
-            timestamp_nanos_key: None,
-            timestamp_key: None,
             auto_extract_timestamp: None,
             endpoint_target: Default::default(),
             timestamp_configuration: None,

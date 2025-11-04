@@ -38,6 +38,8 @@ use crate::{
     },
 };
 
+use crate::sinks::splunk_hec::logs::config::{ TimestampConfiguration, TimestampFormat};
+
 const USERNAME: &str = "admin";
 const PASSWORD: &str = "password";
 const ACK_TOKEN: &str = "ack-token";
@@ -129,8 +131,6 @@ async fn config(
         request: TowerRequestConfig::default(),
         tls: None,
         acknowledgements: Default::default(),
-        timestamp_nanos_key: None,
-        timestamp_key: None,
         auto_extract_timestamp: None,
         endpoint_target: EndpointTarget::Event,
         timestamp_configuration: None,
@@ -488,12 +488,19 @@ async fn splunk_auto_extracted_timestamp() {
     {
         let cx = SinkContext::default();
 
+
+
         let config = HecLogsSinkConfig {
             auto_extract_timestamp: Some(true),
-            timestamp_key: Some(OptionalTargetPath {
-                path: Some(OwnedTargetPath::event(lookup::owned_value_path!(
-                    "timestamp"
-                ))),
+            timestamp_configuration: Some(TimestampConfiguration{
+                timestamp_key:Some(OptionalTargetPath {
+                        path: Some(OwnedTargetPath::event(lookup::owned_value_path!(
+                            "timesatamp"
+                        ))),
+                    }),
+                format: TimestampFormat::Native,
+                timestamp_nanos_key: None,
+                preserve_timestamp_key: false,
             }),
             ..config(JsonSerializerConfig::default().into(), vec![]).await
         };
@@ -553,10 +560,15 @@ async fn splunk_non_auto_extracted_timestamp() {
 
         let config = HecLogsSinkConfig {
             auto_extract_timestamp: Some(false),
-            timestamp_key: Some(OptionalTargetPath {
-                path: Some(OwnedTargetPath::event(lookup::owned_value_path!(
-                    "timestamp"
-                ))),
+            timestamp_configuration: Some(TimestampConfiguration{
+                timestamp_key:Some(OptionalTargetPath {
+                    path: Some(OwnedTargetPath::event(lookup::owned_value_path!(
+                            "timestamp"
+                        ))),
+                }),
+                format: TimestampFormat::Native,
+                timestamp_nanos_key: None,
+                preserve_timestamp_key: false,
             }),
             ..config(JsonSerializerConfig::default().into(), vec![]).await
         };
