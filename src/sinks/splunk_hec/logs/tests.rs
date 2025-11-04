@@ -399,3 +399,407 @@ fn splunk_encode_log_event_semantic_meanings() {
 
     assert_eq!(hec_data.host, Some("roast".to_string()));
 }
+
+#[test]
+fn splunk_encode_log_event_json_timestamps_seconds() {
+    crate::test_util::trace_init();
+
+    // Build an event similar to `get_processed_event_timestamp` but force Seconds format
+    let mut event = Event::Log(LogEvent::from("hello world"));
+    event.as_mut_log().insert("event_sourcetype", "test_sourcetype");
+    event.as_mut_log().insert("event_source", "test_source");
+    event.as_mut_log().insert("event_index", "test_index");
+    event.as_mut_log().insert("host_key", "test_host");
+    event.as_mut_log().insert("event_field1", "test_value1");
+    event.as_mut_log().insert("event_field2", "test_value2");
+    event.as_mut_log().insert("key", "value");
+    event.as_mut_log().insert("int_val", 123);
+
+    // timestamp with nanoseconds
+    let ts_val = Value::Integer(1638366107);
+    event.as_mut_log().insert(
+        &OwnedTargetPath::event(owned_value_path!("time")),
+        ts_val
+    );
+
+    let timestamp_configuration = TimestampConfiguration {
+        timestamp_key: Some(OptionalTargetPath {
+            path: Some(OwnedTargetPath::event(owned_value_path!("time"))),
+        }),
+        auto_extract_timestamp: Some(false),
+        remove_from_event: true,
+        format: TimestampFormat::Seconds,
+    };
+
+    let sourcetype = Template::try_from("{{ event_sourcetype }}".to_string()).ok();
+    let source = Template::try_from("{{ event_source }}".to_string()).ok();
+    let index = Template::try_from("{{ event_index }}".to_string()).ok();
+    let indexed_fields = vec![
+        owned_value_path!("event_field1"),
+        owned_value_path!("event_field2"),
+    ];
+    let timestamp_nanos_key = Some(String::from("ts_nanos_key"));
+
+    let processed = process_log(
+        event,
+        &super::sink::HecLogData {
+            sourcetype: sourcetype.as_ref(),
+            source: source.as_ref(),
+            index: index.as_ref(),
+            host_key: Some(OptionalTargetPath {
+                path: Some(OwnedTargetPath::event(owned_value_path!("host_key"))),
+            }),
+            indexed_fields: indexed_fields.as_slice(),
+            timestamp_nanos_key: timestamp_nanos_key.as_ref(),
+            endpoint_target: EndpointTarget::Event,
+            auto_extract_timestamp: false,
+            timestamp_configuration: Some(timestamp_configuration),
+        },
+    );
+
+    let hec_data =
+        get_encoded_event::<HecEventJson>(JsonSerializerConfig::default().into(), processed);
+
+    // Expect whole seconds (truncate fractional) for Seconds format
+    assert_eq!(hec_data.time, Some(1638366107.0));
+
+    // The remaining nanoseconds after truncating to seconds should be present in ts_nanos_key
+    assert_eq!(
+        hec_data
+            .event
+            .get("ts_nanos_key")
+            .unwrap(),
+        &serde_json::Value::from(0)
+    );
+
+    // Basic metadata checks
+    assert_eq!(hec_data.source, Some("test_source".to_string()));
+    assert_eq!(hec_data.sourcetype, Some("test_sourcetype".to_string()));
+    assert_eq!(hec_data.index, Some("test_index".to_string()));
+    assert_eq!(hec_data.host, Some("test_host".to_string()));
+    assert_eq!(hec_data.fields.get("event_field1").unwrap(), "test_value1");
+}
+
+
+#[test]
+fn splunk_encode_log_event_json_timestamps_milliseconds() {
+    crate::test_util::trace_init();
+
+    // Build an event similar to `get_processed_event_timestamp` but force Seconds format
+    let mut event = Event::Log(LogEvent::from("hello world"));
+    event.as_mut_log().insert("event_sourcetype", "test_sourcetype");
+    event.as_mut_log().insert("event_source", "test_source");
+    event.as_mut_log().insert("event_index", "test_index");
+    event.as_mut_log().insert("host_key", "test_host");
+    event.as_mut_log().insert("event_field1", "test_value1");
+    event.as_mut_log().insert("event_field2", "test_value2");
+    event.as_mut_log().insert("key", "value");
+    event.as_mut_log().insert("int_val", 123);
+
+    // timestamp with nanoseconds
+    let ts_val = Value::Integer(1638366107983);
+    event.as_mut_log().insert(
+        &OwnedTargetPath::event(owned_value_path!("time")),
+        ts_val
+    );
+
+    let timestamp_configuration = TimestampConfiguration {
+        timestamp_key: Some(OptionalTargetPath {
+            path: Some(OwnedTargetPath::event(owned_value_path!("time"))),
+        }),
+        auto_extract_timestamp: Some(false),
+        remove_from_event: true,
+        format: TimestampFormat::MilliSeconds,
+    };
+
+    let sourcetype = Template::try_from("{{ event_sourcetype }}".to_string()).ok();
+    let source = Template::try_from("{{ event_source }}".to_string()).ok();
+    let index = Template::try_from("{{ event_index }}".to_string()).ok();
+    let indexed_fields = vec![
+        owned_value_path!("event_field1"),
+        owned_value_path!("event_field2"),
+    ];
+    let timestamp_nanos_key = Some(String::from("ts_nanos_key"));
+
+    let processed = process_log(
+        event,
+        &super::sink::HecLogData {
+            sourcetype: sourcetype.as_ref(),
+            source: source.as_ref(),
+            index: index.as_ref(),
+            host_key: Some(OptionalTargetPath {
+                path: Some(OwnedTargetPath::event(owned_value_path!("host_key"))),
+            }),
+            indexed_fields: indexed_fields.as_slice(),
+            timestamp_nanos_key: timestamp_nanos_key.as_ref(),
+            endpoint_target: EndpointTarget::Event,
+            auto_extract_timestamp: false,
+            timestamp_configuration: Some(timestamp_configuration),
+        },
+    );
+
+    let hec_data =
+        get_encoded_event::<HecEventJson>(JsonSerializerConfig::default().into(), processed);
+
+    // Expect whole seconds (truncate fractional) for Seconds format
+    assert_eq!(hec_data.time, Some(1638366107.983));
+
+    // The remaining nanoseconds after truncating to seconds should be present in ts_nanos_key
+    assert_eq!(
+        hec_data
+            .event
+            .get("ts_nanos_key")
+            .unwrap(),
+        &serde_json::Value::from(983000000)
+    );
+
+    // Basic metadata checks
+    assert_eq!(hec_data.source, Some("test_source".to_string()));
+    assert_eq!(hec_data.sourcetype, Some("test_sourcetype".to_string()));
+    assert_eq!(hec_data.index, Some("test_index".to_string()));
+    assert_eq!(hec_data.host, Some("test_host".to_string()));
+    assert_eq!(hec_data.fields.get("event_field1").unwrap(), "test_value1");
+}
+
+
+#[test]
+fn splunk_encode_log_event_json_timestamps_nanoseconds() {
+    crate::test_util::trace_init();
+
+    // Build an event similar to `get_processed_event_timestamp` but force Seconds format
+    let mut event = Event::Log(LogEvent::from("hello world"));
+    event.as_mut_log().insert("event_sourcetype", "test_sourcetype");
+    event.as_mut_log().insert("event_source", "test_source");
+    event.as_mut_log().insert("event_index", "test_index");
+    event.as_mut_log().insert("host_key", "test_host");
+    event.as_mut_log().insert("event_field1", "test_value1");
+    event.as_mut_log().insert("event_field2", "test_value2");
+    event.as_mut_log().insert("key", "value");
+    event.as_mut_log().insert("int_val", 123);
+
+    // timestamp with nanoseconds
+    let ts_val = Value::Integer(1638366107983874983);
+    event.as_mut_log().insert(
+        &OwnedTargetPath::event(owned_value_path!("time")),
+        ts_val
+    );
+
+    let timestamp_configuration = TimestampConfiguration {
+        timestamp_key: Some(OptionalTargetPath {
+            path: Some(OwnedTargetPath::event(owned_value_path!("time"))),
+        }),
+        auto_extract_timestamp: Some(false),
+        remove_from_event: true,
+        format: TimestampFormat::Nanos,
+    };
+
+    let sourcetype = Template::try_from("{{ event_sourcetype }}".to_string()).ok();
+    let source = Template::try_from("{{ event_source }}".to_string()).ok();
+    let index = Template::try_from("{{ event_index }}".to_string()).ok();
+    let indexed_fields = vec![
+        owned_value_path!("event_field1"),
+        owned_value_path!("event_field2"),
+    ];
+    let timestamp_nanos_key = Some(String::from("ts_nanos_key"));
+
+    let processed = process_log(
+        event,
+        &super::sink::HecLogData {
+            sourcetype: sourcetype.as_ref(),
+            source: source.as_ref(),
+            index: index.as_ref(),
+            host_key: Some(OptionalTargetPath {
+                path: Some(OwnedTargetPath::event(owned_value_path!("host_key"))),
+            }),
+            indexed_fields: indexed_fields.as_slice(),
+            timestamp_nanos_key: timestamp_nanos_key.as_ref(),
+            endpoint_target: EndpointTarget::Event,
+            auto_extract_timestamp: false,
+            timestamp_configuration: Some(timestamp_configuration),
+        },
+    );
+
+    let hec_data =
+        get_encoded_event::<HecEventJson>(JsonSerializerConfig::default().into(), processed);
+
+    // Expect whole seconds (truncate fractional) for Seconds format
+    assert_eq!(hec_data.time, Some(1638366107.983874983));
+
+    // The remaining nanoseconds after truncating to seconds should be present in ts_nanos_key
+    assert_eq!(
+        hec_data
+            .event
+            .get("ts_nanos_key")
+            .unwrap(),
+        &serde_json::Value::from(983874983)
+    );
+
+    // Basic metadata checks
+    assert_eq!(hec_data.source, Some("test_source".to_string()));
+    assert_eq!(hec_data.sourcetype, Some("test_sourcetype".to_string()));
+    assert_eq!(hec_data.index, Some("test_index".to_string()));
+    assert_eq!(hec_data.host, Some("test_host".to_string()));
+    assert_eq!(hec_data.fields.get("event_field1").unwrap(), "test_value1");
+}
+
+
+#[test]
+fn splunk_encode_log_event_json_timestamps_regex() {
+    crate::test_util::trace_init();
+
+    // Build an event similar to `get_processed_event_timestamp` but force Seconds format
+    let mut event = Event::Log(LogEvent::from("hello world"));
+    event.as_mut_log().insert("event_sourcetype", "test_sourcetype");
+    event.as_mut_log().insert("event_source", "test_source");
+    event.as_mut_log().insert("event_index", "test_index");
+    event.as_mut_log().insert("host_key", "test_host");
+    event.as_mut_log().insert("event_field1", "test_value1");
+    event.as_mut_log().insert("event_field2", "test_value2");
+    event.as_mut_log().insert("key", "value");
+    event.as_mut_log().insert("int_val", 123);
+
+    // timestamp with nanoseconds
+    let ts_val = Value::Bytes("1995 Aug 6 12:09:14.274 +0000".into());
+    event.as_mut_log().insert(
+        &OwnedTargetPath::event(owned_value_path!("time")),
+        ts_val
+    );
+
+    let timestamp_configuration = TimestampConfiguration {
+        timestamp_key: Some(OptionalTargetPath {
+            path: Some(OwnedTargetPath::event(owned_value_path!("time"))),
+        }),
+        auto_extract_timestamp: Some(false),
+        remove_from_event: true,
+        format: TimestampFormat::Regex("%Y %b %d %H:%M:%S%.3f %z".to_string()),
+    };
+
+    let sourcetype = Template::try_from("{{ event_sourcetype }}".to_string()).ok();
+    let source = Template::try_from("{{ event_source }}".to_string()).ok();
+    let index = Template::try_from("{{ event_index }}".to_string()).ok();
+    let indexed_fields = vec![
+        owned_value_path!("event_field1"),
+        owned_value_path!("event_field2"),
+    ];
+    let timestamp_nanos_key = Some(String::from("ts_nanos_key"));
+
+    let processed = process_log(
+        event,
+        &super::sink::HecLogData {
+            sourcetype: sourcetype.as_ref(),
+            source: source.as_ref(),
+            index: index.as_ref(),
+            host_key: Some(OptionalTargetPath {
+                path: Some(OwnedTargetPath::event(owned_value_path!("host_key"))),
+            }),
+            indexed_fields: indexed_fields.as_slice(),
+            timestamp_nanos_key: timestamp_nanos_key.as_ref(),
+            endpoint_target: EndpointTarget::Event,
+            auto_extract_timestamp: false,
+            timestamp_configuration: Some(timestamp_configuration),
+        },
+    );
+
+    let hec_data =
+        get_encoded_event::<HecEventJson>(JsonSerializerConfig::default().into(), processed);
+
+    // Expect whole seconds (truncate fractional) for Seconds format
+    assert_eq!(hec_data.time, Some(807710954.274));
+
+    // The remaining nanoseconds after truncating to seconds should be present in ts_nanos_key
+    assert_eq!(
+        hec_data
+            .event
+            .get("ts_nanos_key")
+            .unwrap(),
+        &serde_json::Value::from(0)
+    );
+
+    // Basic metadata checks
+    assert_eq!(hec_data.source, Some("test_source".to_string()));
+    assert_eq!(hec_data.sourcetype, Some("test_sourcetype".to_string()));
+    assert_eq!(hec_data.index, Some("test_index".to_string()));
+    assert_eq!(hec_data.host, Some("test_host".to_string()));
+    assert_eq!(hec_data.fields.get("event_field1").unwrap(), "test_value1");
+}
+
+
+#[test]
+fn splunk_encode_log_event_json_timestamps_regex_mm() {
+    crate::test_util::trace_init();
+
+    // Build an event similar to `get_processed_event_timestamp` but force Seconds format
+    let mut event = Event::Log(LogEvent::from("hello world"));
+    event.as_mut_log().insert("event_sourcetype", "test_sourcetype");
+    event.as_mut_log().insert("event_source", "test_source");
+    event.as_mut_log().insert("event_index", "test_index");
+    event.as_mut_log().insert("host_key", "test_host");
+    event.as_mut_log().insert("event_field1", "test_value1");
+    event.as_mut_log().insert("event_field2", "test_value2");
+    event.as_mut_log().insert("key", "value");
+    event.as_mut_log().insert("int_val", 123);
+
+    // timestamp with nanoseconds
+    let ts_val = Value::Bytes("1995-08-06T12:34:56.789".into());
+    event.as_mut_log().insert(
+        &OwnedTargetPath::event(owned_value_path!("time")),
+        ts_val
+    );
+
+    let timestamp_configuration = TimestampConfiguration {
+        timestamp_key: Some(OptionalTargetPath {
+            path: Some(OwnedTargetPath::event(owned_value_path!("time"))),
+        }),
+        auto_extract_timestamp: Some(false),
+        remove_from_event: true,
+        format: TimestampFormat::Regex("%Y-%m-%dT%H:%M:%S.%f".to_string()),
+    };
+
+    let sourcetype = Template::try_from("{{ event_sourcetype }}".to_string()).ok();
+    let source = Template::try_from("{{ event_source }}".to_string()).ok();
+    let index = Template::try_from("{{ event_index }}".to_string()).ok();
+    let indexed_fields = vec![
+        owned_value_path!("event_field1"),
+        owned_value_path!("event_field2"),
+    ];
+    let timestamp_nanos_key = Some(String::from("ts_nanos_key"));
+
+    let processed = process_log(
+        event,
+        &super::sink::HecLogData {
+            sourcetype: sourcetype.as_ref(),
+            source: source.as_ref(),
+            index: index.as_ref(),
+            host_key: Some(OptionalTargetPath {
+                path: Some(OwnedTargetPath::event(owned_value_path!("host_key"))),
+            }),
+            indexed_fields: indexed_fields.as_slice(),
+            timestamp_nanos_key: timestamp_nanos_key.as_ref(),
+            endpoint_target: EndpointTarget::Event,
+            auto_extract_timestamp: false,
+            timestamp_configuration: Some(timestamp_configuration),
+        },
+    );
+
+    let hec_data =
+        get_encoded_event::<HecEventJson>(JsonSerializerConfig::default().into(), processed);
+
+    // Expect whole seconds (truncate fractional) for Seconds format
+    assert_eq!(hec_data.time, Some(807712496.0));
+
+    // The remaining nanoseconds after truncating to seconds should be present in ts_nanos_key
+    assert_eq!(
+        hec_data
+            .event
+            .get("ts_nanos_key")
+            .unwrap(),
+        &serde_json::Value::from(789)
+    );
+
+    // Basic metadata checks
+    assert_eq!(hec_data.source, Some("test_source".to_string()));
+    assert_eq!(hec_data.sourcetype, Some("test_sourcetype".to_string()));
+    assert_eq!(hec_data.index, Some("test_index".to_string()));
+    assert_eq!(hec_data.host, Some("test_host".to_string()));
+    assert_eq!(hec_data.fields.get("event_field1").unwrap(), "test_value1");
+}
