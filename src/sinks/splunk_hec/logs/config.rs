@@ -158,8 +158,8 @@ pub struct TimestampConfiguration {
     #[configurable(metadata(docs::advanced))]
     #[configurable(metadata(docs::examples = "timestamp", docs::examples = ""))]
     // NOTE: The `OptionalTargetPath` is wrapped in an `Option` in order to distinguish between a true
-    //       `None` type and an empty string. This is necessary because `OptionalTargetPath` deserializes an
-    //       empty string to a `None` path internally.
+    // `None` type and an empty string. This is necessary because `OptionalTargetPath` deserializes an
+    // empty string to a `None` path internally.
     pub timestamp_key: Option<OptionalTargetPath>,
     #[configurable(derived)]
     #[serde(default = "default_timestamp_format")]
@@ -181,8 +181,8 @@ pub enum TimestampFormat {
     Native,
     /// Numeric timestamp with configurable precision
     Numeric (TimePrecision),
-    /// `strftime`-style format string to format or parse timestamps.
-    Strftime(String),
+    /// `Fmtstr`-style format string to format or parse timestamps.
+    Fmtstr(String),
 }
 
 #[configurable_component]

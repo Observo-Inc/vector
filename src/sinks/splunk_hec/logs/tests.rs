@@ -527,7 +527,7 @@ fn test_timestamp_configurations() {
                 format: TimestampFormat::Numeric(TimePrecision::Milliseconds),
             }),
             expected_time: Some(1638366107.983),
-            expected_nanos: Some(983000000),
+            expected_nanos: Some(0),
             should_preserve_timestamp: false,
             time_metadata_should_exist: true
         },
@@ -544,7 +544,7 @@ fn test_timestamp_configurations() {
                 format: TimestampFormat::Numeric(TimePrecision::Microseconds),
             }),
             expected_time: Some(1638366107.983874),
-            expected_nanos: Some(983874000),
+            expected_nanos: Some(874000),
             should_preserve_timestamp: false,
             time_metadata_should_exist: true
         },
@@ -561,7 +561,7 @@ fn test_timestamp_configurations() {
                 format: TimestampFormat::Numeric(TimePrecision::Nanoseconds),
             }),
             expected_time: Some(1638366107.983874983),
-            expected_nanos: Some(983874983),
+            expected_nanos: Some(874983),
             should_preserve_timestamp: false,
             time_metadata_should_exist: true
         },
@@ -592,7 +592,7 @@ fn test_timestamp_configurations() {
                 }),
                 timestamp_nanos_key: Some(String::from("ts_nanos_key")),
                 preserve_timestamp_key: false,
-                format: TimestampFormat::Strftime("%Y %b %d %H:%M:%S%.3f %z".to_string()), //strftime
+                format: TimestampFormat::Fmtstr("%Y %b %d %H:%M:%S%.3f %z".to_string()), //strftime
             }),
             expected_time: Some(807710954.274),
             expected_nanos: Some(0),
@@ -609,7 +609,7 @@ fn test_timestamp_configurations() {
                 }),
                 timestamp_nanos_key: Some(String::from("ts_nanos_key")),
                 preserve_timestamp_key: false,
-                format: TimestampFormat::Strftime("%Y-%m-%dT%H:%M:%S.%f".to_string()),
+                format: TimestampFormat::Fmtstr("%Y-%m-%dT%H:%M:%S.%f".to_string()),
             }),
             expected_time: Some(807712496.0),
             expected_nanos: Some(789),

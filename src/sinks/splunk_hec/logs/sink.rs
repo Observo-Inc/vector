@@ -300,7 +300,7 @@ pub fn process_log(event: Event, data: &HecLogData) -> HecProcessedEvent {
         );
 
 
-        let ts = timestamp_path_opt.as_ref().and_then(|timestamp_path| {
+        let (ts, subsec_nanos) = timestamp_path_opt.as_ref().and_then(|timestamp_path| {
             let value_opt = log.get(timestamp_path).cloned();
             match (value_opt, timestamp_format) {
 
@@ -309,43 +309,30 @@ pub fn process_log(event: Event, data: &HecLogData) -> HecProcessedEvent {
                     None
                 }
                 (Some(Value::Timestamp(ts)), _) => {
-                        if let Some(key) = timestamp_nanos_key {
-                            log.try_insert(event_path!(key), ts.timestamp_subsec_nanos() % 1_000_000);
-                        }
-                        Some((ts.timestamp_millis() as f64) / 1000f64)
+                    Some((
+                        (ts.timestamp_millis() as f64) / 1000f64,
+                        ts.timestamp_subsec_nanos() % 1_000_000
+                    ))
                 }
 
                 (Some(Value::Integer(i)), Some(crate::sinks::splunk_hec::logs::config::TimestampFormat::Numeric(precision))) => {
                     match precision {
                         crate::sinks::splunk_hec::logs::config::TimePrecision::Seconds => {
-                            if let Some(key) = timestamp_nanos_key {
-                                log.try_insert(event_path!(key), 0);
-                            }
-                            Some(i as f64)
+                            Some((i as f64, 0))
                         }
                         crate::sinks::splunk_hec::logs::config::TimePrecision::Milliseconds => {
-                            if let Some(key) = timestamp_nanos_key {
-                                log.try_insert(event_path!(key), ((i % 1000) * 1_000_000) as u32);
-                            }
-                            Some((i as f64) / 1000f64)
+                            Some(((i as f64) / 1000f64, 0))
                         }
                         crate::sinks::splunk_hec::logs::config::TimePrecision::Microseconds => {
-                            if let Some(key) = timestamp_nanos_key {
-                                log.try_insert(event_path!(key), ((i % 1_000_000) * 1_000) as u32);
-                            }
-                            Some((i as f64) / 1000_000f64)
+                            Some(((i as f64) / 1000_000f64, (((i % 1_000_000_000)% 1_000)*1000) as u32))
                         }
                         crate::sinks::splunk_hec::logs::config::TimePrecision::Nanoseconds => {
-                            // convert
-                            if let Some(key) = timestamp_nanos_key {
-                                log.try_insert(event_path!(key), (i % 1_000_000_000) as u32);
-                            }
-                            Some((i as f64) / 1_000_000_000f64)
+                            Some(((i as f64) / 1_000_000_000f64, ((i % 1_000_000_000) % 1_000_000) as u32))
                         }
                     }
                 }
 
-                (Some(Value::Bytes(b)), Some(crate::sinks::splunk_hec::logs::config::TimestampFormat::Strftime(fmt))) => {
+                (Some(Value::Bytes(b)), Some(crate::sinks::splunk_hec::logs::config::TimestampFormat::Fmtstr(fmt))) => {
                     let s = match std::str::from_utf8(&b) {
                         Ok(s) => s,
                         Err(err) => {
@@ -358,10 +345,10 @@ pub fn process_log(event: Event, data: &HecLogData) -> HecProcessedEvent {
                     let date_time_result = parse_with_format(s, &fmt);
                     match date_time_result {
                         Ok(utc) => {
-                            if let Some(key) = timestamp_nanos_key {
-                                log.try_insert(event_path!(key), utc.timestamp_subsec_nanos() % 1_000_000);
-                            }
-                            Some((utc.timestamp_millis() as f64) / 1000f64)
+                            Some((
+                                (utc.timestamp_millis() as f64) / 1000f64,
+                                utc.timestamp_subsec_nanos() % 1_000_000
+                            ))
                         }
                         Err(err) => {
                             error!("Failed to parse timestamp from strftime for Splunk HEC event: {}", err);
@@ -378,7 +365,14 @@ pub fn process_log(event: Event, data: &HecLogData) -> HecProcessedEvent {
                     None
                 }
             }
-        });
+        }).unzip();
+
+        if let Some(nanos) = subsec_nanos {
+            if let Some(key) = timestamp_nanos_key {
+                log.try_insert(event_path!(key), nanos);
+            }
+        }
+
         if !preserve_timestamp_key_in_event && timestamp_path_opt.is_some(){
             let _ = log.remove(timestamp_path_opt.as_ref().unwrap());
         }
