@@ -25,6 +25,8 @@ use crate::{
     template::Template,
     tls::TlsConfig,
 };
+use crate::sinks::splunk_hec::logs::config::TimestampFormat;
+use crate::sinks::splunk_hec::logs::config::TimestampConfiguration;
 
 pub(super) const HOST: &str = "https://cloud.humio.com";
 
@@ -199,7 +201,6 @@ impl HumioLogsConfig {
             index: self.index.clone(),
             sourcetype: self.event_type.clone(),
             source: self.source.clone(),
-            timestamp_nanos_key: self.timestamp_nanos_key.clone(),
             encoding: self.encoding.clone(),
             compression: self.compression,
             batch: self.batch,
@@ -209,10 +210,15 @@ impl HumioLogsConfig {
                 indexer_acknowledgements_enabled: false,
                 ..Default::default()
             },
-            timestamp_key: Some(config_timestamp_key_target_path()),
             endpoint_target: EndpointTarget::Event,
             auto_extract_timestamp: None,
             path: None,
+            timestamp_configuration: Some(TimestampConfiguration {
+                timestamp_key: Some(config_timestamp_key_target_path()),
+                format: TimestampFormat::Native,
+                timestamp_nanos_key: self.timestamp_nanos_key.clone(),
+                preserve_timestamp_key: false,
+            })
         }
     }
 }

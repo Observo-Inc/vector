@@ -31,6 +31,7 @@ use crate::{
     template::Template,
     test_util::next_addr,
 };
+use crate::sinks::splunk_hec::logs::config::{TimePrecision, TimestampConfiguration, TimestampFormat};
 
 #[derive(Deserialize, Debug)]
 struct HecEventJson {
@@ -97,6 +98,15 @@ fn get_processed_event_timestamp(
                 .remove(&OwnedTargetPath::event(ts_path.path.clone()));
         }
     }
+    let timestamp_nanos_key = Some(String::from("ts_nanos_key"));
+
+    let timestamp_configuration = TimestampConfiguration {
+        timestamp_key: timestamp_key.clone(),
+        timestamp_nanos_key,
+        preserve_timestamp_key: false,
+        format: TimestampFormat::Native
+    };
+
 
     let sourcetype = Template::try_from("{{ event_sourcetype }}".to_string()).ok();
     let source = Template::try_from("{{ event_source }}".to_string()).ok();
@@ -105,7 +115,7 @@ fn get_processed_event_timestamp(
         owned_value_path!("event_field1"),
         owned_value_path!("event_field2"),
     ];
-    let timestamp_nanos_key = Some(String::from("ts_nanos_key"));
+
 
     process_log(
         event,
@@ -117,10 +127,9 @@ fn get_processed_event_timestamp(
                 path: Some(OwnedTargetPath::event(owned_value_path!("host_key"))),
             }),
             indexed_fields: indexed_fields.as_slice(),
-            timestamp_nanos_key: timestamp_nanos_key.as_ref(),
-            timestamp_key,
             endpoint_target: EndpointTarget::Event,
             auto_extract_timestamp,
+            timestamp_configuration: Some(timestamp_configuration),
         },
     )
 }
@@ -234,10 +243,9 @@ async fn splunk_passthrough_token() {
         tls: None,
         acknowledgements: Default::default(),
         path: None,
-        timestamp_nanos_key: None,
-        timestamp_key: None,
         auto_extract_timestamp: None,
         endpoint_target: EndpointTarget::Event,
+        timestamp_configuration: None
     };
     let cx = SinkContext::default();
 
@@ -375,10 +383,9 @@ fn splunk_encode_log_event_semantic_meanings() {
             index: None,
             host_key: None,
             indexed_fields: &[],
-            timestamp_nanos_key: None,
-            timestamp_key: None,
             endpoint_target: EndpointTarget::Event,
             auto_extract_timestamp: false,
+            timestamp_configuration: None,
         },
     );
 
@@ -388,4 +395,312 @@ fn splunk_encode_log_event_semantic_meanings() {
     assert_eq!(hec_data.time, Some(expected_time));
 
     assert_eq!(hec_data.host, Some("roast".to_string()));
+}
+
+#[test]
+fn splunk_encode_log_event_json_no_timestamp_configuration() {
+    crate::test_util::trace_init();
+
+    // Vector should default to extracting user logspaced
+    // timestamp if no timestamp configuration is provided
+
+    // Build an event similar to `get_processed_event_timestamp` but force Seconds format
+    let mut event = create_test_event();
+
+    // timestamp with nanoseconds
+    let ts_val = Value::Integer(1638366107983);
+    event.as_mut_log().insert(
+        &OwnedTargetPath::event(owned_value_path!("time")),
+        ts_val
+    );
+
+    let sourcetype = Template::try_from("{{ event_sourcetype }}".to_string()).ok();
+    let source = Template::try_from("{{ event_source }}".to_string()).ok();
+    let index = Template::try_from("{{ event_index }}".to_string()).ok();
+    let indexed_fields = vec![
+        owned_value_path!("event_field1"),
+        owned_value_path!("event_field2"),
+    ];
+
+
+    let processed = process_log(
+        event,
+        &super::sink::HecLogData {
+            sourcetype: sourcetype.as_ref(),
+            source: source.as_ref(),
+            index: index.as_ref(),
+            host_key: Some(OptionalTargetPath {
+                path: Some(OwnedTargetPath::event(owned_value_path!("host_key"))),
+            }),
+            indexed_fields: indexed_fields.as_slice(),
+            endpoint_target: EndpointTarget::Event,
+            auto_extract_timestamp: false,
+            timestamp_configuration: None,
+        },
+    );
+
+    let hec_data =
+        get_encoded_event::<HecEventJson>(JsonSerializerConfig::default().into(), processed);
+
+    // Even though we didn't provide timestamp configuration, it takes user logspaced timestamp and
+    // adds that to the metadata, which will be the current time in seconds
+    assert_eq!(hec_data.time.is_some(), true);
+
+    // Timestamp key path is not present in event, we expect no ts_nanos_key
+    assert_eq!(hec_data.event.get("ts_nanos_key"), None);
+
+
+    // user_logspaced timestamp should be removed from the event
+    assert_eq!(
+        hec_data
+            .event
+            .get("timestamp")
+            .is_none(),
+        true
+    );
+
+    // Basic metadata checks
+    assert_eq!(hec_data.source, Some("test_source".to_string()));
+    assert_eq!(hec_data.sourcetype, Some("test_sourcetype".to_string()));
+    assert_eq!(hec_data.index, Some("test_index".to_string()));
+    assert_eq!(hec_data.host, Some("test_host".to_string()));
+    assert_eq!(hec_data.fields.get("event_field1").unwrap(), "test_value1");
+}
+
+fn create_test_event() -> Event {
+    let mut event = Event::Log(LogEvent::from("hello world"));
+    let log = event.as_mut_log();
+    log.insert("event_sourcetype", "test_sourcetype");
+    log.insert("event_source", "test_source");
+    log.insert("event_index", "test_index");
+    log.insert("host_key", "test_host");
+    log.insert("event_field1", "test_value1");
+    log.insert("event_field2", "test_value2");
+    log.insert("key", "value");
+    log.insert("int_val", 123);
+    event
+}
+
+#[test]
+fn test_timestamp_configurations() {
+    crate::test_util::trace_init();
+
+    struct TestCase {
+        name: &'static str,
+        timestamp_value: Value,
+        event_timestamp_insertion_path: String,
+        config: Option<TimestampConfiguration>,
+        expected_time: Option<f64>,
+        expected_nanos: Option<i64>,
+        time_metadata_should_exist: bool,
+        should_preserve_timestamp: bool,
+    }
+
+    let test_cases = vec![
+        TestCase {
+            name: "seconds precision",
+            timestamp_value: Value::Integer(1638366107),
+            event_timestamp_insertion_path: "time".to_string(),
+            config: Some(TimestampConfiguration {
+                timestamp_key: Some(OptionalTargetPath {
+                    path: Some(OwnedTargetPath::event(owned_value_path!("time"))),
+                }),
+                timestamp_nanos_key: Some(String::from("ts_nanos_key")),
+                preserve_timestamp_key: false,
+                format: TimestampFormat::Numeric(TimePrecision::Seconds),
+            }),
+            expected_time: Some(1638366107.0),
+            expected_nanos: Some(0),
+            should_preserve_timestamp: false,
+            time_metadata_should_exist: true
+        },
+        TestCase {
+            name: "milliseconds precision",
+            timestamp_value: Value::Integer(1638366107983),
+            event_timestamp_insertion_path: "time".to_string(),
+            config: Some(TimestampConfiguration {
+                timestamp_key: Some(OptionalTargetPath {
+                    path: Some(OwnedTargetPath::event(owned_value_path!("time"))),
+                }),
+                timestamp_nanos_key: Some(String::from("ts_nanos_key")),
+                preserve_timestamp_key: false,
+                format: TimestampFormat::Numeric(TimePrecision::Milliseconds),
+            }),
+            expected_time: Some(1638366107.983),
+            expected_nanos: Some(0),
+            should_preserve_timestamp: false,
+            time_metadata_should_exist: true
+        },
+        TestCase {
+            name: "microseconds precision",
+            timestamp_value: Value::Integer(1638366107983874),
+            event_timestamp_insertion_path: "time".to_string(),
+            config: Some(TimestampConfiguration {
+                timestamp_key: Some(OptionalTargetPath {
+                    path: Some(OwnedTargetPath::event(owned_value_path!("time"))),
+                }),
+                timestamp_nanos_key: Some(String::from("ts_nanos_key")),
+                preserve_timestamp_key: false,
+                format: TimestampFormat::Numeric(TimePrecision::Microseconds),
+            }),
+            expected_time: Some(1638366107.983874),
+            expected_nanos: Some(874000),
+            should_preserve_timestamp: false,
+            time_metadata_should_exist: true
+        },
+        TestCase {
+            name: "nanoseconds precision",
+            timestamp_value: Value::Integer(1638366107983874983),
+            event_timestamp_insertion_path: "time".to_string(),
+            config: Some(TimestampConfiguration {
+                timestamp_key: Some(OptionalTargetPath {
+                    path: Some(OwnedTargetPath::event(owned_value_path!("time"))),
+                }),
+                timestamp_nanos_key: Some(String::from("ts_nanos_key")),
+                preserve_timestamp_key: false,
+                format: TimestampFormat::Numeric(TimePrecision::Nanoseconds),
+            }),
+            expected_time: Some(1638366107.983874983),
+            expected_nanos: Some(874983),
+            should_preserve_timestamp: false,
+            time_metadata_should_exist: true
+        },
+        TestCase {
+            name: "seconds precision, with invalid path configuration metadata should not present",
+            timestamp_value: Value::Integer(1638366107),
+            event_timestamp_insertion_path: "invalid_time_path".to_string(),
+            config: Some(TimestampConfiguration {
+                timestamp_key: Some(OptionalTargetPath {
+                    path: Some(OwnedTargetPath::event(owned_value_path!("time"))),
+                }),
+                timestamp_nanos_key: Some(String::from("ts_nanos_key")),
+                preserve_timestamp_key: false,
+                format: TimestampFormat::Numeric(TimePrecision::Seconds),
+            }),
+            expected_time: None,
+            expected_nanos: None,
+            should_preserve_timestamp: true,
+            time_metadata_should_exist: false
+        },
+        TestCase {
+            name: "regex format with timezone",
+            event_timestamp_insertion_path: "time".to_string(),
+            timestamp_value: Value::Bytes("1995 Aug 6 12:09:14.274 +0000".into()),
+            config: Some(TimestampConfiguration {
+                timestamp_key: Some(OptionalTargetPath {
+                    path: Some(OwnedTargetPath::event(owned_value_path!("time"))),
+                }),
+                timestamp_nanos_key: Some(String::from("ts_nanos_key")),
+                preserve_timestamp_key: false,
+                format: TimestampFormat::Fmtstr("%Y %b %d %H:%M:%S%.3f %z".to_string()), //strftime
+            }),
+            expected_time: Some(807710954.274),
+            expected_nanos: Some(0),
+            should_preserve_timestamp: false,
+            time_metadata_should_exist: true
+        },
+        TestCase {
+            name: "regex format without zone in format",
+            event_timestamp_insertion_path: "time".to_string(),
+            timestamp_value: Value::Bytes("1995-08-06T12:34:56.789".into()),
+            config: Some(TimestampConfiguration {
+                timestamp_key: Some(OptionalTargetPath {
+                    path: Some(OwnedTargetPath::event(owned_value_path!("time"))),
+                }),
+                timestamp_nanos_key: Some(String::from("ts_nanos_key")),
+                preserve_timestamp_key: false,
+                format: TimestampFormat::Fmtstr("%Y-%m-%dT%H:%M:%S.%f".to_string()),
+            }),
+            expected_time: Some(807712496.0),
+            expected_nanos: Some(789),
+            should_preserve_timestamp: false,
+            time_metadata_should_exist: true
+        },
+    ];
+
+    for test_case in test_cases {
+        let mut event = create_test_event();
+        event.as_mut_log().insert(
+            &OwnedTargetPath::event(owned_value_path!(test_case.event_timestamp_insertion_path.as_str())),
+            test_case.timestamp_value,
+        );
+
+        let sourcetype = Template::try_from("{{ event_sourcetype }}".to_string()).ok();
+        let source = Template::try_from("{{ event_source }}".to_string()).ok();
+        let index = Template::try_from("{{ event_index }}".to_string()).ok();
+        let indexed_fields = vec![
+            owned_value_path!("event_field1"),
+            owned_value_path!("event_field2"),
+        ];
+
+        let processed = process_log(
+            event,
+            &super::sink::HecLogData {
+                sourcetype: sourcetype.as_ref(),
+                source: source.as_ref(),
+                index: index.as_ref(),
+                host_key: Some(OptionalTargetPath {
+                    path: Some(OwnedTargetPath::event(owned_value_path!("host_key"))),
+                }),
+                indexed_fields: indexed_fields.as_slice(),
+                endpoint_target: EndpointTarget::Event,
+                auto_extract_timestamp: false,
+                timestamp_configuration: test_case.config,
+            },
+        );
+
+        let hec_data = get_encoded_event::<HecEventJson>(JsonSerializerConfig::default().into(), processed);
+
+
+        if test_case.time_metadata_should_exist {
+            assert!(
+                hec_data.time.is_some(),
+                "Test case '{}' failed: expected time metadata to exist",
+                test_case.name
+            );
+        } else {
+            assert!(
+                hec_data.time.is_none(),
+                "Test case '{}' failed: expected time metadata to not exist",
+                test_case.name
+            );
+        }
+        assert_eq!(
+            hec_data.time, test_case.expected_time,
+            "Test case '{}' failed: unexpected time value", test_case.name
+        );
+        if test_case.expected_nanos.is_some() {
+            assert_eq!(
+                hec_data.event.get("ts_nanos_key").unwrap(),
+                &serde_json::Value::from(test_case.expected_nanos.unwrap()),
+                "Test case '{}' failed: unexpected nanos value", test_case.name
+            );
+        } else {
+            assert_eq!(
+                hec_data.event.get("ts_nanos_key"),
+                None,
+                "Test case '{}' failed: none expected, but present", test_case.name
+            );
+        }
+
+        if test_case.should_preserve_timestamp {
+            assert!(
+                hec_data.event.get(test_case.event_timestamp_insertion_path.as_str()).is_some(),
+                "Test case '{}' failed: timestamp should be preserved", test_case.name
+            );
+        } else {
+            assert!(
+                hec_data.event.get(test_case.event_timestamp_insertion_path.as_str()).is_none(),
+                "Test case '{}' failed: timestamp should not be preserved", test_case.name
+            );
+        }
+
+
+        // Basic metadata checks
+        assert_eq!(hec_data.source, Some("test_source".to_string()));
+        assert_eq!(hec_data.sourcetype, Some("test_sourcetype".to_string()));
+        assert_eq!(hec_data.index, Some("test_index".to_string()));
+        assert_eq!(hec_data.host, Some("test_host".to_string()));
+        assert_eq!(hec_data.fields.get("event_field1").unwrap(), "test_value1");
+    }
 }
