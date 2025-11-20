@@ -9838,6 +9838,7 @@ dependencies = [
  "oxide-auth",
  "oxide-auth-poem",
  "pathsearch",
+ "poem",
  "rand 0.8.5",
  "regex",
  "rstest",
