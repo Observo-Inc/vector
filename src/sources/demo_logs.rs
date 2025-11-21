@@ -100,7 +100,7 @@ pub enum DemoLogsConfigError {
     SampleFileDemoLogsEmpty,
     #[snafu(display("A non-empty time format is required for sample file format"))]
     SampleFileTimeFormatEmpty,
-    #[snafu(display("Time Format provided is invalid for sample file format"))]
+    #[snafu(display("time format provided is invalid for sample file format"))]
     SampleFileTimeFormatInvalid,
     #[snafu(display("Could not open sample file"))]
     SampleFileOpenFailed {
@@ -610,7 +610,7 @@ mod tests {
             "myhost sshd[1234]: Accepted password for user1 from 192.168.1.10 port 54321 ssh2 time: %Y-%m-%dT%H:%M:%S%.f%:z",
             "%Y-%m-%dT%H:%M:%S%.f%:z",
             "Timestamp: %Y-%m-%dT%H:%M:%S%.f%:z myhost systemd[1]: Started Session 42 of user root.",
-            "Time:%Y-%m-%dT%H:%M:%S%.f%:z myhost kernel: [123456.789012] eth0: link up, 1000 Mbps, full-duplex",
+            "Time: %Y-%m-%dT%H:%M:%S%.f%:z myhost kernel: [123456.789012] eth0: link up, 1000 Mbps, full-duplex",
         ];
 
         wtr.write_record(&["prefix", "suffix"]).unwrap();
@@ -713,8 +713,6 @@ mod tests {
 
     #[test]
     fn config_sample_file_path_not_empty() {
-
-
         let errant_config = DemoLogsConfig {
             format: OutputFormat::SampleFile {
                 path: "/path/to/file".to_string(),
@@ -731,8 +729,6 @@ mod tests {
 
     #[test]
     fn config_sample_file_time_format_not_empty() {
-
-
         let errant_config = DemoLogsConfig {
             format: OutputFormat::SampleFile {
                 path: "".to_string(),
@@ -749,8 +745,6 @@ mod tests {
 
     #[test]
     fn config_sample_file_time_format_invalid() {
-
-
         let errant_config = DemoLogsConfig {
             format: OutputFormat::SampleFile {
                 path: "/path/to/file".to_string(),
