@@ -21,6 +21,8 @@ use vector_lib::{
     EstimatedJsonEncodedSizeOf,
 };
 use vrl::value::Kind;
+use std::panic::AssertUnwindSafe;
+use std::panic::catch_unwind;
 
 use crate::{
     codecs::{Decoder, DecodingConfig},
@@ -223,7 +225,14 @@ impl OutputFormat {
                     GenCtx::TimeJoin { data } => {
                         let (time_prefix, time_suffix) = &data[n % data.len()];
                         let now = Local::now();
-                        let timestamp = now.format(&time_format).to_string();
+                        let result = catch_unwind(AssertUnwindSafe(|| now.format(&time_format).to_string()));
+                        let timestamp = match result {
+                            Ok(v) => v,
+                            Err(_) => {
+                                // fallback to rfc3339 format: 2025-11-21T10:25:30.123456789Z
+                                now.to_rfc3339()
+                            }
+                        };
                         format!("{}{}{}", time_prefix, timestamp, time_suffix)
                     }
                     GenCtx::None => {
