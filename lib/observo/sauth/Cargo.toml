@@ -18,7 +18,7 @@ serde.workspace = true
 serde_with.workspace = true
 headers.workspace = true
 http.workspace = true
-oauth2 = { version = "5.0.0", features = ["reqwest", "rustls-tls"] }
+oauth2 = { git = "https://github.com/janmejay/oauth2-rs.git", features = ["reqwest", "rustls-tls"] }
 tracing = { version = "0.1.34", default-features = false }
 tokio.workspace = true
 oxide-auth = { version = "0.6", path = "../vendor/oxide-auth/oxide-auth", optional = true}

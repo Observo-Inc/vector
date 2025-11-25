@@ -6143,9 +6143,9 @@ dependencies = [
 
 [[package]]
 name = "libz-sys"
-version = "1.1.12"
+version = "1.1.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d97137b25e321a73eef1418d1d5d2eda4d77e12813f8e6dead84bc52c5870a7b"
+checksum = "8b70e7a7df205e92a1a4cd9aaae7898dac0aa555503cc0a649494d0d60e7651d"
 dependencies = [
  "cc",
  "libc",
@@ -7223,10 +7223,9 @@ dependencies = [
 [[package]]
 name = "oauth2"
 version = "5.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51e219e79014df21a225b1860a479e2dcd7cbd9130f4defd4bd0e191ea31d67d"
+source = "git+https://github.com/janmejay/oauth2-rs.git#57fb92849941d52c820502bf058cc87d4bf11f7a"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.21.7",
  "chrono",
  "getrandom 0.2.15",
  "http 1.1.0",
@@ -7553,7 +7552,7 @@ dependencies = [
 
 [[package]]
 name = "oxide-auth"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "base64 0.21.7",
  "chrono",
@@ -7573,7 +7572,7 @@ dependencies = [
 
 [[package]]
 name = "oxide-auth-poem"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "oxide-auth",
  "poem",
@@ -12245,7 +12244,7 @@ dependencies = [
 
 [[package]]
 name = "vector"
-version = "0.44.7"
+version = "0.44.8"
 dependencies = [
  "apache-avro",
  "approx",

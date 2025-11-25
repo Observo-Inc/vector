@@ -324,6 +324,11 @@ target/%/vector.tar.gz: target/%/vector CARGO_HANDLES_FRESHNESS
 		./vector-${TRIPLE}
 	rm -rf target/scratch/
 
+.PHONY: generate-config-schema
+generate-config-schema: ## Generate per-component Cue docs from the configuration schema.
+	${MAYBE_ENVIRONMENT_EXEC} cargo build -F "${FEATURES}" $(if $(findstring true,$(CI)),--quiet,)
+	target/debug/vector generate-schema > /tmp/vector-config-schema.json 2>/dev/null
+
 ##@ Testing (Supports `ENVIRONMENT=true`)
 
 # nextest doesn't support running doc tests yet so this is split out as

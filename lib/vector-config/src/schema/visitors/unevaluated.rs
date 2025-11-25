@@ -133,8 +133,8 @@ impl Visitor for DisallowUnevaluatedPropertiesVisitor {
 }
 
 impl ScopedVisitor for DisallowUnevaluatedPropertiesVisitor {
-    fn push_schema_scope<S: Into<SchemaReference>>(&mut self, scope: S) {
-        self.scope_stack.push(scope.into());
+    fn push_schema_scope<S: Into<SchemaReference>>(&mut self, scope: S) -> bool {
+        self.scope_stack.push(scope.into())
     }
 
     fn pop_schema_scope(&mut self) {

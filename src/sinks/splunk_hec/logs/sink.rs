@@ -19,6 +19,8 @@ use vector_lib::{
     schema::meaning,
 };
 use vrl::path::OwnedTargetPath;
+use crate::sinks::splunk_hec::logs::config::TimestampConfiguration;
+use chrono::{DateTime, Utc, NaiveDateTime, TimeZone};
 
 // NOTE: The `OptionalTargetPath`s are wrapped in an `Option` in order to distinguish between a true
 //       `None` type and an empty string. This is necessary because `OptionalTargetPath` deserializes an
@@ -32,10 +34,9 @@ pub struct HecLogsSink<S> {
     pub index: Option<Template>,
     pub indexed_fields: Vec<OwnedValuePath>,
     pub host_key: Option<OptionalTargetPath>,
-    pub timestamp_nanos_key: Option<String>,
-    pub timestamp_key: Option<OptionalTargetPath>,
     pub endpoint_target: EndpointTarget,
     pub auto_extract_timestamp: bool,
+    pub timestamp_configuration: Option<TimestampConfiguration>,
 }
 
 pub struct HecLogData<'a> {
@@ -44,10 +45,9 @@ pub struct HecLogData<'a> {
     pub index: Option<&'a Template>,
     pub indexed_fields: &'a [OwnedValuePath],
     pub host_key: Option<OptionalTargetPath>,
-    pub timestamp_nanos_key: Option<&'a String>,
-    pub timestamp_key: Option<OptionalTargetPath>,
     pub endpoint_target: EndpointTarget,
     pub auto_extract_timestamp: bool,
+    pub timestamp_configuration: Option<TimestampConfiguration>,
 }
 
 impl<S> HecLogsSink<S>
@@ -64,10 +64,9 @@ where
             index: self.index.as_ref(),
             indexed_fields: self.indexed_fields.as_slice(),
             host_key: self.host_key.clone(),
-            timestamp_nanos_key: self.timestamp_nanos_key.as_ref(),
-            timestamp_key: self.timestamp_key.clone(),
             endpoint_target: self.endpoint_target,
             auto_extract_timestamp: self.auto_extract_timestamp,
+            timestamp_configuration: self.timestamp_configuration.clone(),
         };
         let batch_settings = self.batch_settings;
 
@@ -279,33 +278,106 @@ pub fn process_log(event: Event, data: &HecLogData) -> HecProcessedEvent {
     // the timestamp in the event as-is, and let Splunk do the extraction).
     let timestamp = if EndpointTarget::Event == data.endpoint_target && !data.auto_extract_timestamp
     {
-        user_or_namespaced_path(
+
+        let timestamp_configuration = data.timestamp_configuration.as_ref();
+        let timestamp_key = timestamp_configuration
+            .and_then(|config| config.timestamp_key.as_ref());
+        let preserve_timestamp_key_in_event = timestamp_configuration
+            .map(|config| config.preserve_timestamp_key)
+            .unwrap_or(false);
+        let timestamp_nanos_key = timestamp_configuration
+            .and_then(|config| config.timestamp_nanos_key.as_ref());
+
+
+        let timestamp_format = timestamp_configuration.map(|config| config.format.clone());
+
+        // determine the actual path first
+        let timestamp_path_opt = user_or_namespaced_path(
             &log,
-            data.timestamp_key.as_ref(),
+            timestamp_key,
             meaning::TIMESTAMP,
             log_schema().timestamp_key_target_path(),
-        )
-        .and_then(|timestamp_path| {
-            match log.remove(&timestamp_path) {
-                Some(Value::Timestamp(ts)) => {
-                    // set nanos in log if valid timestamp in event and timestamp_nanos_key is configured
-                    if let Some(key) = data.timestamp_nanos_key {
-                        log.try_insert(event_path!(key), ts.timestamp_subsec_nanos() % 1_000_000);
-                    }
-                    Some((ts.timestamp_millis() as f64) / 1000f64)
+        );
+
+
+        let (ts, subsec_nanos) = timestamp_path_opt.as_ref().and_then(|timestamp_path| {
+            let value_opt = log.get(timestamp_path).cloned();
+            match (value_opt, timestamp_format) {
+
+                (None, _) => {
+                    emit!(SplunkEventTimestampMissing {});
+                    None
                 }
-                Some(value) => {
+                (Some(Value::Timestamp(ts)), _) => {
+                    Some((
+                        (ts.timestamp_millis() as f64) / 1000f64,
+                        ts.timestamp_subsec_nanos() % 1_000_000
+                    ))
+                }
+
+                (Some(Value::Integer(i)), Some(crate::sinks::splunk_hec::logs::config::TimestampFormat::Numeric(precision))) => {
+                    match precision {
+                        crate::sinks::splunk_hec::logs::config::TimePrecision::Seconds => {
+                            Some((i as f64, 0))
+                        }
+                        crate::sinks::splunk_hec::logs::config::TimePrecision::Milliseconds => {
+                            Some(((i as f64) / 1000f64, 0))
+                        }
+                        crate::sinks::splunk_hec::logs::config::TimePrecision::Microseconds => {
+                            Some(((i as f64) / 1000_000f64, (((i % 1_000_000_000)% 1_000)*1000) as u32))
+                        }
+                        crate::sinks::splunk_hec::logs::config::TimePrecision::Nanoseconds => {
+                            Some(((i as f64) / 1_000_000_000f64, ((i % 1_000_000_000) % 1_000_000) as u32))
+                        }
+                    }
+                }
+
+                (Some(Value::Bytes(b)), Some(crate::sinks::splunk_hec::logs::config::TimestampFormat::Fmtstr(fmt))) => {
+                    let s = match std::str::from_utf8(&b) {
+                        Ok(s) => s,
+                        Err(err) => {
+                            error!("Failed to parse timestamp from strftime for Splunk HEC event: {}", err);
+                            emit!(SplunkEventTimestampInvalidType { r#type: "bytes" });
+                            return None;
+                        }
+                    };
+
+                    let date_time_result = parse_with_format(s, &fmt);
+                    match date_time_result {
+                        Ok(utc) => {
+                            Some((
+                                (utc.timestamp_millis() as f64) / 1000f64,
+                                utc.timestamp_subsec_nanos() % 1_000_000
+                            ))
+                        }
+                        Err(err) => {
+                            error!("Failed to parse timestamp from strftime for Splunk HEC event: {}", err);
+                            emit!(SplunkEventTimestampInvalidType { r#type: "string" });
+                            None
+                        }
+                    }
+                }
+
+                (Some(value),_) => {
                     emit!(SplunkEventTimestampInvalidType {
                         r#type: value.kind_str()
                     });
                     None
                 }
-                None => {
-                    emit!(SplunkEventTimestampMissing {});
-                    None
-                }
             }
-        })
+        }).unzip();
+
+        if let Some(nanos) = subsec_nanos {
+            if let Some(key) = timestamp_nanos_key {
+                log.try_insert(event_path!(key), nanos);
+            }
+        }
+
+        if !preserve_timestamp_key_in_event && timestamp_path_opt.is_some(){
+            let _ = log.remove(timestamp_path_opt.as_ref().unwrap());
+        }
+
+        ts
     } else {
         None
     };
@@ -333,6 +405,32 @@ pub fn process_log(event: Event, data: &HecLogData) -> HecProcessedEvent {
         event: log,
         metadata,
     }
+}
+
+fn parse_with_format(s: &str, fmt: &str) -> Result<DateTime<Utc>, chrono::ParseError> {
+    // RFC3339 (recommended for inputs like "2024-06-15T12:34:56.789Z")
+    if fmt.is_empty() || fmt.eq_ignore_ascii_case("rfc3339") {
+        let dt = DateTime::parse_from_rfc3339(s)?;
+        return Ok(dt.with_timezone(&Utc));
+    }
+
+    // If the user format contains a literal 'Z' (UTC) strip it and parse NaiveDateTime
+    if fmt.contains('Z') {
+        let s_trim = s.strip_suffix('Z').unwrap_or(s);
+        let fmt_trim = fmt.trim_end_matches('Z');
+        let naive = NaiveDateTime::parse_from_str(s_trim, fmt_trim)?;
+        return Ok(Utc.from_utc_datetime(&naive));
+    }
+
+
+    // Try parsing as NaiveDateTime first (no offset in input), then fall back to DateTime parse
+    if let Ok(naive) = NaiveDateTime::parse_from_str(s, fmt) {
+        return Ok(Utc.from_utc_datetime(&naive));
+    }
+
+    // Otherwise expect the format to include an offset specifier like %z or %:z
+    let dt = DateTime::parse_from_str(s, fmt)?;
+    Ok(dt.with_timezone(&Utc))
 }
 
 impl EventCount for HecProcessedEvent {
