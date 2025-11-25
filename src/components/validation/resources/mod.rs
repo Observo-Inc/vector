@@ -152,6 +152,7 @@ fn deserializer_config_to_serializer(config: &DeserializerConfig) -> encoding::S
         // `message` field... but it's close enough for now.
         DeserializerConfig::Bytes => SerializerConfig::Text(TextSerializerConfig::default()),
         DeserializerConfig::Json { .. } => SerializerConfig::Json(JsonSerializerConfig::default()),
+        DeserializerConfig::JsonPaths { .. } => SerializerConfig::Json(JsonSerializerConfig::default()),
         DeserializerConfig::Protobuf(config) => {
             SerializerConfig::Protobuf(vector_lib::codecs::encoding::ProtobufSerializerConfig {
                 protobuf: vector_lib::codecs::encoding::ProtobufSerializerOptions {
