@@ -8,6 +8,7 @@ mod bytes;
 mod gelf;
 mod influxdb;
 mod json;
+mod json_paths;
 mod native;
 mod native_json;
 mod protobuf;
@@ -21,6 +22,10 @@ use dyn_clone::DynClone;
 pub use gelf::{GelfDeserializer, GelfDeserializerConfig, GelfDeserializerOptions};
 pub use influxdb::{InfluxdbDeserializer, InfluxdbDeserializerConfig};
 pub use json::{JsonDeserializer, JsonDeserializerConfig, JsonDeserializerOptions};
+pub use json_paths::{
+    JsonPathDeserializer, JsonPathDeserializerConfig, JsonPathDeserializerOptions,
+    PathOperation, PathOperationConfig,
+};
 pub use native::{NativeDeserializer, NativeDeserializerConfig};
 pub use native_json::{
     NativeJsonDeserializer, NativeJsonDeserializerConfig, NativeJsonDeserializerOptions,

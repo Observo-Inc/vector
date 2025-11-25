@@ -49,6 +49,7 @@ obvrl = { path = "../observo/obvrl", optional = true }
 futures.workspace = true
 indexmap.workspace = true
 bytesize.workspace = true
+actson = { git = "https://github.com/jsbali/actson-rs.git" }
 
 [dev-dependencies]
 futures.workspace = true
