@@ -70,7 +70,7 @@ impl PathOperationConfig {
 
 /// Config used to build a `JsonPathDeserializer`.
 #[configurable_component]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JsonPathDeserializerConfig {
     /// Path-based operation configuration
     pub config: PathOperationConfig,
