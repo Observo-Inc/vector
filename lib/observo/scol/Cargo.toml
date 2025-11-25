@@ -68,6 +68,9 @@ oxide-auth-poem = { version = "0.3.0", path = "../vendor/oxide-auth/oxide-auth-p
 tempfile = { version = "3.15.0", optional = true }
 assert_matches = { version = "1.5", optional = true}
 pathsearch = {version = "0.2.0", optional = true}
+stream-cancel = { version = "0.8.2", default-features = false, optional = true}
+poem = { version = "3.1.7", default-features = true, features = ["rustls"], optional = true}
+vrl = {workspace = true, optional = true}
 
 [dev-dependencies]
 assert_matches = { version = "1.5" }
@@ -80,10 +83,10 @@ test-case = { version = "3.3" }
 tokio = { version = "1.43.0", features = ["test-util"] }
 scol = { path = ".", features = ["test-scenarios"] }
 chkpts = { path = "../chkpts" }
-poem = { version = "3.1.7", default-features = true, features = ["rustls"] }
 
 [features]
 test-scenarios = ["vector-lib/test", "dep:textwrap", "dep:rstest", "dep:oxide-auth",
   "dep:oxide-auth-poem", "dep:tempfile", "dep:assert_matches", "sauth/test-support",
-  "dep:pathsearch", "tokio/macros", "tokio/rt-multi-thread"]
+  "dep:pathsearch", "tokio/macros", "tokio/rt-multi-thread", "dep:stream-cancel", "dep:poem",
+  "dep:vrl"]
 default = []
