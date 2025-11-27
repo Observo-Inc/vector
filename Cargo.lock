@@ -5192,9 +5192,9 @@ dependencies = [
 
 [[package]]
 name = "hyper-util"
-version = "0.1.9"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41296eb09f183ac68eec06e03cdbea2e759633d4067b2f6552fc2e009bcad08b"
+checksum = "df2dcfbe0677734ab2f3ffa7fa7bfd4706bfdc1ef393f2ee30184aed67e631b4"
 dependencies = [
  "bytes 1.9.0",
  "futures-channel",
@@ -7225,7 +7225,7 @@ name = "oauth2"
 version = "5.0.0"
 source = "git+https://github.com/janmejay/oauth2-rs.git#57fb92849941d52c820502bf058cc87d4bf11f7a"
 dependencies = [
- "base64 0.21.7",
+ "base64 0.22.1",
  "chrono",
  "getrandom 0.2.15",
  "http 1.1.0",
@@ -9761,6 +9761,7 @@ dependencies = [
  "http 0.2.9",
  "http 1.1.0",
  "hyper 0.14.28",
+ "hyper-util",
  "itertools 0.14.0",
  "oauth2 5.0.0",
  "oxide-auth",
