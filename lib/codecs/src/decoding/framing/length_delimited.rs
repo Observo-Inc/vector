@@ -9,7 +9,7 @@ use super::BoxedFramingError;
 
 /// Config used to build a `LengthDelimitedDecoder`.
 #[configurable_component]
-#[derive(Debug, Clone, Derivative)]
+#[derive(Debug, Clone, Derivative, PartialEq, Eq)]
 #[derivative(Default)]
 pub struct LengthDelimitedDecoderConfig {
     /// Options for the length delimited decoder.

@@ -19,6 +19,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b5ace29ee3216de37c0546865ad08edef58b0f9e76838ed8959a84a990e58c5"
 
 [[package]]
+name = "actson"
+version = "2.1.0"
+source = "git+https://github.com/jsbali/actson-rs.git#6d1631138d3c0b9cbc528fd72eb93d5310213e99"
+dependencies = [
+ "btoi",
+ "num-traits",
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2087,6 +2097,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "btoi"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b5ab9db53bcda568284df0fd39f6eac24ad6f7ba7ff1168b9e76eba6576b976"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2172,7 +2191,7 @@ dependencies = [
  "cached_proc_macro_types",
  "hashbrown 0.14.5",
  "once_cell",
- "thiserror 2.0.3",
+ "thiserror 2.0.17",
  "web-time",
 ]
 
@@ -2544,6 +2563,7 @@ dependencies = [
 name = "codecs"
 version = "0.1.0"
 dependencies = [
+ "actson",
  "apache-avro",
  "base64 0.13.1",
  "byteorder",
@@ -5192,9 +5212,9 @@ dependencies = [
 
 [[package]]
 name = "hyper-util"
-version = "0.1.9"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41296eb09f183ac68eec06e03cdbea2e759633d4067b2f6552fc2e009bcad08b"
+checksum = "df2dcfbe0677734ab2f3ffa7fa7bfd4706bfdc1ef393f2ee30184aed67e631b4"
 dependencies = [
  "bytes 1.9.0",
  "futures-channel",
@@ -7225,7 +7245,7 @@ name = "oauth2"
 version = "5.0.0"
 source = "git+https://github.com/janmejay/oauth2-rs.git#57fb92849941d52c820502bf058cc87d4bf11f7a"
 dependencies = [
- "base64 0.21.7",
+ "base64 0.22.1",
  "chrono",
  "getrandom 0.2.15",
  "http 1.1.0",
@@ -7580,7 +7600,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
- "thiserror 2.0.3",
+ "thiserror 2.0.17",
  "tokio",
  "url",
 ]
@@ -8025,7 +8045,7 @@ dependencies = [
  "serde_urlencoded",
  "smallvec",
  "sync_wrapper 1.0.1",
- "thiserror 2.0.3",
+ "thiserror 2.0.17",
  "tokio",
  "tokio-rustls 0.25.0",
  "tokio-util",
@@ -9761,6 +9781,7 @@ dependencies = [
  "http 0.2.9",
  "http 1.1.0",
  "hyper 0.14.28",
+ "hyper-util",
  "itertools 0.14.0",
  "oauth2 5.0.0",
  "oxide-auth",
@@ -9777,7 +9798,7 @@ dependencies = [
  "serde_urlencoded",
  "serde_with 3.12.0",
  "tempfile",
- "thiserror 2.0.3",
+ "thiserror 2.0.17",
  "tokio",
  "tokio-util",
  "toml",
@@ -9814,6 +9835,7 @@ dependencies = [
  "assert_matches",
  "async-channel 2.5.0",
  "async-recursion",
+ "async-trait",
  "base64 0.13.1",
  "bstr 1.11.0",
  "bytes 1.9.0",
@@ -9836,6 +9858,7 @@ dependencies = [
  "oxide-auth",
  "oxide-auth-poem",
  "pathsearch",
+ "poem",
  "rand 0.8.5",
  "regex",
  "rstest",
@@ -9851,11 +9874,13 @@ dependencies = [
  "sha2",
  "smallvec",
  "snafu 0.7.5",
+ "stream-cancel",
  "tempfile",
  "test-case",
  "textwrap",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "toml",
  "tracing 0.1.41",
  "tracing-test",
@@ -11040,11 +11065,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.3"
+version = "2.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c006c85c7651b3cf2ada4584faa36773bd07bac24acfb39f3c431b36d7e667aa"
+checksum = "f63587ca0f12b72a0600bcba1d40081f830876000bb46dd2337a3051618f4fc8"
 dependencies = [
- "thiserror-impl 2.0.3",
+ "thiserror-impl 2.0.17",
 ]
 
 [[package]]
@@ -11060,9 +11085,9 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.3"
+version = "2.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f077553d607adc1caf65430528a576c757a71ed73944b66ebb58ef2bbd243568"
+checksum = "3ff15c8ecd7de3849db632e14d18d2571fa09dfc5ed93479bc4485c7a517c913"
 dependencies = [
  "proc-macro2 1.0.92",
  "quote 1.0.37",
@@ -12923,7 +12948,7 @@ dependencies = [
  "strip-ansi-escapes",
  "syslog_loose",
  "termcolor",
- "thiserror 2.0.3",
+ "thiserror 2.0.17",
  "tokio",
  "tracing 0.1.41",
  "uaparser",

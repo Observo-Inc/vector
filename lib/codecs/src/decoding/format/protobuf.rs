@@ -18,7 +18,7 @@ use super::Deserializer;
 
 /// Config used to build a `ProtobufDeserializer`.
 #[configurable_component]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProtobufDeserializerConfig {
     /// Protobuf-specific decoding options.
     #[serde(default, skip_serializing_if = "vector_core::serde::is_default")]

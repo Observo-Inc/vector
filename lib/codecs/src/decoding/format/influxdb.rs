@@ -19,7 +19,7 @@ use super::Deserializer;
 /// Config used to build a `InfluxdbDeserializer`.
 /// - [InfluxDB Line Protocol](https://docs.influxdata.com/influxdb/v1/write_protocols/line_protocol_tutorial/):
 #[configurable_component]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InfluxdbDeserializerConfig {
     /// Influxdb-specific decoding options.
     #[serde(default, skip_serializing_if = "vector_core::serde::is_default")]

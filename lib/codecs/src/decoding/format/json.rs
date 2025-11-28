@@ -14,7 +14,7 @@ use super::{default_lossy, Deserializer};
 
 /// Config used to build a `JsonDeserializer`.
 #[configurable_component]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JsonDeserializerConfig {
     /// JSON-specific decoding options.
     #[serde(default, skip_serializing_if = "vector_core::serde::is_default")]

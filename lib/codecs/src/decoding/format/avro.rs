@@ -87,7 +87,7 @@ impl From<&AvroDeserializerOptions> for AvroSerializerOptions {
 }
 /// Apache Avro serializer options.
 #[configurable_component]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AvroDeserializerOptions {
     /// The Avro schema definition.
     /// Please note that the following [`apache_avro::types::Value`] variants are currently *not* supported:

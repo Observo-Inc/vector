@@ -10,7 +10,7 @@ use super::BoxedFramingError;
 
 /// Config used to build a `OctetCountingDecoder`.
 #[configurable_component]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OctetCountingDecoderConfig {
     #[serde(default, skip_serializing_if = "vector_core::serde::is_default")]
     /// Options for the octet counting decoder.
