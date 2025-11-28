@@ -8,7 +8,7 @@ use super::BoxedFramingError;
 
 /// Config used to build a `CharacterDelimitedDecoder`.
 #[configurable_component]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CharacterDelimitedDecoderConfig {
     /// Options for the character delimited decoder.
     pub character_delimited: CharacterDelimitedDecoderOptions,

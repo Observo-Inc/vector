@@ -13,8 +13,8 @@ pub use format::{
     JsonSerializer, JsonSerializerConfig, JsonSerializerOptions, LogfmtSerializer,
     LogfmtSerializerConfig, NativeJsonSerializer, NativeJsonSerializerConfig, NativeSerializer,
     NativeSerializerConfig, ParquetSerializer, ParquetSerializerConfig, ParquetSerializerOptions,
-    ProtobufSerializer, ProtobufSerializerConfig, ProtobufSerializerOptions,
-    RawMessageSerializer, RawMessageSerializerConfig, TextSerializer, TextSerializerConfig,
+    ProtobufSerializer, ProtobufSerializerConfig, ProtobufSerializerOptions, RawMessageSerializer,
+    RawMessageSerializerConfig, TextSerializer, TextSerializerConfig,
 };
 pub use framing::{
     BoxedFramer, BoxedFramingError, BytesEncoder, BytesEncoderConfig, CharacterDelimitedEncoder,
@@ -259,11 +259,7 @@ pub enum SerializerConfig {
     /// Encodes events in [Apache Parquet format][parquet].
     ///
     /// [parquet]: https://parquet.apache.org/
-    Parquet {
-        /// Apache Parquet-specific encoder options.
-        parquet: ParquetSerializerOptions,
-    },
-
+    Parquet(ParquetSerializerOptions),
     /// Plain text encoding.
     ///
     /// This encoding uses the `message` field of a log event. For metrics, it uses an
@@ -363,7 +359,7 @@ impl SerializerConfig {
                 Ok(Serializer::RawMessage(RawMessageSerializerConfig.build()))
             }
             SerializerConfig::Text(config) => Ok(Serializer::Text(config.build())),
-            SerializerConfig::Parquet { .. } => {
+            SerializerConfig::Parquet(..) => {
                 Err("Parquet serializer is not for single event encoding.".into())
             }
         }
@@ -375,12 +371,13 @@ impl SerializerConfig {
         &self,
     ) -> Result<Option<BatchSerializer>, Box<dyn std::error::Error + Send + Sync + 'static>> {
         match self {
-            SerializerConfig::Parquet { parquet } => Ok(Some(BatchSerializer::Parquet(
+            SerializerConfig::Parquet(parquet) => Ok(Some(BatchSerializer::Parquet(
                 ParquetSerializerConfig::new(
                     parquet.schema.clone(),
                     parquet.record_complete_event.clone(),
-                    parquet.ignore_type_mismatch_for_optional.clone()
-                ).build()?,
+                    parquet.ignore_type_mismatch_for_optional.clone(),
+                )
+                .build()?,
             ))),
             SerializerConfig::Avro { .. }
             | SerializerConfig::Cef(..)
@@ -422,7 +419,7 @@ impl SerializerConfig {
             | SerializerConfig::NativeJson
             | SerializerConfig::RawMessage
             | SerializerConfig::Text(_) => FramingConfig::NewlineDelimited,
-            SerializerConfig::Parquet { .. } => FramingConfig::Bytes,
+            SerializerConfig::Parquet(..) => FramingConfig::Bytes,
             SerializerConfig::Gelf => {
                 FramingConfig::CharacterDelimited(CharacterDelimitedEncoderConfig::new(0))
             }
@@ -445,13 +442,12 @@ impl SerializerConfig {
             SerializerConfig::Protobuf(config) => config.input_type(),
             SerializerConfig::RawMessage => RawMessageSerializerConfig.input_type(),
             SerializerConfig::Text(config) => config.input_type(),
-            SerializerConfig::Parquet { parquet } => {
-                ParquetSerializerConfig::new(
-                    parquet.schema.clone(),
-                    parquet.record_complete_event.clone(),
-                    parquet.ignore_type_mismatch_for_optional.clone()
-                ).input_type()
-            }
+            SerializerConfig::Parquet(parquet) => ParquetSerializerConfig::new(
+                parquet.schema.clone(),
+                parquet.record_complete_event.clone(),
+                parquet.ignore_type_mismatch_for_optional.clone(),
+            )
+            .input_type(),
         }
     }
 
@@ -471,13 +467,12 @@ impl SerializerConfig {
             SerializerConfig::Protobuf(config) => config.schema_requirement(),
             SerializerConfig::RawMessage => RawMessageSerializerConfig.schema_requirement(),
             SerializerConfig::Text(config) => config.schema_requirement(),
-            SerializerConfig::Parquet { parquet } => {
-                ParquetSerializerConfig::new(
-                    parquet.schema.clone(),
-                    parquet.record_complete_event.clone(),
-                    parquet.ignore_type_mismatch_for_optional.clone()
-                ).schema_requirement()
-            }
+            SerializerConfig::Parquet(parquet) => ParquetSerializerConfig::new(
+                parquet.schema.clone(),
+                parquet.record_complete_event.clone(),
+                parquet.ignore_type_mismatch_for_optional.clone(),
+            )
+            .schema_requirement(),
         }
     }
 }

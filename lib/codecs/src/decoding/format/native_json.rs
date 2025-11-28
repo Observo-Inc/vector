@@ -11,7 +11,7 @@ use vector_core::config::LogNamespace;
 
 /// Config used to build a `NativeJsonDeserializer`.
 #[configurable_component]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NativeJsonDeserializerConfig {
     /// Vector's native JSON-specific decoding options.
     #[serde(default, skip_serializing_if = "vector_core::serde::is_default")]

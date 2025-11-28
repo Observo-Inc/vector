@@ -32,7 +32,7 @@ use crate::{gelf_fields::*, VALID_FIELD_REGEX};
 
 /// Config used to build a `GelfDeserializer`.
 #[configurable_component]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GelfDeserializerConfig {
     /// GELF-specific decoding options.
     #[serde(default, skip_serializing_if = "vector_core::serde::is_default")]
