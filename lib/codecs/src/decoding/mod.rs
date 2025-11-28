@@ -12,6 +12,7 @@ pub use format::{
     BoxedDeserializer, BytesDeserializer, BytesDeserializerConfig, GelfDeserializer,
     GelfDeserializerConfig, GelfDeserializerOptions, InfluxdbDeserializer,
     InfluxdbDeserializerConfig, JsonDeserializer, JsonDeserializerConfig, JsonDeserializerOptions,
+    JsonPathDeserializer, JsonPathDeserializerConfig, JsonPathDeserializerOptions,
     NativeDeserializer, NativeDeserializerConfig, NativeJsonDeserializer,
     NativeJsonDeserializerConfig, NativeJsonDeserializerOptions, ProtobufDeserializer,
     ProtobufDeserializerConfig, ProtobufDeserializerOptions,
@@ -306,6 +307,12 @@ pub enum DeserializerConfig {
         avro: AvroDeserializerOptions,
     },
 
+    /// Decodes JSON with JSONPath-based extraction and array explosion.
+    ///
+    /// Allows selective extraction of fields from JSON documents using JSONPath expressions,
+    /// with support for exploding arrays into individual events.
+    JsonPaths(JsonPathDeserializerConfig),
+
     /// Decodes the raw bytes as a string and passes them as input to a [VRL][vrl] program.
     ///
     /// [vrl]: https://vector.dev/docs/reference/vrl
@@ -355,6 +362,12 @@ impl From<InfluxdbDeserializerConfig> for DeserializerConfig {
     }
 }
 
+impl From<JsonPathDeserializerConfig> for DeserializerConfig {
+    fn from(config: JsonPathDeserializerConfig) -> Self {
+        Self::JsonPaths(config)
+    }
+}
+
 impl DeserializerConfig {
     /// Build the `Deserializer` from this configuration.
     pub fn build(&self) -> vector_common::Result<Deserializer> {
@@ -376,6 +389,7 @@ impl DeserializerConfig {
             DeserializerConfig::NativeJson(config) => Ok(Deserializer::NativeJson(config.build())),
             DeserializerConfig::Gelf(config) => Ok(Deserializer::Gelf(config.build())),
             DeserializerConfig::Influxdb(config) => Ok(Deserializer::Influxdb(config.build())),
+            DeserializerConfig::JsonPaths(config) => Ok(Deserializer::JsonPaths(config.build())),
             DeserializerConfig::Vrl(config) => Ok(Deserializer::Vrl(config.build()?)),
         }
     }
@@ -387,6 +401,7 @@ impl DeserializerConfig {
             DeserializerConfig::Native => FramingConfig::LengthDelimited(Default::default()),
             DeserializerConfig::Bytes
             | DeserializerConfig::Json(_)
+            | DeserializerConfig::JsonPaths(_)
             | DeserializerConfig::Influxdb(_)
             | DeserializerConfig::NativeJson(_) => {
                 FramingConfig::NewlineDelimited(Default::default())
@@ -418,6 +433,7 @@ impl DeserializerConfig {
             .output_type(),
             DeserializerConfig::Bytes => BytesDeserializerConfig.output_type(),
             DeserializerConfig::Json(config) => config.output_type(),
+            DeserializerConfig::JsonPaths(config) => config.output_type(),
             DeserializerConfig::Protobuf(config) => config.output_type(),
             #[cfg(feature = "syslog")]
             DeserializerConfig::Syslog(config) => config.output_type(),
@@ -438,6 +454,7 @@ impl DeserializerConfig {
             .schema_definition(log_namespace),
             DeserializerConfig::Bytes => BytesDeserializerConfig.schema_definition(log_namespace),
             DeserializerConfig::Json(config) => config.schema_definition(log_namespace),
+            DeserializerConfig::JsonPaths(config) => config.schema_definition(log_namespace),
             DeserializerConfig::Protobuf(config) => config.schema_definition(log_namespace),
             #[cfg(feature = "syslog")]
             DeserializerConfig::Syslog(config) => config.schema_definition(log_namespace),
@@ -474,6 +491,7 @@ impl DeserializerConfig {
             (DeserializerConfig::Protobuf(_), _) => "application/octet-stream",
             (
                 DeserializerConfig::Json(_)
+                | DeserializerConfig::JsonPaths(_)
                 | DeserializerConfig::NativeJson(_)
                 | DeserializerConfig::Bytes
                 | DeserializerConfig::Gelf(_)
@@ -496,6 +514,8 @@ pub enum Deserializer {
     Bytes(BytesDeserializer),
     /// Uses a `JsonDeserializer` for deserialization.
     Json(JsonDeserializer),
+    /// Uses a `JsonPathDeserializer` for deserialization.
+    JsonPaths(JsonPathDeserializer),
     /// Uses a `ProtobufDeserializer` for deserialization.
     Protobuf(ProtobufDeserializer),
     #[cfg(feature = "syslog")]
@@ -525,6 +545,7 @@ impl format::Deserializer for Deserializer {
             Deserializer::Avro(deserializer) => deserializer.parse(bytes, log_namespace),
             Deserializer::Bytes(deserializer) => deserializer.parse(bytes, log_namespace),
             Deserializer::Json(deserializer) => deserializer.parse(bytes, log_namespace),
+            Deserializer::JsonPaths(deserializer) => deserializer.parse(bytes, log_namespace),
             Deserializer::Protobuf(deserializer) => deserializer.parse(bytes, log_namespace),
             #[cfg(feature = "syslog")]
             Deserializer::Syslog(deserializer) => deserializer.parse(bytes, log_namespace),
