@@ -31,8 +31,12 @@
             openssl
             lldb
             cue
-            mold
+            gcc
+            gawk
+            # mold
             nodejs
+            python3
+            flex
           ];
           hardeningDisable = [ "fortify" ];
 
@@ -43,31 +47,23 @@
 
           shellHook = ''
             export PATH=$PATH:''${CARGO_HOME:-~/.cargo}/bin
-            export PATH=$PATH:''${RUSTUP_HOME:-~/.rustup}/toolchains/$RUSTC_VERSION-x86_64-unknown-linux-gnu/bin/
+            #export PATH=$PATH:''${RUSTUP_HOME:-~/.rustup}/toolchains/$RUSTC_VERSION-x86_64-unknown-linux-gnu/bin/
             export OPENSSL_LIB_DIR=$(pkg-config --libs openssl | grep -Po '\-L[^ ]+' | sed -re 's/\-L//g')
             export OPENSSL_INCLUDE_DIR=$(pkg-config --cflags openssl | grep -Po '\-I[^ ]+' | sed -re 's/\-I//g')
+            if [[ "${system}" == *"linux"* ]]; then
+              export RUSTFLAGS='-C linker=clang -C link-arg=-fuse-ld=mold'
+              # fallback '-C link-arg=-fuse-ld=lld'
+            elif [[ "${system}" == *"darwin"* ]]; then
+              export RUSTFLAGS='-C linker=clang -C link-arg=-fuse-ld=lld'
+            fi
             rustup component add rust-analyzer
+            unset DEVELOPER_DIR
           '';
 
           # Add precompiled library to rustc search path
-          RUSTFLAGS = ''-C linker=clang -C link-arg=-fuse-ld=mold'';
+          # RUSTFLAGS = ''-C linker=clang -C link-arg=-fuse-ld=mold'';
 
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (buildInputs ++ nativeBuildInputs);
-
-
-          # Add glibc, clang, glib, and other headers to bindgen search path
-          BINDGEN_EXTRA_CLANG_ARGS =
-          # Includes normal include path
-          (builtins.map (a: ''-I"${a}/include"'') [
-            # add dev libraries here (e.g. pkgs.libvmi.dev)
-            pkgs.glibc.dev
-          ])
-          # Includes with special directory paths
-          ++ [
-            ''-I"${pkgs.llvmPackages_latest.libclang.lib}/lib/clang/${pkgs.llvmPackages_latest.libclang.version}/include"''
-            ''-I"${pkgs.glib.dev}/include/glib-2.0"''
-            ''-I${pkgs.glib.out}/lib/glib-2.0/include/''
-          ];
         };
       }
     );
