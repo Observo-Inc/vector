@@ -4,8 +4,7 @@ use crate::{
     common::websocket::{is_closed, PingInterval, WebSocketConnector},
     config::SourceContext,
     internal_events::{
-        ConnectionOpen, OpenGauge, WebSocketBytesReceived, WebSocketConnectionError,
-        WebSocketConnectionEstablished, WebSocketConnectionFailedError,
+        ConnectionOpen, OpenGauge, WebSocketBytesReceived, WebSocketConnectionFailedError,
         WebSocketConnectionShutdown, WebSocketKind, WebSocketMessageReceived,
         WebSocketReceiveError, WebSocketSendError, PROTOCOL,
     },
@@ -294,23 +293,14 @@ impl WebSocketSource {
     async fn try_create_sink_and_stream(
         &self,
     ) -> Result<(WebSocketSink, WebSocketStream), WebSocketSourceError> {
-        let connect_future = self.params.connector.connect_backoff();
-        let timeout = self.config.connect_timeout_secs;
+        // connect_backoff now handles timeouts per-attempt internally and retries indefinitely
+        // for retriable errors.
+        let ws_stream = self
+            .params
+            .connector
+            .connect_backoff(self.config.connect_timeout_secs)
+            .await;
 
-        let ws_stream = match time::timeout(timeout, connect_future).await {
-            Ok(ws) => ws,
-            Err(_) => {
-                emit!(WebSocketConnectionError {
-                    error: TungsteniteError::Io(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "Connection attempt timed out",
-                    ))
-                });
-                return Err(WebSocketSourceError::ConnectTimeout);
-            }
-        };
-
-        emit!(WebSocketConnectionEstablished {});
         let (sink, stream) = ws_stream.split();
 
         Ok((Box::pin(sink), Box::pin(stream)))

@@ -28,7 +28,7 @@ pub fn all() -> Vec<Box<dyn Function>> {
     #[cfg(feature = "observo")]
     let fns = fns.into_iter().chain(obvrl::all()).collect::<Vec<_>>();
 
-    return fns;
+    fns
 }
 
 #[cfg(test)]

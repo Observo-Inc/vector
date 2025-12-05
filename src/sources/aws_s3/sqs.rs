@@ -49,7 +49,7 @@ use crate::{
 use vector_lib::config::{log_schema, LegacyKey, LogNamespace};
 use vector_lib::event::MaybeAsLogMut;
 use vector_lib::lookup::{metadata_path, path, PathPrefix};
-use crate::sinks::util::retries::ExponentialBackoff;
+use crate::common::backoff::ExponentialBackoff;
 use super::sqs_message_parsers;
 
 static SUPPORTED_S3_EVENT_VERSION: LazyLock<semver::VersionReq> =

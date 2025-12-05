@@ -7,6 +7,7 @@ use std::{
 };
 use vector_config_macros::configurable_component;
 
+use http::StatusCode;
 use snafu::{ResultExt, Snafu};
 use tokio::{net::TcpStream, time};
 use tokio_tungstenite::{
@@ -20,6 +21,8 @@ use tokio_tungstenite::{
     },
     WebSocketStream,
 };
+
+use tracing::info;
 
 use crate::{
     common::backoff::ExponentialBackoff,
@@ -50,6 +53,7 @@ pub(crate) struct WebSocketConnector {
     port: u16,
     tls: MaybeTlsSettings,
     auth: Option<Auth>,
+    retriable_status_codes: Vec<u16>,
 }
 
 impl WebSocketConnector {
@@ -57,6 +61,7 @@ impl WebSocketConnector {
         uri: String,
         tls: MaybeTlsSettings,
         auth: Option<Auth>,
+        retriable_status_codes: Vec<u16>,
     ) -> Result<Self, WebSocketError> {
         let request = (&uri).into_client_request().context(CreateFailedSnafu)?;
         let (host, port) = Self::extract_host_and_port(&request).context(CreateFailedSnafu)?;
@@ -67,6 +72,7 @@ impl WebSocketConnector {
             port,
             tls,
             auth,
+            retriable_status_codes,
         })
     }
 
@@ -89,6 +95,20 @@ impl WebSocketConnector {
         ExponentialBackoff::from_millis(2)
             .factor(250)
             .max_delay(Duration::from_secs(60))
+    }
+
+    // Check if an error is a retriable HTTP error based on configured status codes.
+    fn is_retriable_http_error(&self, error: &WebSocketError) -> Option<StatusCode> {
+        if let WebSocketError::CreateFailed {
+            source: TungsteniteError::Http(response),
+        } = error
+        {
+            let status = response.status();
+            if self.retriable_status_codes.contains(&status.as_u16()) {
+                return Some(status);
+            }
+        }
+        None
     }
 
     async fn tls_connect(&self) -> Result<MaybeTlsStream<TcpStream>, WebSocketError> {
@@ -126,18 +146,51 @@ impl WebSocketConnector {
         Ok(ws_stream)
     }
 
-    pub(crate) async fn connect_backoff(&self) -> WebSocketStream<MaybeTlsStream<TcpStream>> {
+    fn timeout_error() -> WebSocketError {
+        WebSocketError::CreateFailed {
+            source: TungsteniteError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Connection attempt timed out",
+            )),
+        }
+    }
+
+    fn handle_connect_error(&self, error: WebSocketError) {
+        if let Some(status) = self.is_retriable_http_error(&error) {
+            // Retriable errors are logged at INFO to avoid unnecessary alarm.
+            info!(
+                message = "WebSocket connection failed with retriable HTTP status, will retry with backoff.",
+                status_code = %status.as_u16(),
+                status = %status,
+                internal_log_rate_limit = true,
+            );
+        } else {
+            emit!(WebSocketConnectionFailedError {
+                error: Box::new(error)
+            });
+        }
+    }
+
+    pub(crate) async fn connect_backoff(
+        &self,
+        timeout_per_attempt: Duration,
+    ) -> WebSocketStream<MaybeTlsStream<TcpStream>> {
         let mut backoff = Self::fresh_backoff();
         loop {
-            match self.connect().await {
-                Ok(ws_stream) => {
+            // Apply timeout to individual connection attempts, not the entire loop.
+            let result = time::timeout(timeout_per_attempt, self.connect()).await;
+
+            match result {
+                Ok(Ok(ws_stream)) => {
                     emit!(WebSocketConnectionEstablished {});
                     return ws_stream;
                 }
-                Err(error) => {
-                    emit!(WebSocketConnectionFailedError {
-                        error: Box::new(error)
-                    });
+                Ok(Err(error)) => {
+                    self.handle_connect_error(error);
+                    time::sleep(backoff.next().unwrap()).await;
+                }
+                Err(_) => {
+                    self.handle_connect_error(Self::timeout_error());
                     time::sleep(backoff.next().unwrap()).await;
                 }
             }
@@ -219,6 +272,17 @@ pub struct WebSocketCommonConfig {
     #[configurable(metadata(docs::examples = 5))]
     pub ping_timeout: Option<NonZeroU64>,
 
+    /// HTTP status codes that should trigger a retry with exponential backoff.
+    ///
+    /// When the WebSocket handshake fails with one of these HTTP status codes,
+    /// the connection will be retried using exponential backoff instead of failing immediately.
+    /// This is useful for handling temporary server-side conditions like 409 Conflict or 429 Too Many Requests.
+    #[configurable(metadata(docs::advanced))]
+    #[configurable(metadata(docs::examples = 409))]
+    #[configurable(metadata(docs::examples = 429))]
+    #[serde(default = "default_retriable_status_codes")]
+    pub retriable_status_codes: Vec<u16>,
+
     /// TLS configuration.
     #[configurable(derived)]
     pub tls: Option<TlsEnableableConfig>,
@@ -228,12 +292,17 @@ pub struct WebSocketCommonConfig {
     pub auth: Option<Auth>,
 }
 
+fn default_retriable_status_codes() -> Vec<u16> {
+    vec![409, 429]
+}
+
 impl Default for WebSocketCommonConfig {
     fn default() -> Self {
         Self {
             uri: "ws://127.0.0.1:8080".to_owned(),
             ping_interval: None,
             ping_timeout: None,
+            retriable_status_codes: default_retriable_status_codes(),
             tls: None,
             auth: None,
         }

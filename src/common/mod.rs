@@ -22,9 +22,6 @@ pub(crate) mod s3;
 pub(crate) mod websocket;
 
 pub(crate) mod backoff;
-#[cfg(any(feature = "sources-mqtt", feature = "sinks-mqtt",))]
-/// Common MQTT configuration shared by MQTT components.
-pub mod mqtt;
 
 #[cfg(any(feature = "transforms-log_to_metric", feature = "sinks-loki"))]
 pub(crate) mod expansion;

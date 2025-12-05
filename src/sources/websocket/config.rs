@@ -161,8 +161,12 @@ impl SourceConfig for WebSocketConfig {
     async fn build(&self, cx: SourceContext) -> crate::Result<Source> {
         let tls =
             MaybeTlsSettings::from_config(self.common.tls.as_ref(), false).context(ConnectSnafu)?;
-        let connector =
-            WebSocketConnector::new(self.common.uri.clone(), tls, self.common.auth.clone())?;
+        let connector = WebSocketConnector::new(
+            self.common.uri.clone(),
+            tls,
+            self.common.auth.clone(),
+            self.common.retriable_status_codes.clone(),
+        )?;
 
         let log_namespace = cx.log_namespace(self.log_namespace);
         let decoder =

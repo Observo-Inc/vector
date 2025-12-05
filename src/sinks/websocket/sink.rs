@@ -60,7 +60,11 @@ impl WebSocketSink {
         impl Sink<Message, Error = TungsteniteError>,
         impl Stream<Item = Result<Message, TungsteniteError>>,
     ) {
-        let ws_stream = self.connector.connect_backoff().await;
+        // Use 30 second timeout per connection attempt.
+        let ws_stream = self
+            .connector
+            .connect_backoff(Duration::from_secs(30))
+            .await;
         ws_stream.split()
     }
 
