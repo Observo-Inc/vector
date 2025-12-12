@@ -28,13 +28,8 @@ base: components: sinks: websocket: configuration: {
 		}
 	}
 	auth: {
-		description: """
-			Configuration of the authentication strategy for HTTP requests.
-
-			HTTP authentication should be used with HTTPS only, as the authentication credentials are passed as an
-			HTTP header without any additional encryption beyond what is provided by the transport itself.
-			"""
-		required: false
+		description: "HTTP Authentication."
+		required:    false
 		type: object: options: {
 			password: {
 				description:   "The basic authentication password."
@@ -428,7 +423,12 @@ base: components: sinks: websocket: configuration: {
 			[ping]: https://www.rfc-editor.org/rfc/rfc6455#section-5.5.2
 			"""
 		required: false
-		type: uint: unit: "seconds"
+		type: uint: {
+			examples: [
+				30,
+			]
+			unit: "seconds"
+		}
 	}
 	ping_timeout: {
 		description: """
@@ -439,10 +439,15 @@ base: components: sinks: websocket: configuration: {
 			[pong]: https://www.rfc-editor.org/rfc/rfc6455#section-5.5.3
 			"""
 		required: false
-		type: uint: unit: "seconds"
+		type: uint: {
+			examples: [
+				5,
+			]
+			unit: "seconds"
+		}
 	}
 	tls: {
-		description: "Configures the TLS options for incoming/outgoing connections."
+		description: "TLS configuration."
 		required:    false
 		type: object: options: {
 			alpn_protocols: {
@@ -550,8 +555,9 @@ base: components: sinks: websocket: configuration: {
 			The WebSocket URI to connect to.
 
 			This should include the protocol and host, but can also include the port, path, and any other valid part of a URI.
+			 **Note**: Using the `wss://` protocol requires enabling `tls`.
 			"""
 		required: true
-		type: string: {}
+		type: string: examples: ["ws://localhost:8080", "wss://example.com/socket"]
 	}
 }

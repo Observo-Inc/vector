@@ -7,6 +7,10 @@ use crate::{
     Configurable, GenerateError, Metadata, ToValue,
 };
 
+/// Retriable HTTP status codes commonly used across Vector components.
+#[allow(dead_code)]
+pub const RETRIABLE_HTTP_STATUS_CODES: &[u16] = &[408, 409, 425, 429, 500, 502, 503, 504];
+
 impl ToValue for StatusCode {
     fn to_value(&self) -> Value {
         serde_json::to_value(self.as_u16()).expect("Could not convert HTTP status code to JSON")
