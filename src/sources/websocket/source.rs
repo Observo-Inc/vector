@@ -1,7 +1,10 @@
 use crate::vector_lib::codecs::StreamDecodingError;
 use crate::{
     codecs::Decoder,
-    common::websocket::{is_closed, PingInterval, WebSocketConnector},
+    common::{
+        backoff::ExponentialBackoff,
+        websocket::{is_closed, PingInterval, WebSocketConnector},
+    },
     config::SourceContext,
     internal_events::{
         ConnectionOpen, OpenGauge, WebSocketBytesReceived, WebSocketConnectionFailedError,
@@ -139,7 +142,7 @@ impl WebSocketSource {
                         if is_closed(&ws_err) {
                             emit!(WebSocketConnectionShutdown);
                         }
-                        error!(message = "WebSocket connection error.", error = %ws_err);
+                        error!(message = "WebSocket error.", error = %ws_err);
                     }
                     // These errors should only happen during `connect` or `reconnect`,
                     // not in the main loop's result.
@@ -152,12 +155,30 @@ impl WebSocketSource {
                         );
                     }
                 }
-                if self
-                    .reconnect(&mut out, &mut ws_sink, &mut ws_source)
-                    .await
-                    .is_err()
-                {
-                    break;
+                // Retry indefinitely with exponential backoff
+                let mut backoff = ExponentialBackoff::from_millis(100)
+                    .factor(1000)
+                    .max_delay(std::time::Duration::from_secs(30));
+
+                loop {
+                    match self
+                        .reconnect(&mut out, &mut ws_sink, &mut ws_source)
+                        .await
+                    {
+                        Ok(()) => {
+                            backoff.reset();
+                            break;
+                        }
+                        Err(err) => {
+                            let delay = backoff.next().unwrap_or(std::time::Duration::from_secs(30));
+                            warn!(
+                                message = "Reconnection failed, retrying after delay.",
+                                error = ?err,
+                                delay_ms = delay.as_millis()
+                            );
+                            tokio::time::sleep(delay).await;
+                        }
+                    }
                 }
             }
         }
@@ -245,6 +266,7 @@ impl WebSocketSource {
                 }
                 Err(error) => {
                     if !error.can_continue() {
+                        error!(message = "Fatal decoder error, stopping message processing.", %error);
                         break;
                     }
                 }
@@ -443,12 +465,8 @@ mod integration_test {
         },
     };
     use futures::{sink::SinkExt, StreamExt};
-    use std::borrow::Cow;
     use std::num::NonZeroU64;
     use tokio::{net::TcpListener, time::Duration};
-    use tokio_tungstenite::tungstenite::{
-        protocol::frame::coding::CloseCode, protocol::frame::CloseFrame,
-    };
     use tokio_tungstenite::{accept_async, tungstenite::Message};
     use url::Url;
     use vector_lib::codecs::decoding::DeserializerConfig;
@@ -630,36 +648,34 @@ mod integration_test {
         assert_eq!(*event.get_source_type().unwrap(), "websocket".into());
     }
 
-    async fn start_reject_initial_message_server() -> String {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn websocket_source_retries_on_connection_failures() {
         let addr = next_addr();
         let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
         let server_addr = format!("ws://{}", listener.local_addr().unwrap());
 
+        // Server that fails once then succeeds
         tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut websocket = accept_async(stream).await.expect("Failed to accept");
-
-            if websocket.next().await.is_some() {
-                let close_frame = CloseFrame {
-                    code: CloseCode::Error,
-                    reason: Cow::from("Simulated Internal Server Error"),
-                };
-                let _ = websocket.close(Some(close_frame)).await;
+            // First connection: close immediately
+            if let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
             }
+
+            // Second connection: succeed
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut websocket = accept_async(stream).await.unwrap();
+            websocket
+                .send(Message::Text("retry success".to_string()))
+                .await
+                .unwrap();
         });
 
-        server_addr
-    }
+        let config = make_config(&server_addr);
+        let events =
+            run_and_assert_source_compliance(config, Duration::from_secs(5), &SOURCE_TAGS).await;
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn websocket_source_exits_on_rejected_intial_messsage() {
-        let server_addr = start_reject_initial_message_server().await;
-
-        let mut config = make_config(&server_addr);
-        config.initial_message = Some("hello, server!".to_string());
-        config.initial_message_timeout_secs = Duration::from_secs(1);
-
-        run_and_assert_source_error(config, Duration::from_secs(5), &SOURCE_TAGS).await;
+        assert!(!events.is_empty());
+        assert_eq!(events[0].as_log()["message"], "retry success".into());
     }
 
     async fn start_unresponsive_server() -> String {
@@ -681,7 +697,7 @@ mod integration_test {
         server_addr
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn websocket_source_exits_on_pong_timeout() {
         let server_addr = start_unresponsive_server().await;
 
@@ -695,25 +711,4 @@ mod integration_test {
         run_and_assert_source_error(config, Duration::from_secs(5), &SOURCE_TAGS).await;
     }
 
-    async fn start_blackhole_server() -> String {
-        let addr = next_addr();
-        let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
-        let server_addr = format!("ws://{}", listener.local_addr().unwrap());
-
-        tokio::spawn(async move {
-            let (mut _socket, _) = listener.accept().await.unwrap();
-            tokio::time::sleep(Duration::from_secs(10)).await;
-        });
-
-        server_addr
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn websocket_source_exits_on_connection_timeout() {
-        let server_addr = start_blackhole_server().await;
-        let mut config = make_config(&server_addr);
-        config.connect_timeout_secs = Duration::from_secs(1);
-
-        run_and_assert_source_error(config, Duration::from_secs(5), &SOURCE_TAGS).await;
-    }
 }

@@ -134,7 +134,7 @@ const fn default_connect_timeout_secs() -> Duration {
 }
 
 const fn default_initial_message_timeout_secs() -> Duration {
-    Duration::from_secs(2)
+    Duration::from_secs(10)
 }
 
 impl Default for WebSocketConfig {

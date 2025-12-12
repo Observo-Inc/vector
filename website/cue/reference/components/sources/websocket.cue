@@ -49,6 +49,7 @@ components: sources: websocket: {
 
 	support: {
 		targets: {
+			"aarch64-apple-darwin":           true
 			"aarch64-unknown-linux-gnu":      true
 			"aarch64-unknown-linux-musl":     true
 			"armv7-unknown-linux-gnueabihf":  true

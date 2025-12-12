@@ -259,10 +259,7 @@ mod tests {
         let config = WebSocketSinkConfig {
             common: WebSocketCommonConfig {
                 uri: format!("ws://{addr}"),
-                tls: None,
-                ping_interval: None,
-                ping_timeout: None,
-                auth: None,
+                ..Default::default()
             },
             encoding: JsonSerializerConfig::default().into(),
             acknowledgements: Default::default(),
@@ -284,10 +281,7 @@ mod tests {
         let config = WebSocketSinkConfig {
             common: WebSocketCommonConfig {
                 uri: format!("ws://{addr}"),
-                tls: None,
-                ping_interval: None,
-                ping_timeout: None,
-                auth: None,
+                ..Default::default()
             },
             encoding: JsonSerializerConfig::default().into(),
             acknowledgements: Default::default(),
@@ -317,9 +311,7 @@ mod tests {
                         ..Default::default()
                     },
                 }),
-                ping_timeout: None,
-                ping_interval: None,
-                auth: None,
+                ..Default::default()
             },
             encoding: JsonSerializerConfig::default().into(),
             acknowledgements: Default::default(),
@@ -336,10 +328,7 @@ mod tests {
         let config = WebSocketSinkConfig {
             common: WebSocketCommonConfig {
                 uri: format!("ws://{addr}"),
-                tls: None,
-                ping_interval: None,
-                ping_timeout: None,
-                auth: None,
+                ..Default::default()
             },
             encoding: JsonSerializerConfig::default().into(),
             acknowledgements: Default::default(),

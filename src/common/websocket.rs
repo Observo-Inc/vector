@@ -293,7 +293,7 @@ pub struct WebSocketCommonConfig {
 }
 
 fn default_retriable_status_codes() -> Vec<u16> {
-    vec![409, 429]
+    vector_config::http::RETRIABLE_HTTP_STATUS_CODES.to_vec()
 }
 
 impl Default for WebSocketCommonConfig {
