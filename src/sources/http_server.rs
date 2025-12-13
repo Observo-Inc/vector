@@ -621,6 +621,63 @@ mod tests {
         (recv, address)
     }
 
+    async fn source_with_auth<'a>(
+        headers: Vec<String>,
+        query_parameters: Vec<String>,
+        path_key: &'a str,
+        host_key: &'a str,
+        path: &'a str,
+        method: &'a str,
+        response_code: StatusCode,
+        strict_path: bool,
+        status: EventStatus,
+        acknowledgements: bool,
+        framing: Option<FramingConfig>,
+        decoding: Option<DeserializerConfig>,
+        auth: Option<crate::sources::util::HttpSourceAuthConfig>,
+    ) -> (impl Stream<Item = Event> + 'a, SocketAddr) {
+        let (sender, recv) = SourceSender::new_test_finalize(status);
+        let address = next_addr();
+        let path = path.to_owned();
+        let host_key = OptionalValuePath::from(owned_value_path!(host_key));
+        let path_key = OptionalValuePath::from(owned_value_path!(path_key));
+        let context = SourceContext::new_test(sender, None);
+        let method = match Method::from_str(method).unwrap() {
+            Method::GET => HttpMethod::Get,
+            Method::POST => HttpMethod::Post,
+            _ => HttpMethod::Post,
+        };
+
+        tokio::spawn(async move {
+            SimpleHttpConfig {
+                address,
+                headers,
+                encoding: None,
+                query_parameters,
+                response_code,
+                tls: None,
+                auth,
+                strict_path,
+                path_key,
+                host_key,
+                path,
+                method,
+                framing,
+                decoding,
+                acknowledgements: acknowledgements.into(),
+                log_namespace: None,
+                keepalive: Default::default(),
+            }
+            .build(context)
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+        });
+        wait_for_tcp(address).await;
+        (recv, address)
+    }
+
     async fn send(address: SocketAddr, body: &str) -> u16 {
         reqwest::Client::new()
             .post(format!("http://{}/", address))
@@ -1642,6 +1699,91 @@ mod tests {
                 )],
             )
         }
+    }
+
+    #[tokio::test]
+    async fn http_bearer_auth_valid() {
+        use vector_lib::sensitive_string::SensitiveString;
+
+        let events = assert_source_compliance(&HTTP_PUSH_SOURCE_TAGS, async {
+            let auth = crate::sources::util::HttpSourceAuthConfig::Bearer {
+                token: SensitiveString::from("secret-token-12345".to_string()),
+            };
+
+            let (rx, addr) = source_with_auth(
+                vec![],
+                vec![],
+                "http_path",
+                "remote_ip",
+                "/",
+                "POST",
+                StatusCode::OK,
+                true,
+                EventStatus::Delivered,
+                true,
+                None,
+                Some(JsonDeserializerConfig::default().into()),
+                Some(auth),
+            )
+            .await;
+
+            // Valid token - should receive the event
+            let mut headers = HeaderMap::new();
+            headers.insert("Authorization", "Bearer secret-token-12345".parse().unwrap());
+            spawn_ok_collect_n(
+                send_with_headers(addr, "{\"message\":\"test\"}", headers),
+                rx,
+                1,
+            )
+            .await
+        })
+        .await;
+
+        // Check we got exactly one event with valid auth
+        assert_eq!(events.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn http_basic_auth_valid() {
+        use vector_lib::sensitive_string::SensitiveString;
+
+        let events = assert_source_compliance(&HTTP_PUSH_SOURCE_TAGS, async {
+            let auth = crate::sources::util::HttpSourceAuthConfig::Basic {
+                user: "admin".to_string(),
+                password: SensitiveString::from("secret123".to_string()),
+            };
+
+            let (rx, addr) = source_with_auth(
+                vec![],
+                vec![],
+                "http_path",
+                "remote_ip",
+                "/",
+                "POST",
+                StatusCode::OK,
+                true,
+                EventStatus::Delivered,
+                true,
+                None,
+                Some(JsonDeserializerConfig::default().into()),
+                Some(auth),
+            )
+            .await;
+
+            // Valid credentials - should receive the event
+            let mut headers = HeaderMap::new();
+            headers.insert("Authorization", "Basic YWRtaW46c2VjcmV0MTIz".parse().unwrap());
+            spawn_ok_collect_n(
+                send_with_headers(addr, "{\"message\":\"test\"}", headers),
+                rx,
+                1,
+            )
+            .await
+        })
+        .await;
+
+        // Check we got exactly one event with valid auth
+        assert_eq!(events.len(), 1);
     }
 
     register_validatable_component!(SimpleHttpConfig);
