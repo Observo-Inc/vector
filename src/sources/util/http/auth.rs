@@ -1,85 +1,49 @@
 use std::convert::TryFrom;
 
-use headers::{Authorization, HeaderMapExt};
-use vector_lib::configurable::configurable_component;
-use vector_lib::sensitive_string::SensitiveString;
-use warp::http::HeaderMap;
+// Re-export StatelessAuth from vector-core
+pub use vector_lib::http::StatelessAuth;
 
+// Import ErrorMessage from the local error module
 #[cfg(any(
     feature = "sources-utils-http-prelude",
     feature = "sources-utils-http-auth"
 ))]
 use super::error::ErrorMessage;
 
-/// HTTP Basic authentication configuration.
-#[configurable_component]
-#[derive(Clone, Debug)]
-pub struct HttpSourceAuthConfig {
-    /// The username for basic authentication.
-    #[configurable(metadata(docs::examples = "AzureDiamond"))]
-    #[configurable(metadata(docs::examples = "admin"))]
-    pub username: String,
+// Alias for backward compatibility
+pub type HttpSourceAuthConfig = StatelessAuth;
 
-    /// The password for basic authentication.
-    #[configurable(metadata(docs::examples = "hunter2"))]
-    #[configurable(metadata(docs::examples = "${PASSWORD}"))]
-    pub password: SensitiveString,
+// Wrapper type for optional authentication
+#[derive(Clone, Debug)]
+pub struct HttpSourceAuth {
+    inner: Option<StatelessAuth>,
 }
 
-impl TryFrom<Option<&HttpSourceAuthConfig>> for HttpSourceAuth {
-    type Error = String;
+impl HttpSourceAuth {
+    pub fn new(auth: Option<StatelessAuth>) -> Self {
+        Self { inner: auth }
+    }
 
-    fn try_from(auth: Option<&HttpSourceAuthConfig>) -> Result<Self, Self::Error> {
-        match auth {
+    #[allow(unused)] // triggered by check-component-features
+    pub fn is_valid(&self, header: &Option<String>) -> Result<(), ErrorMessage> {
+        match &self.inner {
             Some(auth) => {
-                let mut headers = HeaderMap::new();
-                headers.typed_insert(Authorization::basic(
-                    auth.username.as_str(),
-                    auth.password.inner(),
-                ));
-                match headers.get("authorization") {
-                    Some(value) => {
-                        let token = value
-                            .to_str()
-                            .map_err(|error| format!("Failed stringify HeaderValue: {:?}", error))?
-                            .to_owned();
-                        Ok(HttpSourceAuth { token: Some(token) })
-                    }
-                    None => Err("Authorization headers wasn't generated".to_owned()),
-                }
+                // Convert AuthError to ErrorMessage
+                auth.is_valid(header).map_err(|auth_err| {
+                    ErrorMessage::new(auth_err.status, auth_err.message)
+                })
             }
-            None => Ok(HttpSourceAuth { token: None }),
+            None => Ok(()), // No auth configured, allow all requests
         }
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct HttpSourceAuth {
-    #[allow(unused)] // triggered by check-component-features
-    pub(self) token: Option<String>,
-}
+impl TryFrom<Option<&StatelessAuth>> for HttpSourceAuth {
+    type Error = String;
 
-impl HttpSourceAuth {
-    #[allow(unused)] // triggered by check-component-features
-    pub fn is_valid(&self, header: &Option<String>) -> Result<(), ErrorMessage> {
-        use warp::http::StatusCode;
-
-        match (&self.token, header) {
-            (Some(token1), Some(token2)) => {
-                if token1 == token2 {
-                    Ok(())
-                } else {
-                    Err(ErrorMessage::new(
-                        StatusCode::UNAUTHORIZED,
-                        "Invalid username/password".to_owned(),
-                    ))
-                }
-            }
-            (Some(_), None) => Err(ErrorMessage::new(
-                StatusCode::UNAUTHORIZED,
-                "No authorization header".to_owned(),
-            )),
-            (None, _) => Ok(()),
-        }
+    fn try_from(auth: Option<&StatelessAuth>) -> Result<Self, Self::Error> {
+        Ok(Self {
+            inner: auth.cloned(),
+        })
     }
 }

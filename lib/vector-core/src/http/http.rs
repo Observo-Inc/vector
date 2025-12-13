@@ -2,7 +2,7 @@
 use futures::future::BoxFuture;
 use headers::{Authorization, HeaderMapExt};
 use http::{
-    header::HeaderValue, request::Builder, uri::InvalidUri, HeaderMap, Request, Response, Uri,
+    header::HeaderValue, request::Builder, uri::InvalidUri, HeaderMap, Request, Response, StatusCode, Uri,
     Version,
 };
 use hyper::{
@@ -27,6 +27,7 @@ use tower_http::{
 use tracing::{Instrument, Span};
 use vector_config::configurable_component;
 use vector_common::sensitive_string::SensitiveString;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 use crate::config::proxy::ProxyConfig;
 
@@ -99,6 +100,19 @@ impl HttpError {
             | HttpError::BuildTlsConnector { .. }
             | HttpError::MakeHttpsConnector { .. } => true,
         }
+    }
+}
+
+/// Authentication error with status code and message.
+#[derive(Debug, Clone)]
+pub struct AuthError {
+    pub status: StatusCode,
+    pub message: String,
+}
+
+impl AuthError {
+    pub fn new(status: StatusCode, message: String) -> Self {
+        Self { status, message }
     }
 }
 
@@ -369,6 +383,41 @@ impl Auth {
                 Ok(auth) => map.typed_insert(auth),
                 Err(error) => error!(message = "Invalid bearer token.", token = %token, %error),
             },
+        }
+    }
+
+    /// Validates the provided authorization header against the configured authentication.
+    ///
+    /// Returns `Ok(())` if the header is valid, or an `Err(AuthError)` if authentication fails.
+    pub fn is_valid(&self, header: &Option<String>) -> Result<(), AuthError> {
+        match header {
+            Some(header_value) => {
+                let expected_header = match self {
+                    Auth::Basic { user, password } => {
+                        // Generate the expected "Basic <base64>" header
+                        let credentials = format!("{}:{}", user, password.inner());
+                        let encoded = BASE64.encode(credentials.as_bytes());
+                        format!("Basic {}", encoded)
+                    }
+                    Auth::Bearer { token } => {
+                        // Generate the expected "Bearer <token>" header
+                        format!("Bearer {}", token.inner())
+                    }
+                };
+
+                if header_value == &expected_header {
+                    Ok(())
+                } else {
+                    Err(AuthError::new(
+                        StatusCode::UNAUTHORIZED,
+                        "Invalid authorization credentials".to_owned(),
+                    ))
+                }
+            }
+            None => Err(AuthError::new(
+                StatusCode::UNAUTHORIZED,
+                "No authorization header".to_owned(),
+            )),
         }
     }
 }
