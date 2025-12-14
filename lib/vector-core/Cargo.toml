@@ -71,7 +71,7 @@ vrl.workspace = true
 cfg-if.workspace = true
 portpicker = { path = "../portpicker" }
 chkpts = { path = "../observo/chkpts", optional = true }
-base64 = { version = "0.22.1", default-features = false, optional = true }
+base64 = { version = "0.22.1", default-features = false }
 goauth = { version = "0.14.0", optional = true }
 smpl_jwt = { version = "0.8.0", default-features = false, optional = true }
 flate2.workspace = true
@@ -115,7 +115,7 @@ lua = ["dep:mlua", "vrl/lua"]
 vrl = []
 test = ["vector-common/test", "proptest"]
 observo = ["dep:chkpts"]
-gcp = ["dep:base64", "dep:goauth", "dep:smpl_jwt"]
+gcp = ["dep:goauth", "dep:smpl_jwt"]
 
 [[bench]]
 name = "event"

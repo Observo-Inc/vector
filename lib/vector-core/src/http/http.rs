@@ -2,7 +2,7 @@
 use futures::future::BoxFuture;
 use headers::{Authorization, HeaderMapExt};
 use http::{
-    header::HeaderValue, request::Builder, uri::InvalidUri, HeaderMap, Request, Response, Uri,
+    header::HeaderValue, request::Builder, uri::InvalidUri, HeaderMap, Request, Response, StatusCode, Uri,
     Version,
 };
 use hyper::{
@@ -27,6 +27,7 @@ use tower_http::{
 use tracing::{Instrument, Span};
 use vector_config::configurable_component;
 use vector_common::sensitive_string::SensitiveString;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 use crate::config::proxy::ProxyConfig;
 
@@ -99,6 +100,19 @@ impl HttpError {
             | HttpError::BuildTlsConnector { .. }
             | HttpError::MakeHttpsConnector { .. } => true,
         }
+    }
+}
+
+/// Authentication error with status code and message.
+#[derive(Debug, Clone)]
+pub struct AuthError {
+    pub status: StatusCode,
+    pub message: String,
+}
+
+impl AuthError {
+    pub fn new(status: StatusCode, message: String) -> Self {
+        Self { status, message }
     }
 }
 
@@ -369,6 +383,41 @@ impl Auth {
                 Ok(auth) => map.typed_insert(auth),
                 Err(error) => error!(message = "Invalid bearer token.", token = %token, %error),
             },
+        }
+    }
+
+    /// Validates the provided authorization header against the configured authentication.
+    ///
+    /// Returns `Ok(())` if the header is valid, or an `Err(AuthError)` if authentication fails.
+    pub fn is_valid(&self, header: &Option<String>) -> Result<(), AuthError> {
+        match header {
+            Some(header_value) => {
+                let expected_header = match self {
+                    Auth::Basic { user, password } => {
+                        // Generate the expected "Basic <base64>" header
+                        let credentials = format!("{}:{}", user, password.inner());
+                        let encoded = BASE64.encode(credentials.as_bytes());
+                        format!("Basic {}", encoded)
+                    }
+                    Auth::Bearer { token } => {
+                        // Generate the expected "Bearer <token>" header
+                        format!("Bearer {}", token.inner())
+                    }
+                };
+
+                if header_value == &expected_header {
+                    Ok(())
+                } else {
+                    Err(AuthError::new(
+                        StatusCode::UNAUTHORIZED,
+                        "Invalid authorization credentials".to_owned(),
+                    ))
+                }
+            }
+            None => Err(AuthError::new(
+                StatusCode::UNAUTHORIZED,
+                "No authorization header".to_owned(),
+            )),
         }
     }
 }
@@ -852,5 +901,127 @@ pub mod tests {
             .unwrap();
         let response = client.send(req).await.unwrap();
         assert_eq!(response.headers().get("Connection"), None);
+    }
+
+    #[test]
+    fn test_stateless_auth_basic_valid() {
+        use vector_common::sensitive_string::SensitiveString;
+
+        let auth = StatelessAuth::Basic {
+            user: "testuser".to_string(),
+            password: SensitiveString::from("testpass".to_string()),
+        };
+
+        // Valid authorization header
+        let valid_header = Some("Basic dGVzdHVzZXI6dGVzdHBhc3M=".to_string());
+        assert!(auth.is_valid(&valid_header).is_ok());
+    }
+
+    #[test]
+    fn test_stateless_auth_basic_invalid_password() {
+        use vector_common::sensitive_string::SensitiveString;
+
+        let auth = StatelessAuth::Basic {
+            user: "testuser".to_string(),
+            password: SensitiveString::from("testpass".to_string()),
+        };
+
+        // Invalid password
+        let invalid_header = Some("Basic dGVzdHVzZXI6d3JvbmdwYXNz".to_string());
+        let result = auth.is_valid(&invalid_header);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(err.message, "Invalid authorization credentials");
+    }
+
+    #[test]
+    fn test_stateless_auth_basic_missing_header() {
+        use vector_common::sensitive_string::SensitiveString;
+
+        let auth = StatelessAuth::Basic {
+            user: "testuser".to_string(),
+            password: SensitiveString::from("testpass".to_string()),
+        };
+
+        // No header provided
+        let result = auth.is_valid(&None);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(err.message, "No authorization header");
+    }
+
+    #[test]
+    fn test_stateless_auth_bearer_valid() {
+        use vector_common::sensitive_string::SensitiveString;
+
+        let auth = StatelessAuth::Bearer {
+            token: SensitiveString::from("secret-token-12345".to_string()),
+        };
+
+        // Valid bearer token
+        let valid_header = Some("Bearer secret-token-12345".to_string());
+        assert!(auth.is_valid(&valid_header).is_ok());
+    }
+
+    #[test]
+    fn test_stateless_auth_bearer_invalid_token() {
+        use vector_common::sensitive_string::SensitiveString;
+
+        let auth = StatelessAuth::Bearer {
+            token: SensitiveString::from("secret-token-12345".to_string()),
+        };
+
+        // Invalid token
+        let invalid_header = Some("Bearer wrong-token".to_string());
+        let result = auth.is_valid(&invalid_header);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(err.message, "Invalid authorization credentials");
+    }
+
+    #[test]
+    fn test_stateless_auth_bearer_missing_header() {
+        use vector_common::sensitive_string::SensitiveString;
+
+        let auth = StatelessAuth::Bearer {
+            token: SensitiveString::from("secret-token-12345".to_string()),
+        };
+
+        // No header provided
+        let result = auth.is_valid(&None);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(err.message, "No authorization header");
+    }
+
+    #[test]
+    fn test_stateless_auth_basic_with_special_chars() {
+        use vector_common::sensitive_string::SensitiveString;
+
+        let auth = StatelessAuth::Basic {
+            user: "user@example.com".to_string(),
+            password: SensitiveString::from("p@ss:w0rd!".to_string()),
+        };
+
+        // Valid header with special characters
+        let valid_header = Some("Basic dXNlckBleGFtcGxlLmNvbTpwQHNzOncwcmQh".to_string());
+        assert!(auth.is_valid(&valid_header).is_ok());
+    }
+
+    #[test]
+    fn test_stateless_auth_bearer_with_special_chars() {
+        use vector_common::sensitive_string::SensitiveString;
+
+        let auth = StatelessAuth::Bearer {
+            token: SensitiveString::from("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test".to_string()),
+        };
+
+        // Valid JWT-like token
+        let valid_header = Some("Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test".to_string());
+        assert!(auth.is_valid(&valid_header).is_ok());
     }
 }

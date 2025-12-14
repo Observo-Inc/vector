@@ -494,7 +494,14 @@ mod tests {
         let len = body.lines().count();
         let mut req = reqwest::Client::new().post(format!("http://{}/events?{}", address, query));
         if let Some(auth) = auth {
-            req = req.basic_auth(auth.username, Some(auth.password.inner()));
+            match auth {
+                HttpSourceAuthConfig::Basic { user, password } => {
+                    req = req.basic_auth(user, Some(password.inner()));
+                }
+                HttpSourceAuthConfig::Bearer { .. } => {
+                    // Bearer auth not used in this test
+                }
+            }
         }
         req.header("Logplex-Msg-Count", len)
             .header("Logplex-Frame-Id", "frame-foo")
@@ -508,8 +515,8 @@ mod tests {
     }
 
     fn make_auth() -> HttpSourceAuthConfig {
-        HttpSourceAuthConfig {
-            username: random_string(16),
+        HttpSourceAuthConfig::Basic {
+            user: random_string(16),
             password: random_string(16).into(),
         }
     }
