@@ -10,6 +10,7 @@ mod log_schema;
 pub mod output_id;
 pub mod proxy;
 mod telemetry;
+mod timestamp;
 
 use crate::event::LogEvent;
 pub use global_options::GlobalOptions;
@@ -21,6 +22,7 @@ pub use telemetry::{init_telemetry, telemetry, Tags, Telemetry};
 pub use vector_common::config::ComponentKey;
 use vector_config::configurable_component;
 use vrl::value::Value;
+pub use timestamp::{TimestampFormat, TimePrecision, TimestampResolutionError};
 
 use crate::schema;
 

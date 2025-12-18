@@ -37,6 +37,7 @@ pub mod config {
         clone_input_definitions, init_log_schema, init_telemetry, log_schema, proxy, telemetry,
         AcknowledgementsConfig, DataType, GlobalOptions, Input, LegacyKey, LogNamespace, LogSchema,
         OutputId, SourceAcknowledgementsConfig, SourceOutput, Tags, Telemetry, TransformOutput,
+        TimePrecision, TimestampFormat, TimestampResolutionError,
         MEMORY_BUFFER_DEFAULT_MAX_EVENTS,
     };
 }

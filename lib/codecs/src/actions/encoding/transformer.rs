@@ -16,6 +16,8 @@ use vrl::value::Value;
 
 use vector_core::{event::Event, serde::is_default};
 
+type RenameFields = BTreeMap<ConfigValuePath, Vec<ConfigValuePath>>;
+
 /// Transformations to prepare an event for serialization.
 #[configurable_component(no_deser)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -31,6 +33,14 @@ pub struct Transformer {
     /// Format used for timestamp fields.
     #[serde(default, skip_serializing_if = "is_default")]
     timestamp_format: Option<TimestampFormat>,
+
+    /// Rename fields to match expected schema
+    #[serde(default = "default_rename", skip_serializing_if = "is_default")]
+    rename_fields: RenameFields,
+}
+
+fn default_rename() -> RenameFields {
+    RenameFields::new()
 }
 
 impl<'de> Deserialize<'de> for Transformer {
@@ -47,6 +57,8 @@ impl<'de> Deserialize<'de> for Transformer {
             except_fields: Option<Vec<OwnedValuePath>>,
             #[serde(default)]
             timestamp_format: Option<TimestampFormat>,
+            #[serde(default = "default_rename")]
+            rename_fields: RenameFields,
         }
 
         let inner: TransformerInner = Deserialize::deserialize(deserializer)?;
@@ -58,6 +70,7 @@ impl<'de> Deserialize<'de> for Transformer {
                 .except_fields
                 .map(|v| v.iter().map(|p| ConfigValuePath(p.clone())).collect()),
             inner.timestamp_format,
+            inner.rename_fields,
         )
         .map_err(serde::de::Error::custom)
     }
@@ -72,6 +85,7 @@ impl Transformer {
         only_fields: Option<Vec<ConfigValuePath>>,
         except_fields: Option<Vec<ConfigValuePath>>,
         timestamp_format: Option<TimestampFormat>,
+        rename_fields: BTreeMap<ConfigValuePath, Vec<ConfigValuePath>>,
     ) -> Result<Self, vector_common::Error> {
         Self::validate_fields(only_fields.as_ref(), except_fields.as_ref())?;
 
@@ -79,6 +93,7 @@ impl Transformer {
             only_fields,
             except_fields,
             timestamp_format,
+            rename_fields,
         })
     }
 
@@ -126,6 +141,18 @@ impl Transformer {
             self.apply_except_fields(log);
             self.apply_only_fields(log);
             self.apply_timestamp_format(log);
+            self.apply_rename_fields(log);
+        }
+    }
+
+    fn apply_rename_fields(&self, log: &mut LogEvent) {
+        for (to, from) in &self.rename_fields {
+            for frm in from {
+                if let Some(value) = log.remove((PathPrefix::Event, frm)) {
+                    log.insert((PathPrefix::Event, to), value);
+                    break;
+                }
+            }
         }
     }
 
@@ -515,5 +542,42 @@ mod tests {
             &Value::from("carrot"),
             event.as_log().get_by_meaning("service").unwrap()
         );
+    }
+
+    fn get<'a>(e: &'a Event, key: &'static str) -> Option<&'a Value> {
+        e.as_log().get(key)
+    }
+
+    #[test]
+    fn renames_fields() {
+        let transformer: Transformer =
+            toml::from_str(r#"
+                [rename_fields]
+                foo = ["bar", "baz", "thing.service"]
+                quux = ["corge", "grault", "garply"]
+                waldo = ["fred.foo", "fred.bar"]
+            "#).unwrap();
+        let mut log = LogEvent::default();
+        {
+            log.insert("message", 1);
+            log.insert("foo", "foo_orig");
+            log.insert("thing.service", "carrot");
+            log.insert("grault", 15);
+            log.insert("garply", "garply_orig");
+        }
+
+        let mut event = Event::from(log);
+
+        transformer.transform(&mut event);
+
+        assert_eq!(get(&event, "message"), Some(&Value::Integer(1)));
+        assert_eq!(get(&event, "foo"), Some(&Value::Bytes("carrot".into())));
+        assert_eq!(get(&event, "quux"), Some(&Value::Integer(15)));
+        assert_eq!(get(&event, "waldo"), None);
+
+        assert_eq!(get(&event, "garply"), Some(&Value::Bytes("garply_orig".into())));
+
+        assert_eq!(get(&event, "think.service"), None);
+        assert_eq!(get(&event, "grault"), None);
     }
 }

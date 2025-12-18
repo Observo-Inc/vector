@@ -31,7 +31,8 @@ use crate::{
     template::Template,
     test_util::next_addr,
 };
-use crate::sinks::splunk_hec::logs::config::{TimePrecision, TimestampConfiguration, TimestampFormat};
+use vector_lib::config::{TimePrecision, TimestampFormat};
+use crate::sinks::splunk_hec::logs::config::TimestampConfiguration;
 
 #[derive(Deserialize, Debug)]
 struct HecEventJson {
@@ -543,7 +544,7 @@ fn test_timestamp_configurations() {
                 preserve_timestamp_key: false,
                 format: TimestampFormat::Numeric(TimePrecision::Microseconds),
             }),
-            expected_time: Some(1638366107.983874),
+            expected_time: Some(1638366107.983),
             expected_nanos: Some(874000),
             should_preserve_timestamp: false,
             time_metadata_should_exist: true
@@ -560,7 +561,7 @@ fn test_timestamp_configurations() {
                 preserve_timestamp_key: false,
                 format: TimestampFormat::Numeric(TimePrecision::Nanoseconds),
             }),
-            expected_time: Some(1638366107.983874983),
+            expected_time: Some(1638366107.983),
             expected_nanos: Some(874983),
             should_preserve_timestamp: false,
             time_metadata_should_exist: true

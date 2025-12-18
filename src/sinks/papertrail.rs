@@ -183,6 +183,7 @@ impl tokio_util::codec::Encoder<Event> for PapertrailEncoder {
 #[cfg(test)]
 mod tests {
     use serde::Deserialize;
+    use std::collections::BTreeMap;
     use std::convert::TryFrom;
 
     use bytes::BytesMut;
@@ -229,7 +230,7 @@ mod tests {
         let mut encoder = PapertrailEncoder {
             pid: 0,
             process: Template::try_from("{{ process }}").unwrap(),
-            transformer: Transformer::new(None, Some(vec!["magic".into()]), None).unwrap(),
+            transformer: Transformer::new(None, Some(vec!["magic".into()]), None, BTreeMap::new()).unwrap(),
             encoder: Encoder::<()>::new(JsonSerializerConfig::default().build().into()),
         };
 

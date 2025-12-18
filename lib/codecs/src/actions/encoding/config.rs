@@ -124,7 +124,8 @@ impl EncodingConfigWithFraming {
                 | Serializer::Logfmt(_)
                 | Serializer::NativeJson(_)
                 | Serializer::RawMessage(_)
-                | Serializer::Text(_),
+                | Serializer::Text(_)
+                | Serializer::Syslog(_), // TODO(OBE-7927): sanitize default?
             ) => NewlineDelimitedEncoder::default().into(),
         };
 
