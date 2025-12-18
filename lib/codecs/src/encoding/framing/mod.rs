@@ -7,6 +7,7 @@ mod bytes;
 mod character_delimited;
 mod length_delimited;
 mod newline_delimited;
+mod octet_counted;
 
 use std::fmt::Debug;
 
@@ -15,6 +16,7 @@ pub use character_delimited::{
 };
 use dyn_clone::DynClone;
 pub use length_delimited::{LengthDelimitedEncoder, LengthDelimitedEncoderConfig};
+pub use octet_counted::OctetCountedEncoder;
 pub use newline_delimited::{NewlineDelimitedEncoder, NewlineDelimitedEncoderConfig};
 use tokio_util::codec::LinesCodecError;
 

@@ -11,6 +11,7 @@ use vector_common::get_hostname;
 use vector_config_macros::configurable_component;
 use vector_core::{config::{DataType, TimestampFormat}, event::{Event, LogEvent}, schema::{self, meaning::{self}}};
 use vrl::{core::Value, value::KeyString};
+use core::fmt::Write;
 
 /// Timestamp resolution for RFC 5424 syslog messages.
 #[configurable_component]
@@ -105,10 +106,22 @@ impl Default for Format {
     }
 }
 
+/// Config for truncating serialized messages.
+#[configurable_component]
+#[derive(Debug, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct Truncation {
+    /// Maximum length of the serialized message. If set, messages longer than this will be truncated.
+    pub max_len: usize,
+
+    /// String to append to truncated messages to indicate truncation.
+    pub elipsis: Option<String>,
+}
+
 /// Config used to build a `SyslogSerializer`.
 #[configurable_component]
 #[derive(Debug, Clone, Default)]
-#[serde(deny_unknown_fields, rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub struct SyslogSerializerConfig {
     /// The syslog message format.
     #[serde(alias = "standard", alias = "std")]
@@ -117,12 +130,16 @@ pub struct SyslogSerializerConfig {
     /// Timestamp format (the rule for processing the timestamp attribute)
     #[serde(alias = "timestamp_format", alias = "ts_fmt", alias = "time_fmt")]
     pub ts_format: TimestampFormat,
+
+    /// Configuration for truncating serialized messages. Can be useful in preventing fragmentation over UDP.
+    #[serde(alias = "trunc")]
+    pub truncate: Option<Truncation>,
 }
 
 impl SyslogSerializerConfig {
     /// Creates a new `SyslogSerializerConfig`.
-    pub const fn new(format: Format, ts_format: TimestampFormat) -> Self {
-        Self { format, ts_format }
+    pub const fn new(format: Format, ts_format: TimestampFormat, truncate: Option<Truncation>) -> Self {
+        Self { format, ts_format, truncate }
     }
 
     /// Build the `SyslogSerializer` from this configuration.
@@ -256,8 +273,6 @@ fn host<'a>(l: &'a LogEvent, dflt: &'a str) -> Cow<'a, str> {
     str(l, Host, dflt)
 }
 
-use core::fmt::Write;
-
 pub(self) trait Clock : DynClone + Debug {
     fn now(&self) -> DateTime<Utc> {
         Utc::now()
@@ -362,7 +377,24 @@ impl SyslogSerializer {
         Ok(())
     }
 
-    fn encode5424(&self, l: LogEvent, buf: &mut BytesMut, cfg: &Rfc5424) -> Result<(), std::fmt::Error> {
+    fn truncate_maybe(&self, buf: &mut BytesMut) {
+        if let Some(trunc) = &self.cfg.truncate {
+            if buf.len() > trunc.max_len {
+                let elip = trunc.elipsis.as_deref().unwrap_or("");
+                let elip_len = elip.len();
+                if elip_len >= trunc.max_len {
+                    error!("Truncating syslog message but elipsis length ({}) >= max_len ({}). Dropping elipsis.", elip_len, trunc.max_len);
+                    buf.truncate(trunc.max_len);
+                } else {
+                    error!("Truncating syslog message from length {} to max_len {}.", buf.len(), trunc.max_len);
+                    buf.truncate(trunc.max_len - elip_len);
+                    buf.extend_from_slice(elip.as_bytes());
+                }
+            }
+        }
+    }
+
+    fn encode_5424(&self, l: LogEvent, buf: &mut BytesMut, cfg: &Rfc5424) -> Result<(), std::fmt::Error> {
         let pri = pri(&l);
         let ts = tm(&l, &self.cfg.ts_format, &self.clk).to_rfc3339_opts(cfg.time_res(), cfg.z);
         let host = host(&l, self.dflt_host.as_str());
@@ -378,13 +410,11 @@ impl SyslogSerializer {
         let msg_prefix = cfg.msg_prefix();
 
         write!(buf, "<{pri}>1 {ts} {host} {app} {proc_id} {msg_id} ")?;
-
         self.write_sd(&l, buf)?;
-
         write!(buf, "{msg_prefix}{msg}")
     }
 
-    fn encode3164(&self, l: LogEvent, buf: &mut BytesMut) -> Result<(), std::fmt::Error> {
+    fn encode_3164(&self, l: LogEvent, buf: &mut BytesMut) -> Result<(), std::fmt::Error> {
         let pri = pri(&l);
         let ts = tm(&l, &self.cfg.ts_format, &self.clk).format("%b %e %H:%M:%S");
         let host = host(&l, self.dflt_host.as_str());
@@ -399,9 +429,12 @@ impl Encoder<Event> for SyslogSerializer {
     fn encode(&mut self, event: Event, buf: &mut BytesMut) -> Result<(), Self::Error> {
         if let Event::Log(event) = event {
             match &self.cfg.format {
-                Format::Rfc5424(cfg) => self.encode5424(event, buf, cfg),
-                Format::Rfc3164 => self.encode3164(event, buf),
-            }.map_err(|e| e.into())
+                Format::Rfc5424(cfg) => self.encode_5424(event, buf, cfg),
+                Format::Rfc3164 => self.encode_3164(event, buf),
+            }.map_err(Box::new)?;
+
+            self.truncate_maybe(buf);
+            Ok(())
         } else {
             Ok(())
         }
@@ -414,7 +447,9 @@ mod tests {
     use bytes::{Bytes, BytesMut};
     use chrono::DateTime;
     use rstest::rstest;
+    use tracing_test::traced_test;
     use vector_core::{config::TimePrecision, event::LogEvent};
+    use tracing::trace;
 
     use super::*;
 
@@ -454,6 +489,7 @@ mod tests {
         SyslogSerializerConfig{
             format: Format::Rfc3164,
             ts_format: TimestampFormat::Native,
+            truncate: None,
         },
         e([
             ("priority", 20.into()),
@@ -466,6 +502,7 @@ mod tests {
         SyslogSerializerConfig{
             format: Format::Rfc3164,
             ts_format: TimestampFormat::Native,
+            truncate: None,
         },
         e([
             ("host", s("test.com")),
@@ -476,6 +513,7 @@ mod tests {
         SyslogSerializerConfig{
             format: Format::Rfc3164,
             ts_format: TimestampFormat::Native,
+            truncate: None,
         },
         e([
             ("priority", 20.into()),
@@ -487,6 +525,7 @@ mod tests {
         SyslogSerializerConfig{
             format: Format::Rfc3164,
             ts_format: TimestampFormat::Native,
+            truncate: None,
         },
         e([
             ("priority", 20.into()),
@@ -498,6 +537,7 @@ mod tests {
         SyslogSerializerConfig{
             format: Format::Rfc3164,
             ts_format: TimestampFormat::Numeric(TimePrecision::Seconds),
+            truncate: None,
         },
         e([
             ("host", s("foo.com")),
@@ -509,7 +549,27 @@ mod tests {
         SyslogSerializerConfig{
             format: Format::Rfc3164,
             ts_format: TimestampFormat::Numeric(TimePrecision::Seconds),
+            truncate: None,
         },
+        e([
+            ("host", s("foo.com")),
+            ("facility", 6.into()),
+            ("severity", 5.into()),
+            ("message", s("Process restarted!")),
+            ("timestamp", 1765961915i64.into())]),
+    )]
+    #[case::truncate_msg(
+        "<53>Dec 17 08:58:35 foo.com Process rest...",
+        toml::from_str(
+            r#"
+            [std]
+            rfc = "3164"
+            [ts_fmt.numeric.sec]
+            [trunc]
+            max_len = 43
+            elipsis = "..."
+            "#,
+        ).expect("Couldn't parse serializer config"),
         e([
             ("host", s("foo.com")),
             ("facility", 6.into()),
@@ -531,6 +591,7 @@ mod tests {
         SyslogSerializerConfig{
             format: Format::Rfc5424(Rfc5424::new(TimeRes::Milliseconds, true, true)),
             ts_format: TimestampFormat::Native,
+            truncate: None,
         },
         e([
             ("priority", 20.into()),
@@ -546,6 +607,7 @@ mod tests {
         SyslogSerializerConfig{
             format: Format::Rfc5424(Rfc5424::new(TimeRes::Milliseconds, true, false)),
             ts_format: TimestampFormat::Native,
+            truncate: None,
         },
         e([
             ("priority", 20.into()),
@@ -631,11 +693,120 @@ mod tests {
             ("message", s("Process failed")),
             ("timestamp", tm("2015-01-20T17:35:20.123456789−08:00"))]),
     )]
+    #[case::truncate_msg(
+        "<35>1 2015-01-21T01:35:20.123456Z test.com log-svc 8192 start [t@1 a=\"b\" e=\"true\"][t@4 value=\"42\"] \u{FEFF}Proces...",
+        toml::from_str(
+            r#"
+            [std]
+            rfc = "rfc5424"
+            bom = true
+            res = "micros"
+            [ts_fmt.num.us]
+            [trunc]
+            max_len = 111
+            elipsis = "..."
+            "#,
+        ).expect("Couldn't parse serializer config"),
+        e([
+            ("severity", 3.into()),
+            ("facility", 4.into()),
+            ("host", s("test.com")),
+            ("msgid", s("start")),
+            ("procid", 8192.into()),
+            ("service", s("log-svc")),
+            ("sd", m([
+                     ("t@1", m([("a", s("b")), ("e", true.into())])),
+                     ("t@4", 42.into())])),
+            ("message", s("Process failed")),
+            ("timestamp", tm("2015-01-20T17:35:20.123456789−08:00"))]),
+    )]
+    #[case::truncate_msg_without_elipsis(
+        "<35>1 2015-01-21T01:35:20.123456Z test.com log-svc 8192 start [t@1 a=\"b\" e=\"true\"][t@4 value=\"42\"] \u{FEFF}Process f",
+        toml::from_str(
+            r#"
+            [std]
+            rfc = "rfc5424"
+            bom = true
+            res = "micros"
+            [ts_fmt.num.us]
+            [trunc]
+            max_len = 111
+            "#,
+        ).expect("Couldn't parse serializer config"),
+        e([
+            ("severity", 3.into()),
+            ("facility", 4.into()),
+            ("host", s("test.com")),
+            ("msgid", s("start")),
+            ("procid", 8192.into()),
+            ("service", s("log-svc")),
+            ("sd", m([
+                     ("t@1", m([("a", s("b")), ("e", true.into())])),
+                     ("t@4", 42.into())])),
+            ("message", s("Process failed")),
+            ("timestamp", tm("2015-01-20T17:35:20.123456789−08:00"))]),
+    )]
+    #[case::truncate_aggressive(
+        "<35>1 2015!",
+        toml::from_str(
+            r#"
+            [std]
+            rfc = "rfc5424"
+            bom = true
+            res = "micros"
+            [ts_fmt.num.us]
+            [trunc]
+            max_len = 11
+            elipsis = "!"
+            "#,
+        ).expect("Couldn't parse serializer config"),
+        e([
+            ("severity", 3.into()),
+            ("facility", 4.into()),
+            ("host", s("test.com")),
+            ("msgid", s("start")),
+            ("procid", 8192.into()),
+            ("service", s("log-svc")),
+            ("sd", m([
+                     ("t@1", m([("a", s("b")), ("e", true.into())])),
+                     ("t@4", 42.into())])),
+            ("message", s("Process failed")),
+            ("timestamp", tm("2015-01-20T17:35:20.123456789−08:00"))]),
+    )]
+    #[case::truncate_msg_without_elipsis_when_too_long(
+        "<35>1 2015-",
+        toml::from_str(
+            r#"
+            [std]
+            rfc = "rfc5424"
+            bom = true
+            res = "micros"
+            [ts_fmt.num.us]
+            [trunc]
+            max_len = 11
+            elipsis = "....????...."
+            "#,
+        ).expect("Couldn't parse serializer config"),
+        e([
+            ("severity", 3.into()),
+            ("facility", 4.into()),
+            ("host", s("test.com")),
+            ("msgid", s("start")),
+            ("procid", 8192.into()),
+            ("service", s("log-svc")),
+            ("sd", m([
+                     ("t@1", m([("a", s("b")), ("e", true.into())])),
+                     ("t@4", 42.into())])),
+            ("message", s("Process failed")),
+            ("timestamp", tm("2015-01-20T17:35:20.123456789−08:00"))]),
+    )]
+    #[traced_test]
     fn test_rfc5424(
         #[case] out: impl Into<String>,
         #[case] cfg: SyslogSerializerConfig,
         #[case] evt: Event,
     ) {
+        trace!("Running test...");
         assert_eq!(serialize(cfg, evt), Bytes::from(out.into()));
     }
 

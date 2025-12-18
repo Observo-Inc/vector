@@ -24,7 +24,7 @@ pub use framing::{
 use vector_config::configurable_component;
 use vector_core::{config::DataType, event::Event, schema};
 
-use crate::encoding::format::{SyslogSerializer, SyslogSerializerConfig};
+use crate::encoding::{format::{SyslogSerializer, SyslogSerializerConfig}, framing::OctetCountedEncoder};
 
 /// An error that occurred while building an encoder.
 pub type BuildError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -74,6 +74,9 @@ pub enum FramingConfig {
 
     /// Event data is delimited by a newline (LF) character.
     NewlineDelimited,
+
+    /// Octet counted framing as per RFC 5425.
+    OctetCounted,
 }
 
 impl From<BytesEncoderConfig> for FramingConfig {
@@ -109,7 +112,8 @@ impl FramingConfig {
             FramingConfig::LengthDelimited(config) => Framer::LengthDelimited(config.build()),
             FramingConfig::NewlineDelimited => {
                 Framer::NewlineDelimited(NewlineDelimitedEncoderConfig.build())
-            }
+            },
+            FramingConfig::OctetCounted => Framer::OctetCounted(OctetCountedEncoder{}),
         }
     }
 }
@@ -127,6 +131,8 @@ pub enum Framer {
     NewlineDelimited(NewlineDelimitedEncoder),
     /// Uses an opaque `Encoder` implementation for framing.
     Boxed(BoxedFramer),
+    /// Uses a `OctetCounted` for framing.
+    OctetCounted(OctetCountedEncoder),
 }
 
 impl From<BytesEncoder> for Framer {
@@ -169,6 +175,7 @@ impl tokio_util::codec::Encoder<()> for Framer {
             Framer::LengthDelimited(framer) => framer.encode((), buffer),
             Framer::NewlineDelimited(framer) => framer.encode((), buffer),
             Framer::Boxed(framer) => framer.encode((), buffer),
+            Framer::OctetCounted(framer) => framer.encode((), buffer),
         }
     }
 }
