@@ -16,7 +16,7 @@ use vrl::value::Value;
 
 use vector_core::{event::Event, serde::is_default};
 
-type RenameFields = BTreeMap<ConfigValuePath, Vec<ConfigValuePath>>;
+pub type RenameFields = BTreeMap<ConfigValuePath, Vec<ConfigValuePath>>;
 
 /// Transformations to prepare an event for serialization.
 #[configurable_component(no_deser)]
@@ -57,7 +57,7 @@ impl<'de> Deserialize<'de> for Transformer {
             except_fields: Option<Vec<OwnedValuePath>>,
             #[serde(default)]
             timestamp_format: Option<TimestampFormat>,
-            #[serde(default = "default_rename")]
+            #[serde(default = "default_rename", alias = "rename")]
             rename_fields: RenameFields,
         }
 
@@ -111,6 +111,11 @@ impl Transformer {
     /// Get the `Transformer`'s `timestamp_format`.
     pub const fn timestamp_format(&self) -> &Option<TimestampFormat> {
         &self.timestamp_format
+    }
+
+    /// Get the `Transformer`'s `rename_fields`.
+    pub const fn rename_fields(&self) -> &RenameFields {
+        &self.rename_fields
     }
 
     /// Check if `except_fields` and `only_fields` items are mutually exclusive.

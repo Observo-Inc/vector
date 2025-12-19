@@ -62,7 +62,7 @@ pub struct TcpSinkConfig {
     /// The address _must_ include a port.
     #[configurable(metadata(docs::examples = "92.12.333.224:5000"))]
     #[configurable(metadata(docs::examples = "https://somehost:5000"))]
-    address: String,
+    pub address: String,
 
     #[configurable(derived)]
     keepalive: Option<TcpKeepaliveConfig>,

@@ -16,7 +16,6 @@ use core::fmt::Write;
 /// Timestamp resolution for RFC 5424 syslog messages.
 #[configurable_component]
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
-#[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub enum TimeRes {
     /// Whole seconds.
     #[serde(alias = "sec", alias = "s")]
@@ -35,7 +34,7 @@ pub enum TimeRes {
 /// RFC 5424 syslog message format configuration.
 #[configurable_component]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-#[serde(deny_unknown_fields, rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub struct Rfc5424 {
     /// Timestamp resolution.
     #[serde(alias = "resolution", default)]
@@ -59,7 +58,8 @@ fn default_bom() -> bool {
 }
 
 impl Rfc5424 {
-    fn new(res: TimeRes, z: bool, bom: bool) -> Self {
+    /// Creates a new `Rfc5424` config.
+    pub fn new(res: TimeRes, z: bool, bom: bool) -> Self {
         Rfc5424 { res, z, bom }
     }
 
@@ -89,7 +89,7 @@ impl Default for Rfc5424 {
 /// The syslog message format.
 #[configurable_component]
 #[derive(Debug, Clone, Eq, PartialEq)]
-#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "rfc")]
+#[serde(rename_all = "snake_case", tag = "rfc")]
 pub enum Format {
     /// Syslog RFC 5424 compliant message format.
     #[serde(alias = "rfc5424", alias = "RFC_5424", alias = "5424")]
@@ -108,32 +108,38 @@ impl Default for Format {
 
 /// Config for truncating serialized messages.
 #[configurable_component]
-#[derive(Debug, Clone, Default)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct Truncation {
     /// Maximum length of the serialized message. If set, messages longer than this will be truncated.
-    pub max_len: usize,
+    max_len: usize,
 
     /// String to append to truncated messages to indicate truncation.
-    pub elipsis: Option<String>,
+    #[serde(alias = "elide", default)]
+    elipsis: Option<String>,
+}
+
+impl Truncation {
+    /// Creates a new `Truncation` config.
+    pub const fn new(max_len: usize, elipsis: Option<String>) -> Self {
+        Self { max_len, elipsis }
+    }
 }
 
 /// Config used to build a `SyslogSerializer`.
 #[configurable_component]
-#[derive(Debug, Clone, Default)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct SyslogSerializerConfig {
     /// The syslog message format.
-    #[serde(alias = "standard", alias = "std")]
-    pub format: Format,
+    #[serde(alias = "standard", alias = "std", default)]
+    format: Format,
 
     /// Timestamp format (the rule for processing the timestamp attribute)
-    #[serde(alias = "timestamp_format", alias = "ts_fmt", alias = "time_fmt")]
-    pub ts_format: TimestampFormat,
+    #[serde(alias = "timestamp_format", alias = "ts_fmt", alias = "time_fmt", default)]
+    ts_format: TimestampFormat,
 
     /// Configuration for truncating serialized messages. Can be useful in preventing fragmentation over UDP.
-    #[serde(alias = "trunc")]
-    pub truncate: Option<Truncation>,
+    #[serde(alias = "trunc", default)]
+    truncate: Option<Truncation>,
 }
 
 impl SyslogSerializerConfig {
@@ -757,7 +763,7 @@ mod tests {
             [ts_fmt.num.us]
             [trunc]
             max_len = 11
-            elipsis = "!"
+            elide = "!"
             "#,
         ).expect("Couldn't parse serializer config"),
         e([
@@ -808,6 +814,17 @@ mod tests {
     ) {
         trace!("Running test...");
         assert_eq!(serialize(cfg, evt), Bytes::from(out.into()));
+    }
+
+    #[test]
+    fn config_defaults() {
+        let cfg: SyslogSerializerConfig = toml::from_str("").expect("couldn't deserialize config");
+        assert_eq!(
+            cfg,
+            SyslogSerializerConfig::new(
+                Format::Rfc5424(Rfc5424::new(TimeRes::Milliseconds, true, false)),
+                TimestampFormat::Native,
+                None));
     }
 
     fn log_evt<K, V>(es: Vec<(K, V)>) -> LogEvent

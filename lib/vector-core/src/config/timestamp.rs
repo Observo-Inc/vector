@@ -5,7 +5,7 @@ use vector_config::configurable_component;
 use vrl::core::Value;
 
 #[configurable_component]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 /// Precision levels for numeric timestamps
 pub enum TimePrecision {
@@ -27,12 +27,13 @@ pub enum TimePrecision {
 }
 
 #[configurable_component]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 /// The format of the timestamp.
 pub enum TimestampFormat {
     /// Use the default vector time format.
     #[serde(alias = "default", alias = "native")]
+    #[default]
     Native,
 
     /// Numeric timestamp with configurable precision
@@ -42,12 +43,6 @@ pub enum TimestampFormat {
     /// `Fmtstr`-style format string to format or parse timestamps.
     #[serde(alias = "string", alias = "str", alias = "fmtstr", alias = "fmt_str")]
     Fmtstr(String),
-}
-
-impl Default for TimestampFormat {
-    fn default() -> Self {
-        Self::Native
-    }
 }
 
 #[derive(Debug)]

@@ -10,11 +10,13 @@ use vector_config::configurable_component;
 #[derive(Clone, Debug)]
 #[configurable(description = "Configures how events are encoded into raw bytes.")]
 pub struct EncodingConfig {
+    /// Encoding configuration.
     #[serde(flatten)]
-    encoding: SerializerConfig,
+    pub encoding: SerializerConfig,
 
+    /// Transformation rules applied before encoding.
     #[serde(flatten)]
-    transformer: Transformer,
+    pub transformer: Transformer,
 }
 
 impl EncodingConfig {
@@ -59,11 +61,13 @@ where
 #[derive(Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct EncodingConfigWithFraming {
+    /// Framing configuration.
     #[configurable(derived)]
-    framing: Option<FramingConfig>,
+    pub framing: Option<FramingConfig>,
 
+    /// Encoding configuration.
     #[configurable(derived)]
-    encoding: EncodingConfig,
+    pub encoding: EncodingConfig,
 }
 
 impl EncodingConfigWithFraming {
@@ -165,21 +169,12 @@ where
 mod test {
     use lookup::lookup_v2::{parse_value_path, ConfigValuePath};
 
+    use crate::actions::encoding::transformer::RenameFields;
+
     use super::super::TimestampFormat;
     use super::*;
 
-    #[test]
-    fn deserialize_encoding_config() {
-        let string = r#"
-            {
-                "codec": "json",
-                "only_fields": ["a.b[0]"],
-                "except_fields": ["ignore_me"],
-                "timestamp_format": "unix"
-            }
-        "#;
-
-        let encoding = serde_json::from_str::<EncodingConfig>(string).unwrap();
+    fn assert_config(encoding: &EncodingConfig) {
         let serializer = encoding.config();
 
         assert!(matches!(serializer, SerializerConfig::Json(_)));
@@ -192,6 +187,42 @@ mod test {
         );
         assert_eq!(transformer.except_fields(), &Some(vec!["ignore_me".into()]));
         assert_eq!(transformer.timestamp_format(), &Some(TimestampFormat::Unix));
+        assert_eq!(
+            *transformer.rename_fields(),
+            RenameFields::from([("desired".into(), vec!["existing".into(), "existing_fallback".into()])]));
+    }
+
+    #[test]
+    fn deserialize_encoding_toml_config() {
+        let string = r#"
+            codec = "json"
+            only_fields = ["a.b[0]"]
+            except_fields = ["ignore_me"]
+            timestamp_format = "unix"
+            [rename]
+            desired = ["existing", "existing_fallback"]
+        "#;
+
+        let encoding = toml::from_str::<EncodingConfig>(string).unwrap();
+        assert_config(&encoding);
+    }
+
+    #[test]
+    fn deserialize_encoding_config() {
+        let string = r#"
+            {
+                "codec": "json",
+                "only_fields": ["a.b[0]"],
+                "except_fields": ["ignore_me"],
+                "rename": {
+                    "desired": ["existing", "existing_fallback"]
+                },
+                "timestamp_format": "unix"
+            }
+        "#;
+
+        let encoding = serde_json::from_str::<EncodingConfig>(string).unwrap();
+        assert_config(&encoding);
     }
 
     #[test]
