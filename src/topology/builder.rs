@@ -1,9 +1,5 @@
 use std::{
-    collections::HashMap,
-    future::ready,
-    num::NonZeroUsize,
-    sync::{Arc, LazyLock, Mutex},
-    time::Instant,
+    collections::HashMap, fmt::Display, future::ready, num::NonZeroUsize, sync::{Arc, LazyLock, Mutex}, time::Instant
 };
 
 use futures::{stream::FuturesOrdered, FutureExt, StreamExt, TryStreamExt};
@@ -15,6 +11,7 @@ use tokio::{
     time::{timeout, Duration},
 };
 use tracing::Instrument;
+use vector_config::NamedComponent;
 use vector_lib::config::LogNamespace;
 use vector_lib::internal_event::{
     self, CountByteSize, EventsSent, InternalEventHandle as _, Registered,
@@ -80,7 +77,7 @@ struct Builder<'a> {
     config: &'a super::Config,
     diff: &'a ConfigDiff,
     shutdown_coordinator: SourceShutdownCoordinator,
-    errors: Vec<String>,
+    errors: Vec<ScopedError>,
     outputs: HashMap<OutputId, UnboundedSender<fanout::ControlMessage>>,
     tasks: HashMap<ComponentKey, Task>,
     buffers: HashMap<ComponentKey, BuiltBuffer>,
@@ -113,7 +110,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Builds the new pieces of the topology found in `self.diff`.
-    async fn build(mut self) -> Result<TopologyPieces, Vec<String>> {
+    async fn build(mut self) -> Result<TopologyPieces, Vec<ScopedError>> {
         let enrichment_tables = self.load_enrichment_tables().await;
         let chkpt_store = self.load_checkpoint_store();
         let source_tasks = self.build_sources(chkpt_store).await;
@@ -157,29 +154,24 @@ impl<'a> Builder<'a> {
     fn load_checkpoint_store(&mut self) -> Arc<Mutex<Option<Box<dyn CheckpointStore>>>> {
         let cfg = self.config.global.checkpoint.clone();
         if let Ok(mut store) = CHECKPT_STORE.lock() {
+            let span = error_span!(
+                "checkpoint_store",
+                component_kind = "checkpoint_store",
+                component_id = "checkpoint_store",
+                component_type = %cfg.get_component_name());
             if let Some(s) = store.as_mut() {
-                match cfg {
-                    Some(cfg) =>
-                        if let Err(e) = s.reload(cfg, self.config.global.data_dir.clone()) {
-                            self.errors.push(format!("Checkpoint Store: {}", e));
-                        },
-                    None => {
-                        warn!("Checkpoint store config has been dropped but unload is not supported. Restart process to unload (if necessary).");
-                    }
+                if let Err(e) = s.reload(cfg, self.config.global.data_dir.clone()) {
+                    self.errors.push((&span, format!("Checkpoint Store: {}", e)).into());
                 }
             } else {
-                match cfg {
-                    Some(cfg) => {
-                        match cfg.build(self.config.global.data_dir.clone()) {
-                            Ok(s) => {
-                                *store = Some(s);
-                            },
-                            Err(error) => {
-                                self.errors.push(format!("Checkpoint Store: {}", error));
-                            }
-                        }
+                match cfg.build(self.config.global.data_dir.clone()) {
+                    Ok(Some(s)) => {
+                        *store = Some(s);
+                    },
+                    Ok(None) => {},
+                    Err(error) => {
+                        self.errors.push((&span, format!("Checkpoint Store: {}", error)).into());
                     }
-                    None => {}
                 }
             }
         }
@@ -194,6 +186,12 @@ impl<'a> Builder<'a> {
         // Build enrichment tables
         'tables: for (name, table) in self.config.enrichment_tables.iter() {
             let table_name = name.to_string();
+            let span = error_span!(
+                "enrichment_table",
+                component_kind = "enrichment_table",
+                component_id = %name,
+                component_type = %table.inner.get_component_name());
+            let _entered_span = span.enter();
             if ENRICHMENT_TABLES.needs_reload(&table_name) {
                 let indexes = if !self.diff.enrichment_tables.is_added(name) {
                     // If this is an existing enrichment table, we need to store the indexes to reapply
@@ -207,7 +205,7 @@ impl<'a> Builder<'a> {
                     Ok(table) => table,
                     Err(error) => {
                         self.errors
-                            .push(format!("Enrichment Table \"{}\": {}", name, error));
+                            .push((&span, format!("Enrichment Table \"{}\": {}", name, error)).into());
                         continue;
                     }
                 };
@@ -370,7 +368,7 @@ impl<'a> Builder<'a> {
             let source = source.inner.build(context).await;
             let server = match source {
                 Err(error) => {
-                    self.errors.push(format!("Source \"{}\": {}", key, error));
+                    self.errors.push((&span, format!("Source \"{}\": {}", key, error)).into());
                     continue;
                 }
                 Ok(server) => server,
@@ -519,7 +517,7 @@ impl<'a> Builder<'a> {
             {
                 Err(error) => {
                     self.errors
-                        .push(format!("Transform \"{}\": {}", key, error));
+                        .push((&span, format!("Transform \"{}\": {}", key, error)).into());
                     continue;
                 }
                 Ok(transform) => transform,
@@ -568,13 +566,13 @@ impl<'a> Builder<'a> {
             // At this point, we've validated that all transforms are valid, including any
             // transform that mutates the schema provided by their sources. We can now validate the
             // schema expectations of each individual sink.
-            if let Err(mut err) = schema::validate_sink_expectations(
+            if let Err(err) = schema::validate_sink_expectations(
                 key,
                 sink,
                 self.config,
                 enrichment_tables.clone(),
             ) {
-                self.errors.append(&mut err);
+                self.errors.extend(err.into_iter().map(|e| (&span, e).into()));
             };
 
             let (tx, rx) = if let Some(buffer) = self.buffers.remove(key) {
@@ -595,7 +593,7 @@ impl<'a> Builder<'a> {
                     .await;
                 match buffer {
                     Err(error) => {
-                        self.errors.push(format!("Sink \"{}\": {}", key, error));
+                        self.errors.push((&span, format!("Sink \"{}\": {}", key, error)).into());
                         continue;
                     }
                     Ok((tx, rx)) => (tx, Arc::new(Mutex::new(Some(rx.into_stream())))),
@@ -614,7 +612,7 @@ impl<'a> Builder<'a> {
 
             let (sink, healthcheck) = match sink.inner.build(cx).await {
                 Err(error) => {
-                    self.errors.push(format!("Sink \"{}\": {}", key, error));
+                    self.errors.push((&span, format!("Sink \"{}\": {}", key, error)).into());
                     continue;
                 }
                 Ok(built) => built,
@@ -721,6 +719,40 @@ pub struct TopologyPieces {
     pub(crate) detach_triggers: HashMap<ComponentKey, Trigger>,
 }
 
+pub struct ScopedError {
+    span: tracing::Span,
+    error: String,
+}
+
+impl ScopedError {
+    pub fn new(span: tracing::Span, error: String) -> Self {
+        Self { span, error }
+    }
+
+    pub fn log(&self) {
+        let _active = self.span.enter();
+        error!("{}", self.error);
+    }
+}
+
+impl Display for ScopedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.error)
+    }
+}
+
+impl<T: Into<String>> From<(&tracing::Span, T)> for ScopedError {
+    fn from((span, msg): (&tracing::Span, T)) -> Self {
+        ScopedError{span: span.clone(), error: msg.into()}
+    }
+}
+
+impl From<ScopedError> for String {
+    fn from(v: ScopedError) -> Self {
+        v.error
+    }
+}
+
 impl TopologyPieces {
     pub async fn build_or_log_errors(
         config: &Config,
@@ -745,7 +777,7 @@ impl TopologyPieces {
         diff: &ConfigDiff,
         buffers: HashMap<ComponentKey, BuiltBuffer>,
         extra_context: ExtraContext,
-    ) -> Result<Self, Vec<String>> {
+    ) -> Result<Self, Vec<ScopedError>> {
         Builder::new(config, diff, buffers, extra_context)
             .build()
             .await

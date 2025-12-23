@@ -76,6 +76,10 @@ pub struct Opts {
         value_delimiter(',')
     )]
     pub config_dirs: Vec<PathBuf>,
+
+    /// Log validation errors
+    #[arg(long)]
+    pub log_validation_errors: bool,
 }
 
 impl Opts {
@@ -137,7 +141,12 @@ pub fn validate_config(opts: &Opts, fmt: &mut Formatter) -> Option<Config> {
     // Load
     let paths_list: Vec<_> = paths.iter().map(<&PathBuf>::from).collect();
 
-    let mut report_error = |errors| {
+    let mut report_error = |errors: Vec<String>| {
+        if opts.log_validation_errors {
+            let span = error_span!("config_file", component_kind = "config_file");
+            let _entered = span.enter();
+            errors.iter().for_each(|e| error!(e));
+        }
         fmt.title(format!("Failed to load {:?}", &paths_list));
         fmt.sub_error(errors);
     };
@@ -171,7 +180,7 @@ pub fn validate_config(opts: &Opts, fmt: &mut Formatter) -> Option<Config> {
 async fn validate_environment(opts: &Opts, config: &Config, fmt: &mut Formatter) -> bool {
     let diff = ConfigDiff::initial(config);
 
-    let mut pieces = if let Some(pieces) = validate_components(config, &diff, fmt).await {
+    let mut pieces = if let Some(pieces) = validate_components(config, &diff, fmt, opts.log_validation_errors).await {
         pieces
     } else {
         return false;
@@ -183,6 +192,7 @@ async fn validate_components(
     config: &Config,
     diff: &ConfigDiff,
     fmt: &mut Formatter,
+    log_validation_errors: bool,
 ) -> Option<TopologyPieces> {
     match topology::TopologyPieces::build(config, diff, HashMap::new(), ExtraContext::default())
         .await
@@ -192,6 +202,9 @@ async fn validate_components(
             Some(pieces)
         }
         Err(errors) => {
+            if log_validation_errors {
+                errors.iter().for_each(|e| e.log());
+            }
             fmt.title("Component errors");
             fmt.sub_error(errors);
             None

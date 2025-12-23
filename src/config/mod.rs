@@ -466,7 +466,7 @@ mod tests {
                         .await,
                 ) {
                     (warnings, Ok(_pieces)) => Ok(warnings),
-                    (_, Err(errors)) => Err(errors),
+                    (_, Err(errors)) => Err(errors.into_iter().map(|e| e.into()).collect()),
                 }
             }
             Err(error) => Err(error),
