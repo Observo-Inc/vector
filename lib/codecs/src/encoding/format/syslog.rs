@@ -266,7 +266,7 @@ fn value<'a, T: ToOwned + ?Sized>(
     map: impl Fn(&Value) -> Option<Cow<'_, T>>,
 ) -> Cow<'a, T> {
     a.get(&l).and_then(map).unwrap_or_else(|| {
-        error!("Event has no {a:?} set");
+        error!("Event attribute {a:?} is either unset or has an unsupported type");
         Cow::Borrowed(dflt)
     })
 }
@@ -470,6 +470,14 @@ mod tests {
 
     fn m<const N: usize>(d: [(&str, Value); N]) -> Value {
         Value::Object(d.into_iter().map(|(k, v)| (k.into(), v)).collect())
+    }
+
+    fn a<const N: usize>(d: [Value; N]) -> Value {
+        Value::Array(d.into_iter().map(|v| v).collect())
+    }
+
+    fn r(rexp: &str) -> Value {
+        Value::from(regex::Regex::new(rexp).unwrap())
     }
 
     fn e<const N: usize>(d: [(&str, Value); N]) -> Event {
@@ -803,6 +811,56 @@ mod tests {
             ("sd", m([
                      ("t@1", m([("a", s("b")), ("e", true.into())])),
                      ("t@4", 42.into())])),
+            ("message", s("Process failed")),
+            ("timestamp", tm("2015-01-20T17:35:20.123456789−08:00"))]),
+    )]
+    #[case::unsupported_types_in_values_for_sd_entries(
+        "<35>1 2015-01-21T01:35:20.123456Z test.com log-svc 8192 start [t@1 a=\"b\"][t@4][t@5][t@6][t@7] \u{FEFF}Process failed",
+        toml::from_str(
+            r#"
+            [std]
+            rfc = "rfc5424"
+            bom = true
+            res = "micros"
+            [ts_fmt.num.us]
+            "#,
+        ).expect("Couldn't parse serializer config"),
+        e([
+            ("severity", 3.into()),
+            ("facility", 4.into()),
+            ("host", s("test.com")),
+            ("msgid", s("start")),
+            ("procid", 8192.into()),
+            ("service", s("log-svc")),
+            ("sd", m([
+                     ("t@1", m([("a", s("b")), ("e", m([("foo", s("bar"))]))])),
+                     ("t@4", a([s("baz"), s("quux")])),
+                     ("t@5", m([("dt_tm", tm("2015-01-20T17:35:20.123456789−08:00"))])),
+                     ("t@6", Value::Null),
+                     ("t@7", r(r#"\d+"#)),
+            ])),
+            ("message", s("Process failed")),
+            ("timestamp", tm("2015-01-20T17:35:20.123456789−08:00"))]),
+    )]
+    #[case::unsupported_value_in_sd(
+        "<35>1 2015-01-21T01:35:20.123456Z test.com log-svc 8192 start - \u{FEFF}Process failed",
+        toml::from_str(
+            r#"
+            [std]
+            rfc = "rfc5424"
+            bom = true
+            res = "micros"
+            [ts_fmt.num.us]
+            "#,
+        ).expect("Couldn't parse serializer config"),
+        e([
+            ("severity", 3.into()),
+            ("facility", 4.into()),
+            ("host", s("test.com")),
+            ("msgid", s("start")),
+            ("procid", 8192.into()),
+            ("service", s("log-svc")),
+            ("sd", r("a+")),
             ("message", s("Process failed")),
             ("timestamp", tm("2015-01-20T17:35:20.123456789−08:00"))]),
     )]
