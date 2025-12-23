@@ -1,4 +1,4 @@
-use std::convert::TryFrom;
+use std::{collections::BTreeMap, convert::TryFrom};
 
 use vector_lib::lookup::PathPrefix;
 
@@ -470,7 +470,7 @@ async fn allows_using_except_fields() {
             index: parse_template("{{ idx }}"),
             ..Default::default()
         },
-        encoding: Transformer::new(None, Some(vec!["idx".into(), "timestamp".into()]), None)
+        encoding: Transformer::new(None, Some(vec!["idx".into(), "timestamp".into()]), None, BTreeMap::new())
             .unwrap(),
         endpoints: vec![String::from("https://example.com")],
         api_version: ElasticsearchApiVersion::V6,
@@ -506,7 +506,7 @@ async fn allows_using_only_fields() {
             index: parse_template("{{ idx }}"),
             ..Default::default()
         },
-        encoding: Transformer::new(Some(vec!["foo".into()]), None, None).unwrap(),
+        encoding: Transformer::new(Some(vec!["foo".into()]), None, None, BTreeMap::new()).unwrap(),
         endpoints: vec![String::from("https://example.com")],
         api_version: ElasticsearchApiVersion::V6,
         ..Default::default()

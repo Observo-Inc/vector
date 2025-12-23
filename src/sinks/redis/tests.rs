@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use vector_lib::codecs::{JsonSerializerConfig, TextSerializerConfig};
 use vector_lib::event::LogEvent;
@@ -61,7 +61,7 @@ fn redis_encode_event() {
     let result = encode_event(
         evt.into(),
         "key".to_string(),
-        &Transformer::new(None, Some(vec!["key".into()]), None).unwrap(),
+        &Transformer::new(None, Some(vec!["key".into()]), None, BTreeMap::new()).unwrap(),
         &mut Encoder::<()>::new(JsonSerializerConfig::default().build().into()),
         &mut byte_size,
     )

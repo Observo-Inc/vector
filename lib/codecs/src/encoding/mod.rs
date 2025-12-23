@@ -24,6 +24,8 @@ pub use framing::{
 use vector_config::configurable_component;
 use vector_core::{config::DataType, event::Event, schema};
 
+pub use crate::encoding::{format::{SyslogSerializer, SyslogSerializerConfig, SyslogFormat, Rfc5424, SyslogTimeRes, Truncation}, framing::OctetCountedEncoder};
+
 /// An error that occurred while building an encoder.
 pub type BuildError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
@@ -72,6 +74,9 @@ pub enum FramingConfig {
 
     /// Event data is delimited by a newline (LF) character.
     NewlineDelimited,
+
+    /// Octet counted framing as per RFC 5425.
+    OctetCounted,
 }
 
 impl From<BytesEncoderConfig> for FramingConfig {
@@ -107,7 +112,8 @@ impl FramingConfig {
             FramingConfig::LengthDelimited(config) => Framer::LengthDelimited(config.build()),
             FramingConfig::NewlineDelimited => {
                 Framer::NewlineDelimited(NewlineDelimitedEncoderConfig.build())
-            }
+            },
+            FramingConfig::OctetCounted => Framer::OctetCounted(OctetCountedEncoder{}),
         }
     }
 }
@@ -125,6 +131,8 @@ pub enum Framer {
     NewlineDelimited(NewlineDelimitedEncoder),
     /// Uses an opaque `Encoder` implementation for framing.
     Boxed(BoxedFramer),
+    /// Uses a `OctetCounted` for framing.
+    OctetCounted(OctetCountedEncoder),
 }
 
 impl From<BytesEncoder> for Framer {
@@ -167,6 +175,7 @@ impl tokio_util::codec::Encoder<()> for Framer {
             Framer::LengthDelimited(framer) => framer.encode((), buffer),
             Framer::NewlineDelimited(framer) => framer.encode((), buffer),
             Framer::Boxed(framer) => framer.encode((), buffer),
+            Framer::OctetCounted(framer) => framer.encode((), buffer),
         }
     }
 }
@@ -269,6 +278,9 @@ pub enum SerializerConfig {
     /// transform) and removing the message field while doing additional parsing on it, as this
     /// could lead to the encoding emitting empty strings for the given event.
     Text(TextSerializerConfig),
+
+    /// Syslog encoding.
+    Syslog(SyslogSerializerConfig),
 }
 
 impl From<AvroSerializerConfig> for SerializerConfig {
@@ -361,7 +373,8 @@ impl SerializerConfig {
             SerializerConfig::Text(config) => Ok(Serializer::Text(config.build())),
             SerializerConfig::Parquet(..) => {
                 Err("Parquet serializer is not for single event encoding.".into())
-            }
+            },
+            SerializerConfig::Syslog(config) => Ok(Serializer::Syslog(config.build()))
         }
     }
 
@@ -379,17 +392,7 @@ impl SerializerConfig {
                 )
                 .build()?,
             ))),
-            SerializerConfig::Avro { .. }
-            | SerializerConfig::Cef(..)
-            | SerializerConfig::Csv(..)
-            | SerializerConfig::Gelf
-            | SerializerConfig::Json(..)
-            | SerializerConfig::Logfmt
-            | SerializerConfig::Protobuf(..)
-            | SerializerConfig::Native
-            | SerializerConfig::NativeJson
-            | SerializerConfig::RawMessage
-            | SerializerConfig::Text(..) => Ok(None),
+            _ => Ok(None),
         }
     }
 
@@ -422,7 +425,9 @@ impl SerializerConfig {
             SerializerConfig::Parquet(..) => FramingConfig::Bytes,
             SerializerConfig::Gelf => {
                 FramingConfig::CharacterDelimited(CharacterDelimitedEncoderConfig::new(0))
-            }
+            },
+            // TODO(OBE-7927): is this the best default for syslog?
+            SerializerConfig::Syslog(_) => FramingConfig::NewlineDelimited,
         }
     }
 
@@ -448,6 +453,7 @@ impl SerializerConfig {
                 parquet.ignore_type_mismatch_for_optional.clone(),
             )
             .input_type(),
+            SerializerConfig::Syslog(config) => config.input_type(),
         }
     }
 
@@ -473,6 +479,7 @@ impl SerializerConfig {
                 parquet.ignore_type_mismatch_for_optional.clone(),
             )
             .schema_requirement(),
+            SerializerConfig::Syslog(config) => config.schema_requirement(),
         }
     }
 }
@@ -502,6 +509,8 @@ pub enum Serializer {
     RawMessage(RawMessageSerializer),
     /// Uses a `TextSerializer` for serialization.
     Text(TextSerializer),
+    /// Uses a `SyslogSerializer` for serialization.
+    Syslog(SyslogSerializer),
 }
 
 impl Serializer {
@@ -516,7 +525,8 @@ impl Serializer {
             | Serializer::Text(_)
             | Serializer::Native(_)
             | Serializer::Protobuf(_)
-            | Serializer::RawMessage(_) => false,
+            | Serializer::RawMessage(_)
+            | Serializer::Syslog(_) => false,
         }
     }
 
@@ -538,7 +548,8 @@ impl Serializer {
             | Serializer::Text(_)
             | Serializer::Native(_)
             | Serializer::Protobuf(_)
-            | Serializer::RawMessage(_) => {
+            | Serializer::RawMessage(_)
+            | Serializer::Syslog(_) => {
                 panic!("Serializer does not support JSON")
             }
         }
@@ -627,6 +638,7 @@ impl tokio_util::codec::Encoder<Event> for Serializer {
             Serializer::Protobuf(serializer) => serializer.encode(event, buffer),
             Serializer::RawMessage(serializer) => serializer.encode(event, buffer),
             Serializer::Text(serializer) => serializer.encode(event, buffer),
+            Serializer::Syslog(serializer) => serializer.encode(event, buffer),
         }
     }
 }

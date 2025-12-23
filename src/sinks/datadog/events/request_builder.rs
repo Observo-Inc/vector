@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::{io, sync::Arc};
 
 use bytes::Bytes;
@@ -140,7 +141,7 @@ fn encoder() -> (Transformer, Encoder<()>) {
     let timestamp_format = Some(TimestampFormat::Unix);
 
     (
-        Transformer::new(only_fields, None, timestamp_format)
+        Transformer::new(only_fields, None, timestamp_format, BTreeMap::new())
             .expect("transformer configuration must be valid"),
         Encoder::<()>::new(JsonSerializerConfig::default().build().into()),
     )

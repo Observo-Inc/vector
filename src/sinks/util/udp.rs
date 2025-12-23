@@ -49,7 +49,7 @@ pub struct UdpSinkConfig {
     /// The address _must_ include a port.
     #[configurable(metadata(docs::examples = "92.12.333.224:5000"))]
     #[configurable(metadata(docs::examples = "https://somehost:5000"))]
-    address: String,
+    pub address: String,
 
     /// The size of the socket's send buffer.
     ///

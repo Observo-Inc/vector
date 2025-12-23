@@ -231,6 +231,7 @@ fn serializer_config_to_deserializer(
         }
         SerializerConfig::RawMessage | SerializerConfig::Text(_) => DeserializerConfig::Bytes,
         SerializerConfig::Parquet(..) => todo!(),
+        SerializerConfig::Syslog(_) => todo!(),
     };
 
     deserializer_config.build()
@@ -254,7 +255,10 @@ fn encoder_framing_to_decoding_framer(framing: encoding::FramingConfig) -> decod
         }
         encoding::FramingConfig::NewlineDelimited => {
             decoding::FramingConfig::NewlineDelimited(Default::default())
-        }
+        },
+        encoding::FramingConfig::OctetCounted => {
+            decoding::FramingConfig::OctetCounting(Default::default())
+        },
     };
 
     framing_config.build()

@@ -185,12 +185,12 @@ impl SinkConfig for SocketSinkConfig {
 #[cfg(test)]
 mod test {
     use std::{
-        future::ready,
-        net::{SocketAddr, UdpSocket},
+        collections::BTreeMap, future::ready, net::{SocketAddr, UdpSocket}
     };
     #[cfg(unix)]
     use std::{os::unix::net::UnixDatagram, path::PathBuf};
 
+    use assert_matches::assert_matches;
     use futures::stream::StreamExt;
     use futures_util::stream;
     use serde_json::Value;
@@ -200,7 +200,7 @@ mod test {
     };
     use tokio_stream::wrappers::TcpListenerStream;
     use tokio_util::codec::{FramedRead, LinesCodec};
-    use vector_lib::codecs::JsonSerializerConfig;
+    use vector_lib::{codecs::{actions::Transformer, encoding::{format::{SyslogFormat, SyslogSerializerConfig}, Rfc5424, SerializerConfig, SyslogTimeRes, Truncation}, JsonSerializerConfig}, config::{TimePrecision, TimestampFormat}};
     #[cfg(unix)]
     use vector_lib::codecs::NativeJsonSerializerConfig;
 
@@ -611,5 +611,215 @@ mod test {
     #[cfg(unix)]
     fn temp_uds_path(name: &str) -> PathBuf {
         tempfile::tempdir().unwrap().into_path().join(name)
+    }
+
+    #[test]
+    fn test_tcp_syslog_5424_config() {
+        let toml = r#"
+        mode = "tcp"
+        address = "127.0.0.1:514"
+        [framing]
+        method = "octet_counted"
+        [encoding]
+        codec = "syslog"
+        [encoding.format]
+        rfc = "rfc5424"
+        bom = true
+        res = "millis"
+        [encoding.ts_format.native]
+        "#;
+
+        let config: SocketSinkConfig = toml::from_str(toml).expect("Couldn't build RFC5424 config");
+
+        assert_matches!(
+            config,
+            SocketSinkConfig { mode: Mode::Tcp(
+                TcpMode{
+                    config: TcpSinkConfig{address, ..},
+                    encoding: EncodingConfigWithFraming {
+                        framing: Some(framing),
+                        encoding: EncodingConfig{
+                            encoding: SerializerConfig::Syslog(syslog),
+                            transformer,
+                        },
+                    }}), .. } => {
+                assert_eq!(framing, FramingConfig::OctetCounted);
+                assert_eq!(syslog, SyslogSerializerConfig::new(
+                    SyslogFormat::Rfc5424(Rfc5424::new(SyslogTimeRes::Milliseconds, true, true)),
+                    TimestampFormat::Native,
+                    None));
+                assert_eq!(transformer, Transformer::new(None, None, None, BTreeMap::new()).unwrap());
+                assert_eq!(address.as_str(), "127.0.0.1:514");
+            });
+    }
+
+    #[test]
+    fn test_tcp_syslog_5424_config_with_non_transparent_framing() {
+        let toml = r#"
+        mode = "tcp"
+        address = "127.0.0.1:514"
+        [framing]
+        method = "newline_delimited"
+        [encoding]
+        codec = "syslog"
+        [encoding.format]
+        rfc = "rfc5424"
+        bom = true
+        res = "millis"
+        [encoding.ts_format]
+        numeric = "us"
+        "#;
+
+        let config: SocketSinkConfig = toml::from_str(toml).expect("Couldn't build RFC5424 config");
+
+        assert_matches!(
+            config,
+            SocketSinkConfig { mode: Mode::Tcp(
+                TcpMode{
+                    config: TcpSinkConfig{address, ..},
+                    encoding: EncodingConfigWithFraming {
+                        framing: Some(framing),
+                        encoding: EncodingConfig{
+                            encoding: SerializerConfig::Syslog(syslog),
+                            transformer,
+                        },
+                    }}), .. } => {
+                assert_eq!(framing, FramingConfig::NewlineDelimited);
+                assert_eq!(syslog, SyslogSerializerConfig::new(
+                    SyslogFormat::Rfc5424(Rfc5424::new(SyslogTimeRes::Milliseconds, true, true)),
+                    TimestampFormat::Numeric(TimePrecision::Microseconds),
+                    None));
+                assert_eq!(transformer, Transformer::new(None, None, None, BTreeMap::new()).unwrap());
+                assert_eq!(address.as_str(), "127.0.0.1:514");
+            });
+    }
+
+    #[test]
+    fn test_udp_syslog_5424_config() {
+        let toml = r#"
+        mode = "udp"
+        address = "127.0.0.1:514"
+        [encoding]
+        codec = "syslog"
+        [encoding.rename]
+        host = ["sender", "peer"]
+        timestamp = ["ts"]
+        [encoding.format]
+        rfc = "rfc5424"
+        res = "s"
+        [encoding.ts_format]
+        str = "%Y-%m-%dT%H:%M:%S.%f"
+        [encoding.trunc]
+        max_len = 1472
+        elipsis = "..."
+        "#;
+
+        let config: SocketSinkConfig = toml::from_str(toml).expect("Couldn't build RFC5424 config");
+
+        assert_matches!(
+            config,
+            SocketSinkConfig { mode: Mode::Udp(
+                UdpMode {
+                    config: UdpSinkConfig{address, ..},
+                    encoding: EncodingConfig{
+                        encoding: SerializerConfig::Syslog(syslog),
+                        transformer,
+                    },
+                }),
+                ..
+            } => {
+                assert_eq!(syslog, SyslogSerializerConfig::new(
+                    SyslogFormat::Rfc5424(Rfc5424::new(SyslogTimeRes::Seconds, true, false)),
+                    TimestampFormat::Fmtstr("%Y-%m-%dT%H:%M:%S.%f".into()),
+                    Some(Truncation::new(1472, Some("...".into()))))); // eg. mtu = 1500
+                assert_eq!(
+                    transformer,
+                    Transformer::new(
+                        None,
+                        None,
+                        None,
+                        [("host", &["sender", "peer"][..]), ("timestamp", &["ts"][..])]
+                            .into_iter()
+                            .map(|(k, v)| (k.into(), v.into_iter().map(|v| (*v).into()).collect()))
+                            .collect())
+                    .unwrap());
+                assert_eq!(address.as_str(), "127.0.0.1:514");
+            });
+    }
+
+    #[test]
+    fn test_udp_syslog_3164_config() {
+        let toml = r#"
+        mode = "udp"
+        address = "127.0.0.1:514"
+        [encoding]
+        codec = "syslog"
+        [encoding.rename]
+        host = ["sender", "peer"]
+        timestamp = ["ts"]
+        [encoding.format]
+        rfc = "3164"
+        [encoding.ts_format]
+        str = "%Y-%m-%dT%H:%M:%S.%f"
+        [encoding.trunc]
+        max_len = 1472
+        "#;
+
+        let config: SocketSinkConfig = toml::from_str(toml).expect("Couldn't build RFC3164 config");
+
+        assert_matches!(
+            config,
+            SocketSinkConfig { mode: Mode::Udp(
+                UdpMode {
+                    config: UdpSinkConfig{address, ..},
+                    encoding: EncodingConfig{
+                        encoding: SerializerConfig::Syslog(syslog),
+                        transformer,
+                    },
+                }),
+                ..
+            } => {
+                assert_eq!(syslog, SyslogSerializerConfig::new(
+                    SyslogFormat::Rfc3164,
+                    TimestampFormat::Fmtstr("%Y-%m-%dT%H:%M:%S.%f".into()),
+                    Some(Truncation::new(1472, None)))); // eg. mtu = 1500
+                assert_eq!(
+                    transformer,
+                    Transformer::new(
+                        None,
+                        None,
+                        None,
+                        [("host", &["sender", "peer"][..]), ("timestamp", &["ts"][..])]
+                            .into_iter()
+                            .map(|(k, v)| (k.into(), v.into_iter().map(|v| (*v).into()).collect()))
+                            .collect())
+                    .unwrap());
+                assert_eq!(address.as_str(), "127.0.0.1:514");
+            });
+    }
+
+    #[test]
+    fn test_pre_encoded_syslog_config() {
+        let toml = r#"
+        mode = "udp"
+        address = "127.0.0.1:514"
+        [encoding]
+        codec = "raw_message"
+        "#;
+
+        let config: SocketSinkConfig = toml::from_str(toml).expect("Couldn't build RFC3164 config");
+
+        assert_matches!(
+            config,
+            SocketSinkConfig { mode: Mode::Udp(
+                UdpMode {
+                    config: UdpSinkConfig{address, ..},
+                    encoding: EncodingConfig{
+                        encoding: SerializerConfig::RawMessage,
+                        ..
+                    },
+                }),
+                ..
+            } if address.as_str() == "127.0.0.1:514");
     }
 }

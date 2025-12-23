@@ -1,6 +1,7 @@
 mod optional_path;
 
 pub use optional_path::{OptionalTargetPath, OptionalValuePath};
+use vector_config::ConfigurableString;
 use std::fmt;
 use vector_config_macros::configurable_component;
 
@@ -110,3 +111,11 @@ impl From<&str> for ConfigTargetPath {
         ConfigTargetPath::try_from(path.to_string()).unwrap()
     }
 }
+
+impl ToString for ConfigValuePath {
+    fn to_string(&self) -> String {
+        String::from(&self.0)
+    }
+}
+
+impl ConfigurableString for ConfigValuePath {}
