@@ -927,8 +927,7 @@ async fn topology_transform_error_definition() {
 
     assert_eq!(
         r#"Transform "transform": It all went horribly wrong"#,
-        errors[0]
-    );
+        errors[0].to_string());
 }
 
 #[tokio::test]
