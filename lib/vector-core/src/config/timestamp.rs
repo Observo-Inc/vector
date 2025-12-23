@@ -10,19 +10,19 @@ use vrl::core::Value;
 /// Precision levels for numeric timestamps
 pub enum TimePrecision {
     /// Nanosecond precision (1/1,000,000,000 second)
-    #[serde(alias = "ns", alias = "nanos")]
+    #[serde(alias = "ns", alias = "nanos", alias = "nanoseconds")]
     Nanoseconds,
 
     /// Microseconds precision (1/1,000,000 second)
-    #[serde(alias = "us", alias = "micros")]
+    #[serde(alias = "us", alias = "micros", alias = "microseconds")]
     Microseconds,
 
     /// Millisecond precision (1/1,000 second)
-    #[serde(alias = "ms", alias = "millis")]
+    #[serde(alias = "ms", alias = "millis", alias = "milliseconds")]
     Milliseconds,
 
     /// Second precision
-    #[serde(alias = "s", alias = "sec")]
+    #[serde(alias = "s", alias = "sec", alias = "seconds")]
     Seconds,
 }
 
