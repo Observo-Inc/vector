@@ -1,0 +1,79 @@
+[package]
+name = "wef"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+futures = "0.3"
+async-trait = "0.1"
+
+# HTTP server
+hyper = { version = "1.0", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http = "1.0"
+http-body = "1.0"
+http-body-util = "0.1"
+
+# Kerberos authentication
+# Using forked libgssapi with vendored krb5 support since the original author
+# is not inclined to add vendoring to upstream (see: https://github.com/estokes/libgssapi/issues/1)
+# Fork adds 'vendored' feature that uses krb5-src to build and statically link MIT Kerberos
+libgssapi = { git = "https://github.com/jsbali/libgssapi", features = ["iov", "vendored"] }
+
+# XML parsing
+roxmltree = "0.19"
+quick-xml = { version = "0.31", features = ["serialize"] }
+xmlparser = "0.13"
+yaserde = "0.10"
+yaserde_derive = "0.10"
+
+# SLDC compression
+bitreader = "0.3"
+
+# Utilities
+anyhow = "1"
+thiserror = "1"
+base64 = "0.21"
+uuid = { version = "1", features = ["v4", "serde"] }
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+httparse = "1"
+mime = "0.3"
+socket2 = "0.5"
+chrono = "0.4"
+tracing = "0.1"
+toml = "0.8"
+smallvec = "1"
+
+# TLS / Crypto
+openssl = { version = "0.10", features = ["vendored"] }
+
+# Text encoding
+encoding_rs = "0.8"
+
+# Database support - PostgreSQL primary
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4"] }
+deadpool-postgres = "0.13"
+postgres-native-tls = "0.5"
+native-tls = "0.2"
+refinery = { version = "0.8", features = ["tokio-postgres"] }
+
+# Vector libraries
+vector-lib = { path = "../../vector-lib" }
+vector-config = { path = "../../vector-config" }
+vector-config-macros = { path = "../../vector-config-macros" }
+vector-config-common = { path = "../../vector-config-common" }
+vector-core = { path = "../../vector-core" }
+lookup = { package = "vector-lookup", path = "../../vector-lookup" }
+inventory = "0.3"
+
+[dev-dependencies]
+hex = "0.4"
+tokio = { version = "1", features = ["full", "test-util"] }
+
+[features]
+default = []
