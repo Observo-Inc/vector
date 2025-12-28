@@ -94,6 +94,8 @@ pub mod stcp;
 pub mod syslog;
 #[cfg(feature = "sources-vector")]
 pub mod vector;
+#[cfg(all(feature = "sources-wef"))]
+pub mod wef;
 #[cfg(feature = "sources-websocket")]
 pub mod websocket;
 

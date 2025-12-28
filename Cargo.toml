@@ -108,6 +108,7 @@ members = [
   "lib/observo/sauth",
   "lib/observo/lv3",
   "lib/observo/stcp",
+  "lib/observo/wef",
   "lib/observo/ssa",
   "lib/observo/obvrl",
   "lib/observo/gcs",
@@ -228,6 +229,7 @@ lv3 = { path = "lib/observo/lv3", optional = true }
 ssa = { path = "lib/observo/ssa", optional = true }
 chkpts = { path = "lib/observo/chkpts", optional = true }
 stcp = { path = "lib/observo/stcp", optional = true }
+wef = { path = "lib/observo/wef", optional = true }
 dnsmsg-parser = { path = "lib/dnsmsg-parser", optional = true }
 dnstap-parser = { path = "lib/dnstap-parser", optional = true }
 fakedata = { path = "lib/fakedata", optional = true }
@@ -700,6 +702,7 @@ sources-utils-net-tcp = ["listenfd", "dep:ipnet", "vector-lib/sources-utils-net-
 sources-utils-net-udp = ["listenfd", "vector-lib/sources-utils-net-udp"]
 sources-utils-net-unix = []
 sources-websocket = ["dep:tokio-tungstenite"]
+sources-wef = ["dep:wef"]
 
 sources-vector = ["dep:prost", "dep:tonic", "protobuf-build"]
 
@@ -993,6 +996,7 @@ observo = [
   "observo-lv3",
   "observo-chkpts",
   "sources-stcp",
+  "sources-wef",
   "observo-vrl",
   "sources-gcs",
   "sinks-azs",
