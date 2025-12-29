@@ -106,8 +106,8 @@ pub struct GlobalOptions {
     pub expire_metrics_secs: Option<f64>,
 
     /// Configuration for the checkpoint store.
-    #[serde(skip_serializing_if = "crate::serde::is_default")]
-    pub checkpoint: Option<CheckpointConfig>,
+    #[serde(skip_serializing_if = "crate::serde::is_default", default)]
+    pub checkpoint: CheckpointConfig,
 }
 
 impl GlobalOptions {
@@ -225,12 +225,7 @@ impl GlobalOptions {
         let mut telemetry = self.telemetry.clone();
         telemetry.merge(&with.telemetry);
 
-        let checkpoint: Option<CheckpointConfig> = match (&self.checkpoint, with.checkpoint) {
-            (Some(self_cfg), Some(with_cfg)) => Some(self_cfg.merge(&with_cfg)),
-            (None, None) => None,
-            (Some(self_cfg), None) => Some(self_cfg.clone()),
-            (None, Some(with_cfg)) => Some(with_cfg),
-        };
+        let checkpoint = self.checkpoint.merge(&with.checkpoint);
 
         if errors.is_empty() {
             Ok(Self {
