@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use vector_lib::{
-    codecs::TextSerializerConfig,
-    lookup::lookup_v2::{ConfigValuePath, OptionalTargetPath},
-    sensitive_string::SensitiveString,
+    codecs::TextSerializerConfig, config::TimestampFormat, lookup::lookup_v2::{ConfigValuePath, OptionalTargetPath}, sensitive_string::SensitiveString
 };
 
 use crate::{
@@ -170,34 +168,6 @@ pub struct TimestampConfiguration {
     pub timestamp_nanos_key: Option<String>,
     /// Whether to preserve the timestamp field in the event after extraction.
     pub preserve_timestamp_key: bool,
-}
-
-#[configurable_component]
-#[derive(Clone, Debug)]
-#[serde(rename_all = "snake_case")]
-/// The format of the timestamp.
-pub enum TimestampFormat {
-    /// Use the default vector time format.
-    Native,
-    /// Numeric timestamp with configurable precision
-    Numeric (TimePrecision),
-    /// `Fmtstr`-style format string to format or parse timestamps.
-    Fmtstr(String),
-}
-
-#[configurable_component]
-#[derive(Clone, Debug)]
-#[serde(rename_all = "snake_case")]
-/// Precision levels for numeric timestamps
-pub enum TimePrecision {
-    /// Nanosecond precision (1/1,000,000,000 second)
-    Nanoseconds,
-    /// Microseconds precision (1/1,000,000 second)
-    Microseconds,
-    /// Millisecond precision (1/1,000 second)
-    Milliseconds,
-    /// Second precision
-    Seconds,
 }
 
 const fn default_timestamp_configuration() -> Option<TimestampConfiguration> {

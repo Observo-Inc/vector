@@ -16,6 +16,7 @@ mod parquet;
 mod protobuf;
 mod raw_message;
 mod text;
+mod syslog;
 
 use std::fmt::Debug;
 
@@ -32,6 +33,7 @@ pub use native_json::{NativeJsonSerializer, NativeJsonSerializerConfig};
 pub use protobuf::{ProtobufSerializer, ProtobufSerializerConfig, ProtobufSerializerOptions};
 pub use raw_message::{RawMessageSerializer, RawMessageSerializerConfig};
 pub use text::{TextSerializer, TextSerializerConfig};
+pub use syslog::{SyslogSerializerConfig, SyslogSerializer, Format as SyslogFormat, Rfc5424, TimeRes as SyslogTimeRes, Truncation};
 use vector_core::event::Event;
 
 /// Serialize a structured event into a byte frame.
