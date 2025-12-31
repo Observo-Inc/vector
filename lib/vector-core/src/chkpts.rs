@@ -64,8 +64,8 @@ impl StoreConfig {
                 StoreConfig::Observo(l.merge(r))
             },
             #[cfg(feature = "observo")]
-            (_, &StoreConfig::None) => StoreConfig::None,
-            (&StoreConfig::None, _) => StoreConfig::None,
+            (l, StoreConfig::None) => l.clone(),
+            (&StoreConfig::None, r) => r.clone(),
         }
     }
 }
