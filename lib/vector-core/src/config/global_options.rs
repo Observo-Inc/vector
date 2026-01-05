@@ -366,6 +366,32 @@ mod tests {
         );
     }
 
+    #[test]
+    #[cfg(feature = "observo")]
+    fn merge_checkpoint_config() {
+        use crate::config::Tags;
+
+        let cfg1: GlobalOptions = toml::from_str(r#"
+            checkpoint.store_path = "/var/lib/cp.store"
+            telemetry.tags.emit_service = true
+        "#).unwrap();
+
+        let cfg2: GlobalOptions = toml::from_str(r#"
+            telemetry.tags.emit_source = true
+        "#).unwrap();
+
+        let res1 = cfg1.merge(cfg2.clone()).unwrap();
+        let res2 = cfg2.merge(cfg1).unwrap();
+
+        let CheckpointConfig::Observo(ref cfg) = res1.checkpoint else {
+            panic!("expected observro checkpoint config");
+        };
+
+        assert_eq!(cfg.store_path, Some(PathBuf::from("/var/lib/cp.store")));
+        assert_eq!(res1.telemetry.tags, Tags{emit_service: true, emit_source: true});
+        assert_eq!(res1, res2);
+    }
+
     fn merge<P: Debug, T>(
         name: &str,
         dd1: Option<P>,
