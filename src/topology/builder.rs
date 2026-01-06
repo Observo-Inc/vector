@@ -667,32 +667,30 @@ impl<'a> Builder<'a> {
                 if enable_healthcheck {
                     let duration = Duration::from_secs(10);
                     timeout(duration, healthcheck)
-                        .map(|result| match result {
-                            Ok(Ok(_)) => {
-                                info!("Healthcheck passed.");
-                                Ok(TaskOutput::Healthcheck)
-                            }
-                            Ok(Err(error)) => {
-                                error!(
-                                    msg = "Healthcheck failed.",
-                                    %error,
-                                    component_kind = "sink",
-                                    component_type = typetag,
-                                    component_id = %component_key.id(),
-                                );
-                                Err(TaskError::wrapped(error))
-                            }
-                            Err(e) => {
-                                error!(
-                                    msg = "Healthcheck timed out.",
-                                    component_kind = "sink",
-                                    component_type = typetag,
-                                    component_id = %component_key.id(),
-                                );
-                                Err(TaskError::wrapped(Box::new(e)))
+                        .map(|result| {
+                            let span = error_span!(
+                                "sink",
+                                component_kind = "sink",
+                                component_type = typetag,
+                                component_id = %component_key.id(),
+                            );
+                            let _active = span.enter();
+                            match result {
+                                Ok(Ok(_)) => {
+                                    info!("Healthcheck passed.");
+                                    Ok(TaskOutput::Healthcheck)
+                                }
+                                Ok(Err(error)) => {
+                                    error!(msg = "Healthcheck failed.", %error);
+                                    Err(TaskError::wrapped(error))
+                                }
+                                Err(e) => {
+                                    error!(msg = "Healthcheck timed out.");
+                                    Err(TaskError::wrapped(Box::new(e)))
+                                }
                             }
                         })
-                        .await
+                    .await
                 } else {
                     info!("Healthcheck disabled.");
                     Ok(TaskOutput::Healthcheck)
