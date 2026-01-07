@@ -173,6 +173,8 @@ fn deserializer_config_to_serializer(config: &DeserializerConfig) -> encoding::S
         // TODO: Influxdb has no serializer yet
         DeserializerConfig::Influxdb { .. } => todo!(),
         DeserializerConfig::Vrl { .. } => unimplemented!(),
+        // Strata logs are JSON, so use JSON serializer
+        DeserializerConfig::Strata { .. } => SerializerConfig::Json(JsonSerializerConfig::default()),
     };
 
     serializer_config
@@ -204,6 +206,8 @@ fn decoder_framing_to_encoding_framer(framing: &decoding::FramingConfig) -> enco
         decoding::FramingConfig::OctetCounting(_) => todo!(),
         // TODO: chunked gelf is not supported yet in encoding
         decoding::FramingConfig::ChunkedGelf(_) => todo!(),
+        // TODO: StrataSnappy is a decoding-only format (snappy decompression)
+        decoding::FramingConfig::StrataSnappy(_) => todo!(),
     };
 
     framing_config.build()

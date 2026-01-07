@@ -2596,6 +2596,7 @@ dependencies = [
  "similar-asserts",
  "smallvec",
  "snafu 0.7.5",
+ "snap",
  "syslog_loose",
  "tokio",
  "tokio-util",
