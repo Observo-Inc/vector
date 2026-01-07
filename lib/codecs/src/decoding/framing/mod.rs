@@ -10,6 +10,7 @@ mod length_delimited;
 mod newline_delimited;
 mod octet_counting;
 mod netflow;
+mod strata_snappy;
 
 use std::{any::Any, fmt::Debug};
 
@@ -32,6 +33,10 @@ pub use self::bytes::{BytesDecoder, BytesDecoderConfig};
 
 pub use self::netflow::{
     NetflowDecoder, NetflowDecoderConfig, NetflowDecoderOptions,
+};
+
+pub use self::strata_snappy::{
+    StrataSnappyDecoder, StrataSnappyDecoderConfig, StrataSnappyDecoderOptions,
 };
 
 use super::StreamDecodingError;
