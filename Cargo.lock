@@ -12856,7 +12856,7 @@ checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
 [[package]]
 name = "vrl"
 version = "0.21.0"
-source = "git+https://github.com/Observo-Inc/vrl.git?rev=99d3ad57fc0f7a32b50669a674c77a0feed4ee91#99d3ad57fc0f7a32b50669a674c77a0feed4ee91"
+source = "git+https://github.com/Observo-Inc/vrl.git?rev=50b7aa5a1a5b9001c7dcbd0acb666ff09f0cc911#50b7aa5a1a5b9001c7dcbd0acb666ff09f0cc911"
 dependencies = [
  "aes",
  "aes-siv",
