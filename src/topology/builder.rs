@@ -761,7 +761,7 @@ impl TopologyPieces {
         match TopologyPieces::build(config, diff, buffers, extra_context).await {
             Err(errors) => {
                 for error in errors {
-                    error!(message = "Configuration error.", %error);
+                    error.log();
                 }
                 None
             }
