@@ -17,6 +17,6 @@ jobs:
         run: |
           gh workflow run publish.yaml \
             --repo Observo-Inc/dataplane-build \
-            --ref 260107_checksum_artifacts_before_publish \
+            --ref main \
             -f git_ref=${{ github.ref }} \
             -f channel=custom
