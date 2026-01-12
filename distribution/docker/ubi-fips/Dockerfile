@@ -1,4 +1,4 @@
-FROM registry.access.redhat.com/ubi9/ubi:latest AS builder
+FROM registry.access.redhat.com/ubi9/ubi:9.7-1764794285 AS builder
 
 WORKDIR /vector
 
