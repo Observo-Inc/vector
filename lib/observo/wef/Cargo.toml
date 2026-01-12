@@ -17,11 +17,7 @@ http = { package = "http", version = "1.0" }
 http-body = "1.0"
 http-body-util = "0.1"
 
-# Kerberos authentication
-# Using forked libgssapi with vendored krb5 support since the original author
-# is not inclined to add vendoring to upstream (see: https://github.com/estokes/libgssapi/issues/1)
-# Fork adds 'vendored' feature that uses krb5-src to build and statically link MIT Kerberos
-libgssapi = { git = "https://github.com/jsbali/libgssapi", features = ["iov", "vendored"] }
+libgssapi = { git = "https://github.com/jsbali/libgssapi", rev = "86dd34d32d8fd9c32bccde92b535ebcd8d99d37e", features = ["iov", "vendored"] }
 
 # XML parsing
 roxmltree = "0.19"
