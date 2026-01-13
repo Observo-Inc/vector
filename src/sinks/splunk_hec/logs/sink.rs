@@ -107,12 +107,15 @@ where
 
         match future::select(Box::pin(run), self.shutdown).await {
             Either::Left((res, _)) => res,
-            Either::Right((trip, _)) => {
-                warn!("Shutting down to comply with teardown (trip: {trip}) (processing not complete)");
+            Either::Right((true, _)) => {
+                warn!("Shutting down to comply with teardown (processing not complete)");
                 Ok(())
-            }
+            },
+            Either::Right((false, work)) => {
+                warn!("Shutdown trigger disabled, all teardown attempts will be ignored.");
+                work.await
+            },
         }
-
     }
 }
 
