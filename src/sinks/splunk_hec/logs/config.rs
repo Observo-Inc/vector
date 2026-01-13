@@ -244,7 +244,7 @@ impl SinkConfig for HecLogsSinkConfig {
 }
 
 impl HecLogsSinkConfig {
-    pub fn build_processor(&self, client: HttpClient, _: SinkContext) -> crate::Result<VectorSink> {
+    pub fn build_processor(&self, client: HttpClient, cx: SinkContext) -> crate::Result<VectorSink> {
         let ack_client = if self.acknowledgements.indexer_acknowledgements_enabled {
             Some(client.clone())
         } else {
@@ -308,7 +308,8 @@ impl HecLogsSinkConfig {
             host_key: self.host_key.clone(),
             endpoint_target: self.endpoint_target,
             auto_extract_timestamp: self.auto_extract_timestamp.unwrap_or_default(),
-            timestamp_configuration: self.timestamp_configuration.clone()
+            timestamp_configuration: self.timestamp_configuration.clone(),
+            shutdown: cx.shutdown.clone(),
         };
 
         Ok(VectorSink::from_event_streamsink(sink))
