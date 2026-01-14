@@ -600,6 +600,8 @@ impl<'a> Builder<'a> {
                 }
             };
 
+            let (trigger, tripwire) = Tripwire::new();
+
             let cx = SinkContext {
                 healthcheck,
                 globals: self.config.global.clone(),
@@ -608,6 +610,7 @@ impl<'a> Builder<'a> {
                 app_name: crate::get_app_name().to_string(),
                 app_name_slug: crate::get_slugified_app_name(),
                 extra_context: self.extra_context.clone(),
+                shutdown: tripwire.clone(),
             };
 
             let (sink, healthcheck) = match sink.inner.build(cx).await {
@@ -617,8 +620,6 @@ impl<'a> Builder<'a> {
                 }
                 Ok(built) => built,
             };
-
-            let (trigger, tripwire) = Tripwire::new();
 
             let sink = async move {
                 debug!("Sink starting.");

@@ -13,6 +13,8 @@ use crate::{
         util::processed_event::ProcessedEvent,
     },
 };
+use futures::future::Either;
+use stream_cancel::Tripwire;
 use vector_lib::{
     config::{log_schema, LogNamespace, TimestampFormat, TimestampResolutionError},
     lookup::{event_path, lookup_v2::OptionalTargetPath, OwnedValuePath, PathPrefix},
@@ -36,6 +38,7 @@ pub struct HecLogsSink<S> {
     pub endpoint_target: EndpointTarget,
     pub auto_extract_timestamp: bool,
     pub timestamp_configuration: Option<TimestampConfiguration>,
+    pub shutdown: Tripwire,
 }
 
 pub struct HecLogData<'a> {
@@ -69,7 +72,7 @@ where
         };
         let batch_settings = self.batch_settings;
 
-        input
+        let run = input
             .map(move |event| process_log(event, &data))
             .batched_partitioned(
                 if self.endpoint_target == EndpointTarget::Raw {
@@ -84,7 +87,7 @@ where
                 } else {
                     EventPartitioner::new(None, None, None, None)
                 },
-                || batch_settings.as_byte_size_config(),
+                move || batch_settings.as_byte_size_config(),
             )
             .request_builder(
                 default_request_builder_concurrency_limit(),
@@ -100,8 +103,19 @@ where
                 }
             })
             .into_driver(self.service)
-            .run()
-            .await
+            .run();
+
+        match future::select(Box::pin(run), self.shutdown).await {
+            Either::Left((res, _)) => res,
+            Either::Right((true, _)) => {
+                warn!("Shutting down to comply with teardown (processing not complete)");
+                Ok(())
+            },
+            Either::Right((false, work)) => {
+                warn!("Shutdown trigger disabled, all teardown attempts will be ignored.");
+                work.await
+            },
+        }
     }
 }
 
