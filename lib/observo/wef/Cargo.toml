@@ -1,0 +1,77 @@
+[package]
+name = "wef"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Async runtime
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+
+# HTTP server (hyper 1.0 not in workspace, keep explicit)
+hyper = { version = "1.0", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http = { package = "http", version = "1.0" }
+http-body = "1.0"
+http-body-util = "0.1"
+
+libgssapi = { git = "https://github.com/jsbali/libgssapi", rev = "86dd34d32d8fd9c32bccde92b535ebcd8d99d37e", features = ["iov", "vendored"] }
+
+# XML parsing
+roxmltree = "0.19"
+quick-xml = { version = "0.31", features = ["serialize"] }
+xmlparser = "0.13"
+yaserde = "0.10"
+yaserde_derive = "0.10"
+
+# SLDC compression
+bitreader = "0.3"
+
+# Utilities
+anyhow.workspace = true
+snafu = "0.8"
+base64 = "0.21"
+uuid.workspace = true
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+httparse = "1"
+mime = "0.3"
+memchr = "2"
+metrics.workspace = true
+socket2 = "0.5"
+chrono.workspace = true
+tracing.workspace = true
+toml.workspace = true
+smallvec.workspace = true
+
+# TLS / Crypto
+openssl = { version = "0.10", features = ["vendored"] }
+
+# Text encoding
+encoding_rs = "0.8"
+
+# Database support - PostgreSQL primary
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4"] }
+deadpool-postgres = "0.13"
+postgres-native-tls = "0.5"
+native-tls = "0.2"
+refinery = { version = "0.8", features = ["tokio-postgres"] }
+
+# Vector libraries
+vector-lib.workspace = true
+vector-config.workspace = true
+vector-config-macros.workspace = true
+vector-config-common.workspace = true
+vector-core = { path = "../../vector-core" }
+lookup = { package = "vector-lookup", path = "../../vector-lookup" }
+inventory.workspace = true
+
+[dev-dependencies]
+hex = "0.4"
+tokio = { workspace = true, features = ["test-util"] }
+
+[features]
+default = []
