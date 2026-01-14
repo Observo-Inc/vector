@@ -12,7 +12,6 @@ mod json_paths;
 mod native;
 mod native_json;
 mod protobuf;
-mod strata;
 #[cfg(feature = "syslog")]
 mod syslog;
 mod vrl;
@@ -33,7 +32,6 @@ pub use native_json::{
 };
 pub use protobuf::{ProtobufDeserializer, ProtobufDeserializerConfig, ProtobufDeserializerOptions};
 use smallvec::SmallVec;
-pub use strata::{StrataDeserializer, StrataDeserializerConfig, StrataDeserializerOptions};
 #[cfg(feature = "syslog")]
 pub use syslog::{SyslogDeserializer, SyslogDeserializerConfig, SyslogDeserializerOptions};
 use vector_core::config::LogNamespace;

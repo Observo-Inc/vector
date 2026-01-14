@@ -15,8 +15,7 @@ pub use format::{
     JsonPathDeserializer, JsonPathDeserializerConfig, JsonPathDeserializerOptions,
     NativeDeserializer, NativeDeserializerConfig, NativeJsonDeserializer,
     NativeJsonDeserializerConfig, NativeJsonDeserializerOptions, ProtobufDeserializer,
-    ProtobufDeserializerConfig, ProtobufDeserializerOptions, StrataDeserializer,
-    StrataDeserializerConfig, StrataDeserializerOptions,
+    ProtobufDeserializerConfig, ProtobufDeserializerOptions,
 };
 #[cfg(feature = "syslog")]
 pub use format::{SyslogDeserializer, SyslogDeserializerConfig, SyslogDeserializerOptions};
@@ -337,12 +336,6 @@ pub enum DeserializerConfig {
     /// [vrl]: https://vector.dev/docs/reference/vrl
     Vrl(VrlDeserializerConfig),
 
-    /// Decodes Palo Alto Strata log format with header metadata enrichment.
-    ///
-    /// This codec is designed for Palo Alto Strata Logging Service logs that are
-    /// compressed with snappy. It automatically extracts S3 metadata from the header
-    /// and enriches each log event.
-    Strata(StrataDeserializerConfig),
 }
 
 impl From<BytesDeserializerConfig> for DeserializerConfig {
@@ -394,12 +387,6 @@ impl From<JsonPathDeserializerConfig> for DeserializerConfig {
     }
 }
 
-impl From<StrataDeserializerConfig> for DeserializerConfig {
-    fn from(config: StrataDeserializerConfig) -> Self {
-        Self::Strata(config)
-    }
-}
-
 impl DeserializerConfig {
     /// Build the `Deserializer` from this configuration.
     pub fn build(&self) -> vector_common::Result<Deserializer> {
@@ -423,7 +410,6 @@ impl DeserializerConfig {
             DeserializerConfig::Influxdb(config) => Ok(Deserializer::Influxdb(config.build())),
             DeserializerConfig::JsonPaths(config) => Ok(Deserializer::JsonPaths(config.build())),
             DeserializerConfig::Vrl(config) => Ok(Deserializer::Vrl(config.build()?)),
-            DeserializerConfig::Strata(config) => Ok(Deserializer::Strata(config.build())),
         }
     }
 
@@ -446,7 +432,6 @@ impl DeserializerConfig {
             DeserializerConfig::Gelf(_) => {
                 FramingConfig::CharacterDelimited(CharacterDelimitedDecoderConfig::new(0))
             }
-            DeserializerConfig::Strata(_) => FramingConfig::StrataSnappy(Default::default()),
         }
     }
 
@@ -454,7 +439,6 @@ impl DeserializerConfig {
     pub fn default_message_based_framing(&self) -> FramingConfig {
         match self {
             DeserializerConfig::Gelf(_) => FramingConfig::ChunkedGelf(Default::default()),
-            DeserializerConfig::Strata(_) => FramingConfig::Bytes,
             _ => FramingConfig::Bytes,
         }
     }
@@ -477,7 +461,6 @@ impl DeserializerConfig {
             DeserializerConfig::Gelf(config) => config.output_type(),
             DeserializerConfig::Vrl(config) => config.output_type(),
             DeserializerConfig::Influxdb(config) => config.output_type(),
-            DeserializerConfig::Strata(config) => config.output_type(),
         }
     }
 
@@ -499,7 +482,6 @@ impl DeserializerConfig {
             DeserializerConfig::Gelf(config) => config.schema_definition(log_namespace),
             DeserializerConfig::Influxdb(config) => config.schema_definition(log_namespace),
             DeserializerConfig::Vrl(config) => config.schema_definition(log_namespace),
-            DeserializerConfig::Strata(config) => config.schema_definition(log_namespace),
         }
     }
 
@@ -533,8 +515,7 @@ impl DeserializerConfig {
                 | DeserializerConfig::Bytes
                 | DeserializerConfig::Gelf(_)
                 | DeserializerConfig::Influxdb(_)
-                | DeserializerConfig::Vrl(_)
-                | DeserializerConfig::Strata(_),
+                | DeserializerConfig::Vrl(_),
                 _,
             ) => "text/plain",
             #[cfg(feature = "syslog")]
@@ -571,8 +552,6 @@ pub enum Deserializer {
     Influxdb(InfluxdbDeserializer),
     /// Uses a `VrlDeserializer` for deserialization.
     Vrl(VrlDeserializer),
-    /// Uses a `StrataDeserializer` for deserialization.
-    Strata(StrataDeserializer),
 }
 
 impl format::Deserializer for Deserializer {
@@ -595,7 +574,6 @@ impl format::Deserializer for Deserializer {
             Deserializer::Gelf(deserializer) => deserializer.parse(bytes, log_namespace),
             Deserializer::Influxdb(deserializer) => deserializer.parse(bytes, log_namespace),
             Deserializer::Vrl(deserializer) => deserializer.parse(bytes, log_namespace),
-            Deserializer::Strata(deserializer) => deserializer.parse(bytes, log_namespace),
         }
     }
 }
