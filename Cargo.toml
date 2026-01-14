@@ -173,7 +173,7 @@ prost-build = { version = "0.12", default-features = false }
 prost-reflect = { version = "0.14", features = ["serde"], default-features = false }
 prost-types = { version = "0.12", default-features = false }
 rand = { version = "0.8.5", default-features = false, features = ["small_rng"] }
-serde_json = { version = "1.0.133", default-features = false, features = ["raw_value", "std"] }
+serde_json = { version = "=1.0.133", default-features = false, features = ["raw_value", "std"] }
 serde = { version = "1.0.215", default-features = false, features = ["alloc", "derive", "rc"] }
 serde_with = { version = "3.12.0", default-features = false, features = ["macros", "std"] }
 snafu = { version = "0.7.5", default-features = false, features = ["futures", "std"] }
