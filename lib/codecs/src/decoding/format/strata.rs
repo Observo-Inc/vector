@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use chrono::Utc;
 use derivative::Derivative;
+use lookup::lookup_v2::ConfigTargetPath;
 use serde_json::Value;
 use smallvec::{smallvec, SmallVec};
 use vector_config::configurable_component;
@@ -61,8 +62,8 @@ impl StrataDeserializerConfig {
     }
 }
 
-fn default_header_field_name() -> String {
-    "strata_file_header".to_string()
+fn default_header_field_name() -> ConfigTargetPath {
+    "strata_file_header".into()
 }
 
 /// Strata-specific decoding options.
@@ -87,41 +88,32 @@ pub struct StrataDeserializerOptions {
     ///
     /// Default: "strata_file_header"
     #[serde(default = "default_header_field_name")]
-    #[derivative(Default(value = r#""strata_file_header".to_string()"#))]
-    pub header_field_name: String,
+    #[derivative(Default(value = "default_header_field_name()"))]
+    pub header_field_name: ConfigTargetPath,
 }
 
 /// Deserializer for Strata log format.
-#[derive(Debug, Clone, Derivative)]
-#[derivative(Default)]
+#[derive(Debug, Clone)]
 pub struct StrataDeserializer {
-    #[derivative(Default(value = "default_lossy()"))]
     lossy: bool,
-    #[derivative(Default(value = r#""strata_file_header".to_string()"#))]
-    header_field_name: String,
+    header_field_name: ConfigTargetPath,
 }
 
 impl StrataDeserializer {
     /// Creates a new StrataDeserializer with the given options.
-    pub fn new(lossy: bool, header_field_name: String) -> Self {
-        Self {
-            lossy,
-            header_field_name,
-        }
+    pub fn new(lossy: bool, header_field_name: ConfigTargetPath) -> Self {
+        Self { lossy, header_field_name }
     }
 
     fn extract_header(&self, first_line: &str) -> Result<Value, String> {
-        let header: Value = match self.lossy {
-            true => serde_json::from_str(first_line),
-            false => serde_json::from_str(first_line),
-        }
+        let header: Value = serde_json::from_str(first_line)
             .map_err(|error| format!("Error parsing Strata header JSON: {:?}", error))?;
 
         Ok(header)
     }
 
     fn enrich_with_header(&self, event: &mut Event, header: &Value) {
-        event.as_mut_log().insert(self.header_field_name.as_str(), header.clone());
+        event.as_mut_log().insert(&self.header_field_name, header.clone());
     }
 }
 
@@ -131,13 +123,14 @@ impl Deserializer for StrataDeserializer {
         bytes: Bytes,
         log_namespace: LogNamespace,
     ) -> vector_common::Result<SmallVec<[Event; 1]>> {
+        let mut events: SmallVec<[Event; 1]> = smallvec![];
         if bytes.is_empty() {
-            return Ok(smallvec![]);
+            return Ok(events);
         }
 
         let data = match self.lossy {
             true => String::from_utf8_lossy(&bytes).to_string(),
-            false => String::from_utf8(bytes.to_vec())
+            false => String::from_utf8(bytes.into())
                 .map_err(|error| format!("Invalid UTF-8 in Strata log: {:?}", error))?,
         };
 
@@ -151,18 +144,13 @@ impl Deserializer for StrataDeserializer {
         let header = self.extract_header(header_line)?;
 
         // Parse remaining lines as log entries
-        let mut events: SmallVec<[Event; 1]> = smallvec![];
 
         for line in lines {
             if line.trim().is_empty() {
                 continue; // Skip empty lines
             }
 
-            // Parse the log line with the specified namespace
-            let json: Value = match self.lossy {
-                true => serde_json::from_str(line),
-                false => serde_json::from_str(line),
-            }
+            let json: Value = serde_json::from_str(line)
                 .map_err(|error| format!("Error parsing log JSON: {:?}", error))?;
 
             let mut event = Event::from_json_value(json, log_namespace)
@@ -209,7 +197,7 @@ mod tests {
 
         let input = format!("{}\n{}\n{}", header, log1, log2);
 
-        let deserializer = StrataDeserializer::new(true, "strata_file_header".to_string());
+        let deserializer = StrataDeserializer::new(true, "strata_file_header".try_into().unwrap());
         let events = deserializer
             .parse(Bytes::from(input), LogNamespace::Legacy)
             .unwrap();
@@ -245,7 +233,7 @@ mod tests {
 
         let input = format!("{}\n{}", header, log);
 
-        let deserializer = StrataDeserializer::new(true, "metadata".to_string());
+        let deserializer = StrataDeserializer::new(true, "metadata".try_into().unwrap());
         let events = deserializer
             .parse(Bytes::from(input), LogNamespace::Legacy)
             .unwrap();
@@ -269,7 +257,7 @@ mod tests {
 
         let input = format!("{}\n{}", header, log);
 
-        let deserializer = StrataDeserializer::new(true, "strata_file_header".to_string());
+        let deserializer = StrataDeserializer::new(true, "strata_file_header".try_into().unwrap());
         let events = deserializer
             .parse(Bytes::from(input), LogNamespace::Legacy)
             .unwrap();
@@ -295,7 +283,7 @@ mod tests {
 
         let input = format!("{}\n{}\n\n", header, log);
 
-        let deserializer = StrataDeserializer::new(true, "strata_file_header".to_string());
+        let deserializer = StrataDeserializer::new(true, "strata_file_header".try_into().unwrap());
         let events = deserializer
             .parse(Bytes::from(input), LogNamespace::Legacy)
             .unwrap();
@@ -308,7 +296,7 @@ mod tests {
     fn deserialize_strata_no_header() {
         let input = "";
 
-        let deserializer = StrataDeserializer::new(true, "strata_file_header".to_string());
+        let deserializer = StrataDeserializer::new(true, "strata_file_header".try_into().unwrap());
         let result = deserializer.parse(Bytes::from(input), LogNamespace::Legacy);
 
         assert!(result.is_ok());
@@ -319,7 +307,7 @@ mod tests {
     fn deserialize_strata_invalid_header_json() {
         let input = "not valid json\n{\"event\":\"test\"}";
 
-        let deserializer = StrataDeserializer::new(true, "strata_file_header".to_string());
+        let deserializer = StrataDeserializer::new(true, "strata_file_header".try_into().unwrap());
         let result = deserializer.parse(Bytes::from(input), LogNamespace::Legacy);
 
         assert!(result.is_err());
@@ -330,7 +318,7 @@ mod tests {
         let header = r#"{"bucket":"test"}"#;
         let input = format!("{}\nnot valid json", header);
 
-        let deserializer = StrataDeserializer::new(true, "strata_file_header".to_string());
+        let deserializer = StrataDeserializer::new(true, "strata_file_header".try_into().unwrap());
         let result = deserializer.parse(Bytes::from(input), LogNamespace::Legacy);
 
         assert!(result.is_err());
