@@ -13,26 +13,32 @@ use vrl::value::Kind;
 
 use super::{default_lossy, Deserializer};
 
+/// Configuration for the Strata deserializer.
 #[configurable_component]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StrataDeserializerConfig {
+    /// Strata-specific decoding options.
     #[serde(default, skip_serializing_if = "vector_core::serde::is_default")]
     pub strata: StrataDeserializerOptions,
 }
 
 impl StrataDeserializerConfig {
+    /// Creates a new StrataDeserializerConfig with the given options.
     pub fn new(options: StrataDeserializerOptions) -> Self {
         Self { strata: options }
     }
 
+    /// Builds the StrataDeserializer from the configuration.
     pub fn build(&self) -> StrataDeserializer {
         Into::<StrataDeserializer>::into(self)
     }
 
+    /// Returns the output data type of this deserializer.
     pub fn output_type(&self) -> DataType {
         DataType::Log
     }
 
+    /// Returns the schema definition for the given log namespace.
     pub fn schema_definition(&self, log_namespace: LogNamespace) -> schema::Definition {
         match log_namespace {
             LogNamespace::Legacy => {
@@ -85,6 +91,7 @@ pub struct StrataDeserializerOptions {
     pub header_field_name: String,
 }
 
+/// Deserializer for Strata log format.
 #[derive(Debug, Clone, Derivative)]
 #[derivative(Default)]
 pub struct StrataDeserializer {
@@ -95,6 +102,7 @@ pub struct StrataDeserializer {
 }
 
 impl StrataDeserializer {
+    /// Creates a new StrataDeserializer with the given options.
     pub fn new(lossy: bool, header_field_name: String) -> Self {
         Self {
             lossy,
@@ -111,7 +119,7 @@ impl StrataDeserializer {
 
         Ok(header)
     }
-    
+
     fn enrich_with_header(&self, event: &mut Event, header: &Value) {
         event.as_mut_log().insert(self.header_field_name.as_str(), header.clone());
     }
