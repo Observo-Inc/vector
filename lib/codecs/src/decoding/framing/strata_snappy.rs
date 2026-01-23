@@ -22,6 +22,8 @@ pub enum StrataSnappyDecoderError {
     },
 
     NoHeaderDelimiter,
+
+    DataAfterEoF,
 }
 
 impl Display for StrataSnappyDecoderError {
@@ -39,8 +41,11 @@ impl Display for StrataSnappyDecoderError {
                 "Decompressed Strata Snappy frame size {} exceeds maximum allowed size of {} bytes",
                 actual_size, max_size
             ),
-            StrataSnappyDecoderError::NoHeaderDelimiter { .. } => {
+            StrataSnappyDecoderError::NoHeaderDelimiter => {
                 write!(f, "No header delimiter (newline) found in Strata log data")
+            },
+            StrataSnappyDecoderError::DataAfterEoF => {
+                write!(f, "Data received after end of Strata log stream")
             }
         }
     }
@@ -127,12 +132,13 @@ impl StrataSnappyDecoderConfig {
 #[derive(Debug, Clone)]
 pub struct StrataSnappyDecoder {
     cfg: StrataSnappyDecoderOptions,
+    finished: bool,
 }
 
 impl StrataSnappyDecoder {
     /// Creates a new `StrataSnappyDecoder` with the specified options.
     pub fn new(cfg: StrataSnappyDecoderOptions) -> Self {
-        Self { cfg }
+        Self { cfg, finished: false }
     }
 }
 
@@ -147,6 +153,7 @@ impl Decoder for StrataSnappyDecoder {
     type Error = BoxedFramingError;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        trace!("Decode called with {} bytes", src.len());
         if src.len() > self.cfg.max_frame_bytes {
             Err(Box::new(
                 StrataSnappyDecoderError::DecompressionBufferSizeExceeded {
@@ -159,52 +166,59 @@ impl Decoder for StrataSnappyDecoder {
     }
 
     fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        trace!("Decode EOF called with {} bytes (finished = {})", src.len(), self.finished);
         let src = src.split();
-        if let Some(hdr_offset) = memchr(b'\n', &src) {
-            let hdr_offset = hdr_offset + 1;
-            let compressed_data = &src[hdr_offset..];
-            if compressed_data.is_empty() {
-                trace!(message = "No compressed Strata log payload available at EOF.");
-                return Ok(None);
+        match (self.finished, memchr(b'\n', &src)) {
+            (false, Some(hdr_offset)) => {
+                let hdr_offset = hdr_offset + 1;
+                let compressed_data = &src[hdr_offset..];
+                if compressed_data.is_empty() {
+                    trace!(message = "No compressed Strata log payload available at EOF.");
+                    return Ok(None);
+                }
+                let data_len = snap::raw::decompress_len(compressed_data)
+                    .map_err(|err| {
+                        warn!( "Failed to get decompressed length, {err:?}");
+                        StrataSnappyDecoderError::DecompressionFailed { err }
+                    })?;
+                trace!(
+                    message = "Reserving bytes for decompression buffer.",
+                    reserving = data_len,
+                    max_allowed = self.cfg.max_frame_bytes);
+                if data_len > self.cfg.max_frame_bytes {
+                    warn!(
+                        "Decompressed size {} exceeds maximum allowed size of {} bytes",
+                        data_len, self.cfg.max_frame_bytes
+                    );
+                    return Err(Box::new(
+                            StrataSnappyDecoderError::DecompressionBufferSizeExceeded {
+                                actual_size: data_len,
+                                max_size: self.cfg.max_frame_bytes,
+                            }));
+                }
+                let mut out = BytesMut::new();
+                out.extend_from_slice(&src[..hdr_offset]);
+                out.resize(hdr_offset + data_len, 0);
+                let wrote = Comp::new().decompress(&src[hdr_offset..], &mut out[hdr_offset..])
+                    .map_err(|err| {
+                        warn!( "Decompression failed, {err:?}");
+                        StrataSnappyDecoderError::DecompressionFailed { err }
+                    })?;
+                if wrote != data_len {
+                    warn!(
+                        "Decompressed size mismatch: expected {}, got {}",
+                        data_len, wrote
+                    );
+                    out.resize(hdr_offset + wrote, 0);
+                }
+                self.finished = true;
+                Ok(Some(out.freeze()))
             }
-            let data_len = snap::raw::decompress_len(compressed_data)
-                .map_err(|err| {
-                    warn!( "Failed to get decompressed length, {err:?}");
-                    StrataSnappyDecoderError::DecompressionFailed { err }
-            })?;
-            trace!(
-                message = "Reserving bytes for decompression buffer.",
-                reserving = data_len,
-                max_allowed = self.cfg.max_frame_bytes);
-            if data_len > self.cfg.max_frame_bytes {
-                warn!(
-                    "Decompressed size {} exceeds maximum allowed size of {} bytes",
-                    data_len, self.cfg.max_frame_bytes
-                );
-                return Err(Box::new(
-                        StrataSnappyDecoderError::DecompressionBufferSizeExceeded {
-                            actual_size: data_len,
-                            max_size: self.cfg.max_frame_bytes,
-                        }));
+            (false, None) => {
+                return Err(Box::new(StrataSnappyDecoderError::NoHeaderDelimiter));
             }
-            let mut out = BytesMut::new();
-            out.extend_from_slice(&src[..hdr_offset]);
-            out.resize(hdr_offset + data_len, 0);
-            let wrote = Comp::new().decompress(&src[hdr_offset..], &mut out[hdr_offset..])
-                .map_err(|err| {
-                    warn!( "Decompression failed, {err:?}");
-                    StrataSnappyDecoderError::DecompressionFailed { err }
-                })?;
-            if wrote != data_len {
-                warn!(
-                    "Decompressed size mismatch: expected {}, got {}",
-                    data_len, wrote
-                );
-                out.resize(hdr_offset + wrote, 0);
-            }
-            Ok(Some(out.freeze()))
-        } else {
-            Err(Box::new(StrataSnappyDecoderError::NoHeaderDelimiter))
+            (true, _) if src.is_empty() => Ok(None),
+            _ => Err(Box::new(StrataSnappyDecoderError::DataAfterEoF)),
         }
     }
 }
@@ -212,7 +226,6 @@ impl Decoder for StrataSnappyDecoder {
 #[cfg(test)]
 mod tests {
     use std::cmp;
-
     use bytes::BufMut;
     use rand::SeedableRng;
     use rstest::rstest;
@@ -412,6 +425,15 @@ mod tests {
         let output1 = result1.unwrap();
         let output1: Vec<&str> = std::str::from_utf8(&output1).unwrap().split('\n').collect();
         assert_eq!(output1, vec!["hdr0", "First record data", "Second record data"]);
+
+        assert_eq!(decoder.decode_eof(&mut input1).unwrap(), None);
+        assert_eq!(decoder.decode_eof(&mut input1).unwrap(), None);
+
+        // fails if data is fed again
+        input1.extend_from_slice(b"extra data");
+        if let Err(e) = decoder.decode_eof(&mut input1) {
+            assert!(e.to_string().contains("Data received after end of"));
+        }
     }
 
     #[test]
@@ -535,7 +557,6 @@ mod tests {
     #[case(5)]
     #[traced_test]
     fn decode_random(#[case] in_len: usize) {
-
         let mut rng = rand::thread_rng();
         let seed = rng.next_u64();
         trace!("Using seed {}", seed);
@@ -608,5 +629,8 @@ mod tests {
         }
 
         assert_eq!(data, payload_strs);
+
+        assert_eq!(decoder.decode_eof(&mut in_buff).unwrap(), None);
+        assert_eq!(decoder.decode_eof(&mut in_buff).unwrap(), None);
     }
 }
