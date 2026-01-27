@@ -15,7 +15,6 @@ use parquet::{
         types::{BasicTypeInfo, ColumnDescriptor, Type, TypePtr},
     },
 };
-use serde::{Deserialize, Serialize};
 use snafu::*;
 use tokio_util::codec::Encoder;
 use tracing::{debug, warn};
@@ -140,7 +139,8 @@ impl From<io::Error> for ParquetSerializerError {
 }
 
 /// Config used to build a `ParquetSerializer`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[configurable_component]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParquetSerializerConfig {
     /// Options for the Parquet serializer.
     pub parquet: ParquetSerializerOptions,
@@ -302,7 +302,7 @@ impl ParquetSerializerConfig {
 
 /// Options for the Parquet serializer.
 #[configurable_component]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParquetSerializerOptions {
     /// The Parquet schema.
     #[configurable(metadata(docs::examples = r#"message test {
@@ -540,7 +540,7 @@ impl<'a, T, F: Fn(&Value) -> Result<T, ParquetSerializerError>> Column<'a, T, F>
                 // Invalid type, error
                 value => {
                     if self.ignore_type_mismatch_for_optional && part.is_optional() {
-                        emit!(ParquetEncoderSkippedField { 
+                        emit!(ParquetEncoderSkippedField {
                             reason: "".to_string(),
                             field_name: part.name().to_string(),
                         });
