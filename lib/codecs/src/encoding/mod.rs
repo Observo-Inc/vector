@@ -3,6 +3,9 @@
 
 pub mod format;
 pub mod framing;
+pub mod batch;
+
+pub use batch::EncapFramingConfig;
 
 use std::fmt::Debug;
 
@@ -24,6 +27,7 @@ pub use framing::{
 use vector_config::configurable_component;
 use vector_core::{config::DataType, event::Event, schema};
 
+use crate::actions::EncodingConfigWithFraming;
 pub use crate::encoding::{format::{SyslogSerializer, SyslogSerializerConfig, SyslogFormat, Rfc5424, SyslogTimeRes, Truncation}, framing::OctetCountedEncoder};
 
 /// An error that occurred while building an encoder.
@@ -182,7 +186,7 @@ impl tokio_util::codec::Encoder<()> for Framer {
 
 /// Serializer configuration.
 #[configurable_component]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[serde(tag = "codec", rename_all = "snake_case")]
 #[configurable(metadata(docs::enum_tag_description = "The codec to use for encoding events."))]
 pub enum SerializerConfig {
@@ -268,7 +272,7 @@ pub enum SerializerConfig {
     /// Encodes events in [Apache Parquet format][parquet].
     ///
     /// [parquet]: https://parquet.apache.org/
-    Parquet(ParquetSerializerOptions),
+    Parquet(ParquetSerializerConfig),
     /// Plain text encoding.
     ///
     /// This encoding uses the `message` field of a log event. For metrics, it uses an
@@ -384,11 +388,11 @@ impl SerializerConfig {
         &self,
     ) -> Result<Option<BatchSerializer>, Box<dyn std::error::Error + Send + Sync + 'static>> {
         match self {
-            SerializerConfig::Parquet(parquet) => Ok(Some(BatchSerializer::Parquet(
+            SerializerConfig::Parquet(cfg) => Ok(Some(BatchSerializer::Parquet(
                 ParquetSerializerConfig::new(
-                    parquet.schema.clone(),
-                    parquet.record_complete_event.clone(),
-                    parquet.ignore_type_mismatch_for_optional.clone(),
+                    cfg.parquet.schema.clone(),
+                    cfg.parquet.record_complete_event.clone(),
+                    cfg.parquet.ignore_type_mismatch_for_optional.clone(),
                 )
                 .build()?,
             ))),
@@ -447,10 +451,10 @@ impl SerializerConfig {
             SerializerConfig::Protobuf(config) => config.input_type(),
             SerializerConfig::RawMessage => RawMessageSerializerConfig.input_type(),
             SerializerConfig::Text(config) => config.input_type(),
-            SerializerConfig::Parquet(parquet) => ParquetSerializerConfig::new(
-                parquet.schema.clone(),
-                parquet.record_complete_event.clone(),
-                parquet.ignore_type_mismatch_for_optional.clone(),
+            SerializerConfig::Parquet(cfg) => ParquetSerializerConfig::new(
+                cfg.parquet.schema.clone(),
+                cfg.parquet.record_complete_event.clone(),
+                cfg.parquet.ignore_type_mismatch_for_optional.clone(),
             )
             .input_type(),
             SerializerConfig::Syslog(config) => config.input_type(),
@@ -473,10 +477,10 @@ impl SerializerConfig {
             SerializerConfig::Protobuf(config) => config.schema_requirement(),
             SerializerConfig::RawMessage => RawMessageSerializerConfig.schema_requirement(),
             SerializerConfig::Text(config) => config.schema_requirement(),
-            SerializerConfig::Parquet(parquet) => ParquetSerializerConfig::new(
-                parquet.schema.clone(),
-                parquet.record_complete_event.clone(),
-                parquet.ignore_type_mismatch_for_optional.clone(),
+            SerializerConfig::Parquet(cfg) => ParquetSerializerConfig::new(
+                cfg.parquet.schema.clone(),
+                cfg.parquet.record_complete_event.clone(),
+                cfg.parquet.ignore_type_mismatch_for_optional.clone(),
             )
             .schema_requirement(),
             SerializerConfig::Syslog(config) => config.schema_requirement(),
@@ -663,5 +667,94 @@ impl tokio_util::codec::Encoder<Vec<Event>> for BatchSerializer {
         match self {
             BatchSerializer::Parquet(serializer) => serializer.encode(events, buffer),
         }
+    }
+}
+
+/// Batch Framing configuration.
+#[configurable_component]
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[serde(tag = "method", rename_all = "snake_case")]
+#[configurable(metadata(docs::enum_tag_description = "The framing method for encoded event-batches."))]
+pub enum BatchFramerConfig {
+    /// No framing; raw bytes.
+    Identity,
+
+    /// Encap
+    Encap(EncapFramingConfig),
+}
+
+impl Default for BatchFramerConfig {
+    fn default() -> Self {
+        BatchFramerConfig::Identity
+    }
+}
+
+/// Batch Framing configuration.
+#[configurable_component]
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[serde(tag = "codec", rename_all = "snake_case")]
+#[configurable(metadata(docs::enum_tag_description = "Encoding to be used for event-batches."))]
+pub enum BatchSerializerConfig {
+    /// Stack per-event (non-batch) framing and serde
+    Stack(EncodingConfigWithFraming),
+
+    /// Parquet
+    Parquet(ParquetSerializerConfig),
+}
+
+/// Batch Encoding configuration.
+#[configurable_component]
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+#[configurable(description = "Configures how batches of events are encoded into raw bytes.")]
+pub struct BatchEncodingConfig {
+    /// Framing configuration for batches.
+    #[serde(default)]
+    pub framing: BatchFramerConfig,
+
+    /// Serializer configuration for batches.
+    pub encoding: BatchSerializerConfig,
+}
+
+#[cfg(test)]
+mod tests {
+    use assert_matches::assert_matches;
+
+    use crate::encoding::{BatchSerializerConfig, ParquetSerializerConfig, ParquetSerializerOptions, SerializerConfig};
+
+    #[test]
+    fn parquet_config() {
+        let config = r#"
+            codec = "parquet"
+            [parquet]
+            schema = "message test { required group data { required binary name; repeated int64 values; } }"
+            record_complete_event = true
+            ignore_type_mismatch_for_optional = true
+        "#;
+        let cfg: SerializerConfig = toml::from_str(&config).expect("failed to deserialize config");
+
+        assert_matches!(
+            cfg,
+            SerializerConfig::Parquet(
+                ParquetSerializerConfig{
+                    parquet: ParquetSerializerOptions{
+                        schema,
+                        ignore_type_mismatch_for_optional: Some(true),
+                        record_complete_event: Some(true),
+                    }
+                }) if schema.as_str() == "message test { required group data { required binary name; repeated int64 values; } }");
+
+
+        let cfg: BatchSerializerConfig = toml::from_str(&config).expect("failed to deserialize config");
+        assert_matches!(
+            cfg,
+            BatchSerializerConfig::Parquet(
+                ParquetSerializerConfig{
+                    parquet: ParquetSerializerOptions{
+                        schema,
+                        ignore_type_mismatch_for_optional: Some(true),
+                        record_complete_event: Some(true),
+                    }
+                }) if schema.as_str() == "message test { required group data { required binary name; repeated int64 values; } }");
     }
 }

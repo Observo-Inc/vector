@@ -51,6 +51,7 @@ futures.workspace = true
 indexmap.workspace = true
 bytesize.workspace = true
 actson = { git = "https://github.com/jsbali/actson-rs.git" }
+hex.workspace = true
 
 [dev-dependencies]
 futures.workspace = true
@@ -66,6 +67,7 @@ toml.workspace = true
 futures-util.workspace = true
 hex = "0.4"
 itertools.workspace = true
+assert_matches = { version = "1.5" }
 
 [features]
 syslog = ["dep:syslog_loose"]
