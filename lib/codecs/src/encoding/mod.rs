@@ -3,6 +3,11 @@
 
 pub mod format;
 pub mod framing;
+pub mod batch;
+
+pub use batch::EncapFramingConfig;
+use itertools::{Itertools, Position};
+use tokio_util::codec::Encoder;
 
 use std::fmt::Debug;
 
@@ -24,6 +29,7 @@ pub use framing::{
 use vector_config::configurable_component;
 use vector_core::{config::DataType, event::Event, schema};
 
+use crate::{actions::{Transformer, Encoder as EventEncoder}, encoding::batch::{EncapFramer, ConstFrameEncoder}};
 pub use crate::encoding::{format::{SyslogSerializer, SyslogSerializerConfig, SyslogFormat, Rfc5424, SyslogTimeRes, Truncation}, framing::OctetCountedEncoder};
 
 /// An error that occurred while building an encoder.
@@ -165,7 +171,7 @@ impl From<BoxedFramer> for Framer {
     }
 }
 
-impl tokio_util::codec::Encoder<()> for Framer {
+impl Encoder<()> for Framer {
     type Error = BoxedFramingError;
 
     fn encode(&mut self, _: (), buffer: &mut BytesMut) -> Result<(), Self::Error> {
@@ -182,7 +188,7 @@ impl tokio_util::codec::Encoder<()> for Framer {
 
 /// Serializer configuration.
 #[configurable_component]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[serde(tag = "codec", rename_all = "snake_case")]
 #[configurable(metadata(docs::enum_tag_description = "The codec to use for encoding events."))]
 pub enum SerializerConfig {
@@ -265,10 +271,6 @@ pub enum SerializerConfig {
     /// could lead to the encoding emitting empty strings for the given event.
     RawMessage,
 
-    /// Encodes events in [Apache Parquet format][parquet].
-    ///
-    /// [parquet]: https://parquet.apache.org/
-    Parquet(ParquetSerializerOptions),
     /// Plain text encoding.
     ///
     /// This encoding uses the `message` field of a log event. For metrics, it uses an
@@ -371,28 +373,7 @@ impl SerializerConfig {
                 Ok(Serializer::RawMessage(RawMessageSerializerConfig.build()))
             }
             SerializerConfig::Text(config) => Ok(Serializer::Text(config.build())),
-            SerializerConfig::Parquet(..) => {
-                Err("Parquet serializer is not for single event encoding.".into())
-            },
             SerializerConfig::Syslog(config) => Ok(Serializer::Syslog(config.build()))
-        }
-    }
-
-    /// Build the `BatchSerializer` from this configuration.
-    /// Returns `None` if the serializer is not batched.
-    pub fn build_batched(
-        &self,
-    ) -> Result<Option<BatchSerializer>, Box<dyn std::error::Error + Send + Sync + 'static>> {
-        match self {
-            SerializerConfig::Parquet(parquet) => Ok(Some(BatchSerializer::Parquet(
-                ParquetSerializerConfig::new(
-                    parquet.schema.clone(),
-                    parquet.record_complete_event.clone(),
-                    parquet.ignore_type_mismatch_for_optional.clone(),
-                )
-                .build()?,
-            ))),
-            _ => Ok(None),
         }
     }
 
@@ -422,7 +403,6 @@ impl SerializerConfig {
             | SerializerConfig::NativeJson
             | SerializerConfig::RawMessage
             | SerializerConfig::Text(_) => FramingConfig::NewlineDelimited,
-            SerializerConfig::Parquet(..) => FramingConfig::Bytes,
             SerializerConfig::Gelf => {
                 FramingConfig::CharacterDelimited(CharacterDelimitedEncoderConfig::new(0))
             },
@@ -447,12 +427,6 @@ impl SerializerConfig {
             SerializerConfig::Protobuf(config) => config.input_type(),
             SerializerConfig::RawMessage => RawMessageSerializerConfig.input_type(),
             SerializerConfig::Text(config) => config.input_type(),
-            SerializerConfig::Parquet(parquet) => ParquetSerializerConfig::new(
-                parquet.schema.clone(),
-                parquet.record_complete_event.clone(),
-                parquet.ignore_type_mismatch_for_optional.clone(),
-            )
-            .input_type(),
             SerializerConfig::Syslog(config) => config.input_type(),
         }
     }
@@ -473,12 +447,6 @@ impl SerializerConfig {
             SerializerConfig::Protobuf(config) => config.schema_requirement(),
             SerializerConfig::RawMessage => RawMessageSerializerConfig.schema_requirement(),
             SerializerConfig::Text(config) => config.schema_requirement(),
-            SerializerConfig::Parquet(parquet) => ParquetSerializerConfig::new(
-                parquet.schema.clone(),
-                parquet.record_complete_event.clone(),
-                parquet.ignore_type_mismatch_for_optional.clone(),
-            )
-            .schema_requirement(),
             SerializerConfig::Syslog(config) => config.schema_requirement(),
         }
     }
@@ -622,7 +590,7 @@ impl From<TextSerializer> for Serializer {
     }
 }
 
-impl tokio_util::codec::Encoder<Event> for Serializer {
+impl Encoder<Event> for Serializer {
     type Error = vector_common::Error;
 
     fn encode(&mut self, event: Event, buffer: &mut BytesMut) -> Result<(), Self::Error> {
@@ -643,25 +611,723 @@ impl tokio_util::codec::Encoder<Event> for Serializer {
     }
 }
 
-/// Serialize structured batches of events as bytes.
+/// Batch Framing configuration.
+#[configurable_component]
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+#[serde(tag = "method", rename_all = "snake_case")]
+#[configurable(metadata(docs::enum_tag_description = "The framing method for encoded event-batches."))]
+pub enum BatchFramerConfig {
+    /// No framing; raw bytes.
+    #[default]
+    Identity,
+
+    /// Encap
+    Encap(EncapFramingConfig),
+}
+
+impl BatchFramerConfig {
+    /// Build the `BatchFramer` from this configuration.
+    pub fn build(&self) -> Result<BatchFramer, vector_common::Error> {
+        match self {
+            BatchFramerConfig::Identity => Ok(BatchFramer::Identity),
+            BatchFramerConfig::Encap(config) => Ok(BatchFramer::Encap(config.build()?)),
+        }
+    }
+}
+
+/// Encoding configuration.
+#[configurable_component]
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct EventEncodingConfig {
+    /// Framing configuration.
+    #[configurable(derived)]
+    pub framing: Option<FramingConfig>,
+
+    /// Encoding configuration
+    #[configurable(derived)]
+    pub serializer: SerializerConfig,
+}
+
+/// Batch Framing configuration.
+#[configurable_component]
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[serde(tag = "codec", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
+#[configurable(metadata(docs::enum_tag_description = "Encoding to be used for event-batches."))]
+pub enum BatchSerializerConfig {
+    /// Stack per-event (non-batch) framing and serde
+    Stack(EventEncodingConfig),
+
+    /// Parquet
+    Parquet(ParquetSerializerConfig),
+}
+
+
+impl BatchSerializerConfig {
+    /// The data type of events that are accepted by this `BatchSerializer`.
+    pub fn input_type(&self) -> DataType {
+        match self {
+            BatchSerializerConfig::Parquet(cfg) => ParquetSerializerConfig::new(
+                cfg.parquet.schema.clone(),
+                cfg.parquet.record_complete_event.clone(),
+                cfg.parquet.ignore_type_mismatch_for_optional.clone(),
+            )
+            .input_type(),
+            BatchSerializerConfig::Stack(cfg) => cfg.serializer.input_type(),
+        }
+    }
+
+    /// Build the `BatchSerializer` from this configuration.
+    /// Returns `None` if the serializer is not batched.
+    pub fn build(
+        &self,
+    ) -> Result<BatchSerializer, vector_common::Error> {
+        match self {
+            BatchSerializerConfig::Parquet(cfg) => Ok(BatchSerializer::Parquet(
+                ParquetSerializerConfig::new(
+                    cfg.parquet.schema.clone(),
+                    cfg.parquet.record_complete_event.clone(),
+                    cfg.parquet.ignore_type_mismatch_for_optional.clone(),
+                )
+                .build()?,
+            )),
+            BatchSerializerConfig::Stack(cfg) => {
+                let serializer = cfg.serializer.build()?;
+                let framer = cfg.framing.as_ref().map(|c| c.clone()).unwrap_or(cfg.serializer.default_stream_framing()).build();
+                Ok(BatchSerializer::Stack(StackSerializer(EventEncoder::<Framer>::new(framer, serializer))))
+            },
+        }
+    }
+
+}
+
+/// Batch Encoding configuration.
+#[configurable_component]
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+#[configurable(description = "Configures how batches of events are encoded into raw bytes.")]
+pub struct BatchEncodingConfig {
+    /// Framing configuration for batches.
+    ///
+    /// When omitted (`None`), the framing is auto-detected from the inner
+    /// serializer's `batch_prefix()` / `batch_suffix()`.  For example,
+    /// comma-delimited JSON will automatically get `[` / `]` encapsulation.
+    ///
+    /// Set explicitly to `Identity` to opt out of auto-detection, or to
+    /// `Encap(...)` to provide custom prefix/suffix bytes.
+    #[serde(default)]
+    pub framing: Option<BatchFramerConfig>,
+
+    /// Serializer configuration for batches.
+    pub encoding: BatchSerializerConfig,
+
+    /// Transformation rules applied before encoding.
+    #[serde(default)]
+    pub transformer: Transformer,
+}
+
+/// Serialize collection of events as bytes using a stack of per-event `Serializer` and `Framer` for serialization.
+#[derive(Debug, Clone)]
+pub struct StackSerializer(EventEncoder<Framer>);
+
+impl StackSerializer {
+    /// Get the batch prefix from the inner encoder.
+    pub fn batch_prefix(&self) -> &[u8] {
+        self.0.batch_prefix()
+    }
+
+    /// Get the batch suffix from the inner encoder.
+    pub fn batch_suffix(&self) -> &[u8] {
+        self.0.batch_suffix()
+    }
+}
+
+impl Encoder<Vec<Event>> for StackSerializer {
+    type Error = vector_common::Error;
+
+    fn encode(&mut self, events: Vec<Event>, buffer: &mut BytesMut) -> Result<(), Self::Error> {
+        for (position, event) in events.into_iter().with_position() {
+            match position {
+                Position::Last | Position::Only => {
+                    // Last (or only) event: serialize without trailing delimiter.
+                    self.0.serialize(event, buffer)?;
+                }
+                _ => {
+                    // All other events: serialize and append framing delimiter.
+                    self.0.encode(event, buffer)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Serialize collection of events as bytes.
 #[derive(Debug, Clone)]
 pub enum BatchSerializer {
+    /// Uses a stack of per-event `Serializer` and `Framer` for serialization.
+    Stack(StackSerializer),
+
     /// Uses a `ParquetSerializer` for serialization.
     Parquet(ParquetSerializer),
 }
 
-impl From<ParquetSerializer> for BatchSerializer {
-    fn from(serializer: ParquetSerializer) -> Self {
-        Self::Parquet(serializer)
+impl BatchSerializer {
+    /// The content type produced by this serializer.
+    pub fn content_type(&self) -> &'static str {
+        match self {
+            Self::Parquet(_) => "application/octet-stream",
+            Self::Stack(ser) => ser.0.content_type(),
+        }
+    }
+
+    /// Get the batch prefix from the inner serializer.
+    pub fn batch_prefix(&self) -> &[u8] {
+        match self {
+            Self::Parquet(_) => &[],
+            Self::Stack(ser) => ser.batch_prefix(),
+        }
+    }
+
+    /// Get the batch suffix from the inner serializer.
+    pub fn batch_suffix(&self) -> &[u8] {
+        match self {
+            Self::Parquet(_) => &[],
+            Self::Stack(ser) => ser.batch_suffix(),
+        }
     }
 }
 
-impl tokio_util::codec::Encoder<Vec<Event>> for BatchSerializer {
+impl Encoder<Vec<Event>> for BatchSerializer {
     type Error = vector_common::Error;
 
     fn encode(&mut self, events: Vec<Event>, buffer: &mut BytesMut) -> Result<(), Self::Error> {
         match self {
-            BatchSerializer::Parquet(serializer) => serializer.encode(events, buffer),
+            Self::Parquet(ser) => ser.encode(events, buffer),
+            Self::Stack(ser) => ser.encode(events, buffer),
         }
+    }
+}
+
+/// Batch framing configuration.
+#[derive(Debug, Clone)]
+pub enum BatchFramer {
+    /// No framing; raw bytes.
+    Identity,
+
+    /// Framing with constant bytes at the start and end of batch-buffer
+    Encap(EncapFramer),
+}
+
+impl BatchFramer {
+    /// Encode framing into the buffer.
+    pub fn encode(&mut self, buffer: &mut BytesMut) -> Result<(), BoxedFramingError> {
+        match self {
+            BatchFramer::Identity => Ok(()),
+            BatchFramer::Encap(encap) => encap.encode((), buffer),
+        }
+    }
+}
+
+/// Encodes a batch of events using a `BatchSerializer` and `BatchFramer`.
+#[derive(Debug, Clone)]
+pub struct BatchEncoder {
+    framer: BatchFramer,
+
+    serializer: BatchSerializer,
+}
+
+impl BatchEncoder {
+    /// The content type produced by this batch encoder.
+    pub fn content_type(&self) -> &'static str {
+        self.serializer.content_type()
+    }
+}
+
+impl Encoder<Vec<Event>> for BatchEncoder {
+    type Error = vector_common::Error;
+
+    fn encode(&mut self, events: Vec<Event>, buffer: &mut BytesMut) -> Result<(), Self::Error> {
+        self.serializer.encode(events, buffer)?;
+        self.framer.encode(buffer)?;
+        Ok(())
+    }
+}
+
+impl BatchEncodingConfig {
+    /// The data type of events that are accepted by this batch encoding config.
+    pub fn input_type(&self) -> DataType {
+        self.encoding.input_type()
+    }
+
+    /// The default file extension for this batch encoding config.
+    pub fn file_extension(&self) -> Option<&'static str> {
+        match &self.encoding {
+            BatchSerializerConfig::Parquet(_) => Some("parquet"),
+            BatchSerializerConfig::Stack(_) => None,
+        }
+    }
+
+    /// Build the `BatchEncoder` and `Transformer` from this configuration.
+    ///
+    /// When `framing` is `None`, auto-detection kicks in: the serializer is
+    /// built first, and its `batch_prefix()` / `batch_suffix()` are probed.
+    /// If both are non-empty an `Encap` framer is constructed automatically;
+    /// otherwise the framer defaults to `Identity` (no wrapping).
+    pub fn build(&self) -> Result<(BatchEncoder, Transformer), vector_common::Error> {
+        let serializer = self.encoding.build()?;
+
+        let framer = match &self.framing {
+            Some(BatchFramerConfig::Identity) => BatchFramer::Identity,
+            Some(BatchFramerConfig::Encap(config)) => BatchFramer::Encap(config.build()?),
+            None => {
+                // Auto-detect from the serializer's batch_prefix / batch_suffix.
+                let prefix = serializer.batch_prefix();
+                let suffix = serializer.batch_suffix();
+                if prefix.is_empty() && suffix.is_empty() {
+                    BatchFramer::Identity
+                } else {
+                    BatchFramer::Encap(EncapFramer::Const(
+                        ConstFrameEncoder::new(prefix.to_vec(), suffix.to_vec()),
+                    ))
+                }
+            }
+        };
+
+        Ok((BatchEncoder { framer, serializer }, self.transformer.clone()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use assert_matches::assert_matches;
+
+    use crate::actions::{Transformer, TimestampFormat};
+    use crate::encoding::{BatchEncoder, BatchEncodingConfig, BatchFramer, BatchFramerConfig, BatchSerializer, BatchSerializerConfig, CharacterDelimitedEncoder, CharacterDelimitedEncoderConfig, EventEncodingConfig, FramingConfig, JsonSerializerConfig, NewlineDelimitedEncoder, ParquetSerializerConfig, ParquetSerializerOptions, Serializer, SerializerConfig, StackSerializer};
+    use bytes::BytesMut;
+    use tokio_util::codec::Encoder;
+    use vector_core::event::{Event, LogEvent, Value};
+    use vrl::value::KeyString;
+
+    #[test]
+    fn batch_encoding_config_parquet() {
+        let c = r#"
+            encoding.codec = "parquet"
+            [encoding.parquet]
+            schema = "message test { required group data { required binary name; repeated int64 values; } }"
+            record_complete_event = true
+            ignore_type_mismatch_for_optional = true
+
+            [transformer]
+            except_fields = ["drop_me"]
+            timestamp_format = "unix"
+        "#;
+
+        let cfg: BatchEncodingConfig = toml::from_str(c).expect("deser");
+
+        assert_matches!(cfg.framing, None);
+        assert_matches!(
+            cfg.encoding,
+            BatchSerializerConfig::Parquet(ParquetSerializerConfig {
+                parquet: ParquetSerializerOptions {
+                    schema,
+                    ignore_type_mismatch_for_optional: Some(true),
+                    record_complete_event: Some(true),
+                },
+            }) if schema.as_str() == "message test { required group data { required binary name; repeated int64 values; } }"
+        );
+
+        assert_eq!(cfg.transformer.except_fields(), &Some(vec!["drop_me".into()]));
+        assert_eq!(cfg.transformer.timestamp_format(), &Some(TimestampFormat::Unix));
+    }
+
+    #[test]
+    fn batch_encoding_config_parquet_no_transformer() {
+        let c = r#"
+            encoding.codec = "parquet"
+            [encoding.parquet]
+            schema = "message test { required group data { required binary name; } }"
+        "#;
+
+        let cfg: BatchEncodingConfig = toml::from_str(c).expect("deser");
+
+        assert_matches!(cfg.framing, None);
+        assert_matches!(cfg.encoding, BatchSerializerConfig::Parquet(_));
+        assert_eq!(cfg.transformer, Transformer::default());
+    }
+
+    #[test]
+    fn batch_encoding_config_legacy_no_transformer_with_framing() {
+        let c = r#"
+            [encoding]
+            codec = "stack"
+            [encoding.serializer]
+            codec = "json"
+            [encoding.framing]
+            method = "octet_counted"
+
+            [transformer]
+            except_fields = ["drop_me"]
+            timestamp_format = "unix"
+        "#;
+
+        let cfg: BatchEncodingConfig = toml::from_str(c).expect("deser");
+
+        assert_matches!(cfg.framing, None);
+
+        let expected_transformer = Transformer::new(None, Some(vec!["drop_me".into()]), Some(TimestampFormat::Unix), BTreeMap::new()).unwrap();
+
+        assert_matches!(
+            cfg.build(),
+            Ok((
+                    BatchEncoder{
+                        framer: BatchFramer::Identity,
+                        serializer: BatchSerializer::Stack(StackSerializer(EventEncoder::<super::Framer>{
+                            framer: super::Framer::OctetCounted(_),
+                            serializer: Serializer::Json(_),
+                        })),
+                    },
+                    t)) if t == expected_transformer);
+    }
+
+    use crate::actions::Encoder as EventEncoder;
+
+    #[test]
+    fn batch_encoding_config_legacy_no_transformer() {
+        let c = r#"
+            [encoding]
+            codec = "stack"
+            [encoding.serializer]
+            codec = "json"
+        "#;
+
+        let cfg: BatchEncodingConfig = toml::from_str(c).expect("deser");
+
+        assert_matches!(
+            cfg.build(),
+            Ok((
+                    BatchEncoder{
+                        framer: BatchFramer::Identity,
+                        serializer: BatchSerializer::Stack(StackSerializer(EventEncoder::<super::Framer>{
+                            framer: super::Framer::NewlineDelimited(_),
+                            serializer: Serializer::Json(_),
+                        })),
+                    },
+                    t)) if t == Transformer::default());
+
+        assert_matches!(cfg.framing, None);
+    }
+
+    #[test]
+    fn batch_encoding_stacked_csv_with_encap_framing() {
+        let c = r#"
+            [framing]
+            method = "encap"
+            [framing.const]
+            prefix = "5b5b"
+            suffix = "5d5d"
+
+            [encoding]
+            codec = "stack"
+            [encoding.serializer]
+            codec = "csv"
+            [encoding.serializer.csv]
+            fields = ["name", "val"]
+            delimiter = ";"
+            quote_style = "always"
+
+            [transformer]
+            except_fields = ["ignore"]
+        "#;
+
+        let cfg: BatchEncodingConfig = toml::from_str(c).expect("deser");
+        assert_matches!(cfg.framing, Some(BatchFramerConfig::Encap(_)));
+        assert_matches!(cfg.encoding, BatchSerializerConfig::Stack(_));
+        assert_eq!(cfg.transformer.except_fields(), &Some(vec!["ignore".into()]));
+
+        let (mut enc, transformer) = cfg.build().expect("build");
+        assert_eq!(transformer.except_fields(), &Some(vec!["ignore".into()]));
+
+        let mk = |pairs: &[(&str, &str)]| -> Event {
+            let mut e = LogEvent::default();
+            for (k, v) in pairs {
+                e.insert(*k, Value::from(*v));
+            }
+            e.into()
+        };
+        let events: Vec<Event> = vec![
+            mk(&[("name", "alice"), ("val", "100")]),
+            mk(&[("name", "bob"), ("val", "200")]),
+        ];
+
+        let mut buf = BytesMut::new();
+        enc.encode(events, &mut buf).expect("encode");
+        let out = String::from_utf8(buf.to_vec()).expect("utf8");
+        assert!(out.starts_with("[["), "expected [[ prefix, got: {out}");
+        assert!(out.ends_with("]]"), "expected ]] suffix, got: {out}");
+
+        let inner = &out[2..out.len() - 2];
+        assert!(inner.contains(";"), "expected ; delimiter, got: {inner}");
+        assert!(inner.contains("\"alice\""), "expected quoted alice, got: {inner}");
+        assert!(inner.contains("\"bob\""), "expected quoted bob, got: {inner}");
+    }
+
+    fn mk_event(pairs: &[(&str, &str)]) -> Event {
+        LogEvent::from(
+            pairs
+                .iter()
+                .map(|(k, v)| (KeyString::from(*k), Value::from(*v)))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        )
+        .into()
+    }
+
+    fn build_stack_serializer(framer: super::Framer, serializer: Serializer) -> StackSerializer {
+        StackSerializer(EventEncoder::<super::Framer>::new(framer, serializer))
+    }
+
+    #[test]
+    fn test_stack_serializer_ndjson_no_trailing_newline() {
+        let mut ser = build_stack_serializer(
+            NewlineDelimitedEncoder::default().into(),
+            JsonSerializerConfig::default().build().into(),
+        );
+
+        let events = vec![
+            mk_event(&[("key", "value1")]),
+            mk_event(&[("key", "value2")]),
+            mk_event(&[("key", "value3")]),
+        ];
+
+        let mut buf = BytesMut::new();
+        ser.encode(events, &mut buf).expect("encode");
+        let out = String::from_utf8(buf.to_vec()).expect("utf8");
+
+        assert_eq!(
+            out,
+            "{\"key\":\"value1\"}\n{\"key\":\"value2\"}\n{\"key\":\"value3\"}"
+        );
+        assert!(!out.ends_with('\n'), "must not have trailing newline");
+    }
+
+    #[test]
+    fn test_stack_serializer_comma_json_no_trailing_comma() {
+        let mut ser = build_stack_serializer(
+            CharacterDelimitedEncoder::new(b',').into(),
+            JsonSerializerConfig::default().build().into(),
+        );
+
+        let events = vec![
+            mk_event(&[("key", "value1")]),
+            mk_event(&[("key", "value2")]),
+            mk_event(&[("key", "value3")]),
+        ];
+
+        let mut buf = BytesMut::new();
+        ser.encode(events, &mut buf).expect("encode");
+        let out = String::from_utf8(buf.to_vec()).expect("utf8");
+
+        assert_eq!(
+            out,
+            "{\"key\":\"value1\"},{\"key\":\"value2\"},{\"key\":\"value3\"}"
+        );
+        assert!(!out.ends_with(','), "must not have trailing comma");
+    }
+
+    #[test]
+    fn test_stack_serializer_single_event_no_delimiter() {
+        let mut ser = build_stack_serializer(
+            NewlineDelimitedEncoder::default().into(),
+            JsonSerializerConfig::default().build().into(),
+        );
+
+        let events = vec![mk_event(&[("key", "value")])];
+
+        let mut buf = BytesMut::new();
+        ser.encode(events, &mut buf).expect("encode");
+        let out = String::from_utf8(buf.to_vec()).expect("utf8");
+
+        assert_eq!(out, "{\"key\":\"value\"}");
+        assert!(!out.ends_with('\n'), "single event must not have trailing newline");
+    }
+
+    #[test]
+    fn test_stack_serializer_empty_events() {
+        let mut ser = build_stack_serializer(
+            NewlineDelimitedEncoder::default().into(),
+            JsonSerializerConfig::default().build().into(),
+        );
+
+        let events: Vec<Event> = vec![];
+
+        let mut buf = BytesMut::new();
+        ser.encode(events, &mut buf).expect("encode");
+        assert_eq!(buf.len(), 0, "empty input must produce empty output");
+    }
+
+    // ---- Gap 2: Auto-detect batch prefix/suffix tests ----
+
+    #[test]
+    fn test_batch_encoder_auto_encap_for_comma_delimited_json() {
+        // Comma-delimited JSON with no explicit batch framing → should auto-produce [/] wrapping.
+        let cfg = BatchEncodingConfig {
+            framing: None,
+            encoding: BatchSerializerConfig::Stack(EventEncodingConfig {
+                framing: Some(FramingConfig::CharacterDelimited(
+                    CharacterDelimitedEncoderConfig::new(b','),
+                )),
+                serializer: SerializerConfig::Json(JsonSerializerConfig::default()),
+            }),
+            transformer: Transformer::default(),
+        };
+
+        let (mut enc, _) = cfg.build().expect("build");
+
+        let events = vec![
+            mk_event(&[("a", "1")]),
+            mk_event(&[("a", "2")]),
+        ];
+        let mut buf = BytesMut::new();
+        enc.encode(events, &mut buf).expect("encode");
+        let out = String::from_utf8(buf.to_vec()).expect("utf8");
+
+        assert!(out.starts_with('['), "expected [ prefix, got: {out}");
+        assert!(out.ends_with(']'), "expected ] suffix, got: {out}");
+        // Inner content should be comma-separated JSON without trailing comma.
+        let inner = &out[1..out.len() - 1];
+        assert!(inner.contains(','), "expected comma delimiter, got: {inner}");
+        assert!(!inner.ends_with(','), "must not have trailing comma in: {inner}");
+    }
+
+    #[test]
+    fn test_batch_encoder_explicit_identity_overrides_auto_encap() {
+        // Same codec as above but with explicit Identity batch framing → no wrapping.
+        let cfg = BatchEncodingConfig {
+            framing: Some(BatchFramerConfig::Identity),
+            encoding: BatchSerializerConfig::Stack(EventEncodingConfig {
+                framing: Some(FramingConfig::CharacterDelimited(
+                    CharacterDelimitedEncoderConfig::new(b','),
+                )),
+                serializer: SerializerConfig::Json(JsonSerializerConfig::default()),
+            }),
+            transformer: Transformer::default(),
+        };
+
+        let (mut enc, _) = cfg.build().expect("build");
+
+        let events = vec![
+            mk_event(&[("a", "1")]),
+            mk_event(&[("a", "2")]),
+        ];
+        let mut buf = BytesMut::new();
+        enc.encode(events, &mut buf).expect("encode");
+        let out = String::from_utf8(buf.to_vec()).expect("utf8");
+
+        assert!(!out.starts_with('['), "should NOT have [ prefix when Identity is explicit, got: {out}");
+        assert!(!out.ends_with(']'), "should NOT have ] suffix when Identity is explicit, got: {out}");
+    }
+
+    #[test]
+    fn test_batch_encoder_auto_identity_for_ndjson() {
+        // Newline-delimited JSON with no explicit batch framing → Identity (no wrapping).
+        let cfg = BatchEncodingConfig {
+            framing: None,
+            encoding: BatchSerializerConfig::Stack(EventEncodingConfig {
+                framing: Some(FramingConfig::NewlineDelimited),
+                serializer: SerializerConfig::Json(JsonSerializerConfig::default()),
+            }),
+            transformer: Transformer::default(),
+        };
+
+        let (mut enc, _) = cfg.build().expect("build");
+
+        let events = vec![
+            mk_event(&[("a", "1")]),
+            mk_event(&[("a", "2")]),
+        ];
+        let mut buf = BytesMut::new();
+        enc.encode(events, &mut buf).expect("encode");
+        let out = String::from_utf8(buf.to_vec()).expect("utf8");
+
+        assert!(!out.starts_with('['), "ndjson should NOT have [ prefix, got: {out}");
+        assert!(!out.ends_with(']'), "ndjson should NOT have ] suffix, got: {out}");
+        assert!(out.contains('\n'), "ndjson should have newline delimiters, got: {out}");
+    }
+
+    #[test]
+    fn test_batch_encoder_auto_encap_for_native_json_comma() {
+        // Comma-delimited NativeJson with no explicit batch framing → should auto-produce [/] wrapping.
+        let cfg = BatchEncodingConfig {
+            framing: None,
+            encoding: BatchSerializerConfig::Stack(EventEncodingConfig {
+                framing: Some(FramingConfig::CharacterDelimited(
+                    CharacterDelimitedEncoderConfig::new(b','),
+                )),
+                serializer: SerializerConfig::NativeJson,
+            }),
+            transformer: Transformer::default(),
+        };
+
+        let (mut enc, _) = cfg.build().expect("build");
+
+        let events = vec![
+            mk_event(&[("a", "1")]),
+            mk_event(&[("a", "2")]),
+        ];
+        let mut buf = BytesMut::new();
+        enc.encode(events, &mut buf).expect("encode");
+        let out = String::from_utf8(buf.to_vec()).expect("utf8");
+
+        assert!(out.starts_with('['), "expected [ prefix for native_json + comma, got: {out}");
+        assert!(out.ends_with(']'), "expected ] suffix for native_json + comma, got: {out}");
+    }
+
+    // ---- Gap 5: Empty events handling tests ----
+
+    #[test]
+    fn test_batch_encoder_empty_events_identity_framer() {
+        // Empty events with Identity framer (ndjson) → 0 bytes.
+        let cfg = BatchEncodingConfig {
+            framing: None,
+            encoding: BatchSerializerConfig::Stack(EventEncodingConfig {
+                framing: Some(FramingConfig::NewlineDelimited),
+                serializer: SerializerConfig::Json(JsonSerializerConfig::default()),
+            }),
+            transformer: Transformer::default(),
+        };
+
+        let (mut enc, _) = cfg.build().expect("build");
+
+        let events: Vec<Event> = vec![];
+        let mut buf = BytesMut::new();
+        enc.encode(events, &mut buf).expect("encode");
+        assert_eq!(buf.len(), 0, "empty events with ndjson (identity framer) must produce 0 bytes");
+    }
+
+    #[test]
+    fn test_batch_encoder_empty_events_auto_encap_framer() {
+        // Empty events with auto-detected Encap framer (comma-delimited JSON) → `[]`.
+        let cfg = BatchEncodingConfig {
+            framing: None,
+            encoding: BatchSerializerConfig::Stack(EventEncodingConfig {
+                framing: Some(FramingConfig::CharacterDelimited(
+                    CharacterDelimitedEncoderConfig::new(b','),
+                )),
+                serializer: SerializerConfig::Json(JsonSerializerConfig::default()),
+            }),
+            transformer: Transformer::default(),
+        };
+
+        let (mut enc, _) = cfg.build().expect("build");
+
+        let events: Vec<Event> = vec![];
+        let mut buf = BytesMut::new();
+        enc.encode(events, &mut buf).expect("encode");
+        let out = String::from_utf8(buf.to_vec()).expect("utf8");
+        assert_eq!(out, "[]", "empty events with comma-delimited JSON must produce []");
     }
 }

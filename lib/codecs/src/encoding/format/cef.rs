@@ -84,7 +84,7 @@ pub enum CefSerializerError {
 
 /// Config used to build a `CefSerializer`.
 #[configurable_component]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CefSerializerConfig {
     /// The CEF Serializer Options.
     pub cef: CefSerializerOptions,
@@ -166,7 +166,7 @@ impl CefSerializerConfig {
 
 /// CEF version.
 #[configurable_component]
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub enum Version {
     #[default]
     /// CEF specification version 0.1.
@@ -192,7 +192,7 @@ impl std::fmt::Display for Version {
 
 /// Config used to build a `CefSerializer`.
 #[configurable_component]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CefSerializerOptions {
     /// CEF Version. Can be either 0 or 1.
     /// Equals to "0" by default.

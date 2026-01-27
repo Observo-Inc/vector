@@ -1,13 +1,13 @@
 use super::Transformer;
 use crate::{
-    encoding::{BatchSerializer, Framer, FramingConfig, Serializer, SerializerConfig},
+    encoding::{Framer, FramingConfig, Serializer, SerializerConfig},
     CharacterDelimitedEncoder, LengthDelimitedEncoder, NewlineDelimitedEncoder,
 };
 use vector_config::configurable_component;
 
 /// Encoding configuration.
 #[configurable_component]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[configurable(description = "Configures how events are encoded into raw bytes.")]
 pub struct EncodingConfig {
     /// Encoding configuration.
@@ -58,15 +58,16 @@ where
 
 /// Encoding configuration.
 #[configurable_component]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct EncodingConfigWithFraming {
     /// Framing configuration.
     #[configurable(derived)]
     pub framing: Option<FramingConfig>,
 
-    /// Encoding configuration.
+    /// Encoding configuration (alias: `serializer`).
     #[configurable(derived)]
+    #[serde(alias = "serializer")]
     pub encoding: EncodingConfig,
 }
 
@@ -134,13 +135,6 @@ impl EncodingConfigWithFraming {
         };
 
         Ok((framer, serializer))
-    }
-
-    /// Build `BatchSerializer` for this config.
-    /// None if serializer is not batched.
-    pub fn build_batched(&self) -> vector_common::Result<Option<BatchSerializer>> {
-        let serializer = self.encoding.config().build_batched()?;
-        Ok(serializer)
     }
 }
 

@@ -2,15 +2,15 @@ use std::sync::Arc;
 
 use azure_storage_blobs::prelude::*;
 use tower::ServiceBuilder;
-use vector_lib::event::Event;
-use vector_lib::codecs::{encoding::Framer, JsonSerializerConfig, NewlineDelimitedEncoderConfig};
+use vector_lib::codecs::actions::Transformer;
+use vector_lib::codecs::JsonSerializerConfig;
+use vector_lib::codecs::encoding::{BatchEncodingConfig, BatchSerializerConfig, EventEncodingConfig, SerializerConfig};
 use vector_lib::configurable::configurable_component;
 use vector_lib::sensitive_string::SensitiveString;
 
 use super::request_builder::AzureBlobRequestOptions;
 use crate::sinks::util::service::TowerRequestConfigDefaults;
 use crate::{
-    codecs::{Encoder, EncodingConfigWithFraming, SinkType},
     config::{AcknowledgementsConfig, DataType, GenerateConfig, Input, SinkConfig, SinkContext},
     sinks::{
         azure_common::{
@@ -142,7 +142,7 @@ pub struct AzureBlobSinkConfig {
     pub blob_append_uuid: Option<bool>,
 
     #[serde(flatten)]
-    pub encoding: EncodingConfigWithFraming,
+    pub encoding: BatchEncodingConfig,
 
     /// Compression configuration.
     ///
@@ -185,7 +185,15 @@ impl GenerateConfig for AzureBlobSinkConfig {
             blob_prefix: default_blob_prefix(),
             blob_time_format: Some(String::from("%s")),
             blob_append_uuid: Some(true),
-            encoding: (Some(NewlineDelimitedEncoderConfig::new()), JsonSerializerConfig::default()).into(),
+            encoding: BatchEncodingConfig {
+                framing: None,
+                encoding: BatchSerializerConfig::Stack(
+                    EventEncodingConfig{
+                        framing: None,
+                        serializer: SerializerConfig::Json(JsonSerializerConfig::default()),
+                    }),
+                transformer: Transformer::default(),
+            },
             compression: Compression::gzip_default(),
             batch: BatchConfig::default(),
             request: TowerRequestConfig::default(),
@@ -217,7 +225,7 @@ impl SinkConfig for AzureBlobSinkConfig {
     }
 
     fn input(&self) -> Input {
-        Input::new(self.encoding.config().1.input_type() & DataType::Log)
+        Input::new(self.encoding.input_type() & DataType::Log)
     }
 
     fn acknowledgements(&self) -> &AcknowledgementsConfig {
@@ -248,31 +256,20 @@ impl AzureBlobSinkConfig {
             .blob_append_uuid
             .unwrap_or(DEFAULT_FILENAME_APPEND_UUID);
 
-        let transformer = self.encoding.transformer();
-        let mut blob_extension = self.compression.extension();
-        let (encoder, content_type) = if let Some(serializer) = self.encoding.build_batched()? {
-            blob_extension = "parquet";
-            (Arc::new((transformer, serializer))
-                as Arc<dyn crate::sinks::util::encoding::Encoder<Vec<Event>> + Send + Sync>,
-                "parquet")
-                // Harsh: this is "parquet" for backwards compatibility, but content-type is
-                // usually expressed in "two-part/mime-type"  format, so technically this doesn't
-                // seem right. Should we fix it?
-                // TODO: https://observo.atlassian.net/browse/OB-5928
-        } else {
-            let (framer, serializer) = self.encoding.build(SinkType::MessageBased)?;
-            let encoder = Encoder::<Framer>::new(framer, serializer);
-            let content_type = encoder.content_type();
-            (Arc::new((transformer, encoder)) as _, content_type)
-        };
+        let blob_extension = self.encoding.file_extension()
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| self.compression.extension().to_string());
+
+        let (encoder, transformer) = self.encoding.build()?;
+        let content_type = encoder.content_type();
 
         let request_options = AzureBlobRequestOptions {
             container_name: self.container_name.clone(),
             blob_time_format,
             blob_append_uuid,
-            encoder,
+            encoder: (transformer, encoder),
             compression: self.compression,
-            blob_extension: Some(blob_extension.to_string()),
+            blob_extension: Some(blob_extension),
             content_type,
         };
 
