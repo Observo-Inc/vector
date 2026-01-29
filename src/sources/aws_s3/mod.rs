@@ -17,8 +17,8 @@ use vrl::value::{kind::Collection, Kind};
 use super::util::MultilineConfig;
 use crate::codecs::DecodingConfig;
 use crate::{
-    aws::{auth::AwsAuthentication, create_client, create_client_and_region, RegionOrEndpoint},
-    common::{s3::S3ClientBuilder, sqs::SqsClientBuilder},
+    aws::{auth::AwsAuthentication, create_client_and_region, RegionOrEndpoint},
+    common::sqs::SqsClientBuilder,
     config::{
         ProxyConfig, SourceAcknowledgementsConfig, SourceConfig, SourceContext, SourceOutput,
     },
@@ -207,20 +207,6 @@ impl AwsS3Config {
     ) -> crate::Result<sqs::Ingestor> {
         let region = self.region.region();
         let endpoint = self.region.endpoint();
-        let force_path_style_value: bool = true;
-
-        let s3_client = create_client::<S3ClientBuilder>(
-            &S3ClientBuilder {
-                force_path_style: Some(force_path_style_value),
-            },
-            &self.auth,
-            region.clone(),
-            endpoint.clone(),
-            proxy,
-            self.tls_options.as_ref(),
-            None,
-        )
-        .await?;
 
         let decoder =
             DecodingConfig::new(self.framing.clone(), self.decoding.clone(), log_namespace)
@@ -232,7 +218,7 @@ impl AwsS3Config {
                     &SqsClientBuilder {},
                     &self.auth,
                     region.clone(),
-                    endpoint,
+                    endpoint.clone(),
                     proxy,
                     sqs.tls_options.as_ref(),
                     sqs.timeout.as_ref(),
@@ -242,11 +228,14 @@ impl AwsS3Config {
                 let ingestor = sqs::Ingestor::new(
                     region,
                     sqs_client,
-                    s3_client,
                     sqs.clone(),
                     self.compression,
                     multiline,
                     decoder,
+                    self.auth.clone(),
+                    endpoint,
+                    proxy.clone(),
+                    self.tls_options.clone(),
                 )
                 .await?;
 

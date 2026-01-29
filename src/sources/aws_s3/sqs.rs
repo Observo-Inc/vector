@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::RwLock;
 use std::{future::ready, num::NonZeroUsize, panic, sync::Arc, sync::LazyLock};
 use std::time::Duration;
 use aws_sdk_s3::operation::get_object::GetObjectError;
@@ -31,8 +32,9 @@ use vector_lib::internal_event::{
 use crate::codecs::Decoder;
 use crate::event::{Event, LogEvent};
 use crate::{
-    aws::AwsTimeout,
-    config::{SourceAcknowledgementsConfig, SourceContext},
+    aws::{auth::AwsAuthentication, create_client, AwsTimeout},
+    common::s3::S3ClientBuilder,
+    config::{ProxyConfig, SourceAcknowledgementsConfig, SourceContext},
     event::{BatchNotifier, BatchStatus, EstimatedJsonEncodedSizeOf},
     internal_events::{
         EventsReceived, SqsMessageDeleteBatchError, SqsMessageDeletePartialError,
@@ -222,16 +224,10 @@ pub enum ProcessingError {
         bucket: String,
         key: String,
     },
-    #[snafu(display(
-        "Object notification for s3://{}/{} is a bucket in another region: {}",
-        bucket,
-        key,
-        region
-    ))]
-    WrongRegion {
+    #[snafu(display("Failed to create S3 client for region {}: {}", region, source))]
+    CreateS3Client {
+        source: Box<dyn std::error::Error + Send + Sync>,
         region: String,
-        bucket: String,
-        key: String,
     },
     #[snafu(display("Unsupported S3 event version: {}.", version,))]
     UnsupportedS3EventVersion { version: semver::Version },
@@ -250,9 +246,13 @@ pub enum ProcessingError {
 
 pub struct State {
     region: Region,
-
-    s3_client: S3Client,
     sqs_client: SqsClient,
+
+    auth: AwsAuthentication,
+    endpoint: Option<String>,
+    proxy: ProxyConfig,
+    tls_options: Option<TlsConfig>,
+    s3_client_cache: RwLock<HashMap<String, S3Client>>,
 
     multiline: Option<line_agg::Config>,
     compression: super::Compression,
@@ -268,6 +268,34 @@ pub struct State {
     pub message_format: SqsMessageFormat,
 }
 
+impl State {
+    async fn get_s3_client(&self, region_str: &str) -> Result<S3Client, ProcessingError> {
+        if let Some(client) = self.s3_client_cache.read().unwrap().get(region_str) {
+            return Ok(client.clone());
+        }
+
+        let client = create_client::<S3ClientBuilder>(
+            &S3ClientBuilder {
+                force_path_style: Some(true),
+            },
+            &self.auth,
+            Some(Region::new(region_str.to_owned())),
+            self.endpoint.clone(),
+            &self.proxy,
+            self.tls_options.as_ref(),
+            None,
+        )
+        .await
+        .map_err(|e| ProcessingError::CreateS3Client {
+            source: e.into(),
+            region: region_str.to_owned(),
+        })?;
+
+        let mut cache = self.s3_client_cache.write().unwrap();
+        Ok(cache.entry(region_str.to_owned()).or_insert(client).clone())
+    }
+}
+
 pub(super) struct Ingestor {
     state: Arc<State>,
 }
@@ -276,22 +304,31 @@ impl Ingestor {
     pub(super) async fn new(
         region: Region,
         sqs_client: SqsClient,
-        s3_client: S3Client,
         config: Config,
         compression: super::Compression,
         multiline: Option<line_agg::Config>,
         decoder: Decoder,
+        auth: AwsAuthentication,
+        endpoint: Option<String>,
+        proxy: ProxyConfig,
+        tls_options: Option<TlsConfig>,
     ) -> Result<Ingestor, IngestorNewError> {
         if config.max_number_of_messages < 1 || config.max_number_of_messages > 10 {
             return Err(IngestorNewError::InvalidNumberOfMessages {
                 messages: config.max_number_of_messages,
             });
         }
+        let s3_client_cache = RwLock::new(HashMap::new());
+
         let state = Arc::new(State {
             region,
-
-            s3_client,
             sqs_client,
+
+            auth,
+            endpoint,
+            proxy,
+            tls_options,
+            s3_client_cache,
 
             compression,
             multiline,
@@ -570,19 +607,9 @@ impl IngestorProcess {
             return Ok(());
         }
 
-        // S3 has to send notifications to a queue in the same region so I don't think this will
-        // actually ever be hit unless messages are being forwarded from one queue to another
-        if self.state.region.as_ref() != s3_event.aws_region.as_str() {
-            return Err(ProcessingError::WrongRegion {
-                bucket: s3_event.s3.bucket.name.clone(),
-                key: s3_event.s3.object.key.clone(),
-                region: s3_event.aws_region,
-            });
-        }
+        let s3_client = self.state.get_s3_client(&s3_event.aws_region).await?;
 
-        let object_result = self
-            .state
-            .s3_client
+        let object_result = s3_client
             .get_object()
             .bucket(s3_event.s3.bucket.name.clone())
             .key(s3_event.s3.object.key.clone())
