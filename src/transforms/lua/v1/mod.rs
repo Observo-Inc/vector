@@ -112,9 +112,12 @@ struct LuaEvent {
 
 impl Lua {
     pub fn new(source: String, search_dirs: Vec<String>) -> crate::Result<Self> {
-        // In order to support loading C modules in Lua, we need to create unsafe instance
-        // without debug library.
+        #[cfg(feature = "observo")]
+        let lua = lext::new_rt().map_err(|e| format!("Failed to create Lua runtime: {}", e))?;
+        #[cfg(not(feature = "observo"))]
         let lua = unsafe {
+            // In order to support loading C modules in Lua, we need to create unsafe instance
+            // without debug library.
             mlua::Lua::unsafe_new_with(mlua::StdLib::ALL_SAFE, mlua::LuaOptions::default())
         };
 

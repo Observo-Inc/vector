@@ -1,0 +1,29 @@
+#This file is NOT part of the open-source components licensed under the Mozilla Public License, v. 2.0 (MPL-2.0).
+#Proprietary and Confidential – © 2025 Observo Inc.
+#Unauthorized copying, modification, distribution, or disclosure of this file, via any medium, is strictly prohibited.
+#This file is distributed separately and is not subject to the terms of the MPL-2.0.
+[package]
+name = "lext"
+version = "0.1.0"
+authors = ["Observo <observo-all@observo.ai>"]
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+bstr = { version = "1.0", features = ["std"], default-features = false }
+data-encoding = { version =  "2.9.0" }
+hmac = { version = "0.12.1" }
+mlua = { version = "0.10.2", default-features = false, features = ["lua54", "send", "vendored", "macros"]}
+mlua-json = "1.0.0"
+sha1 = { version = "0.10.6" }
+sha2 ={ version =  "0.10.9" }
+tracing.workspace = true
+urlencoding = { version = "2.1.3", default-features = false }
+
+[dev-dependencies]
+tracing-test = { version = "0.2.5", features = [ "no-env-filter" ] }
+tokio = { version = "1.43.0", features = ["test-util"] }
+vector-common = { path = "../../vector-common", default-features = false, features = ["test"] }

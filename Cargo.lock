@@ -6167,6 +6167,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "lext"
+version = "0.1.0"
+dependencies = [
+ "bstr 1.11.0",
+ "data-encoding",
+ "hmac",
+ "mlua",
+ "mlua-json",
+ "sha1",
+ "sha2",
+ "tokio",
+ "tracing 0.1.41",
+ "tracing-test",
+ "urlencoding",
+ "vector-common",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.175"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6384,10 +6402,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures 0.3.31",
+ "lext",
  "lv3",
  "metrics",
  "mlua",
- "mlua-json",
  "serde",
  "similar-asserts",
  "snafu 0.7.5",
@@ -10034,15 +10052,14 @@ dependencies = [
  "chkpts",
  "chrono",
  "dashmap 5.5.3",
- "data-encoding",
  "futures 0.3.31",
  "futures-util",
- "hmac",
  "http 0.2.9",
  "hyper 0.14.28",
  "inventory",
  "itertools 0.14.0",
  "keyed_priority_queue",
+ "lext",
  "metrics",
  "mlua",
  "mlua-json",
@@ -10062,8 +10079,6 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "serde_with 3.12.0",
- "sha1",
- "sha2",
  "smallvec",
  "snafu 0.7.5",
  "stream-cancel",
@@ -10077,7 +10092,6 @@ dependencies = [
  "tracing 0.1.41",
  "tracing-test",
  "url",
- "urlencoding",
  "uuid",
  "vector-common",
  "vector-config",
@@ -12570,6 +12584,7 @@ dependencies = [
  "k8s-openapi 0.22.0",
  "kube",
  "lapin",
+ "lext",
  "libc",
  "listenfd",
  "loki-logproto",
@@ -13065,7 +13080,7 @@ checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
 [[package]]
 name = "vrl"
 version = "0.21.0"
-source = "git+https://github.com/Observo-Inc/vrl.git?rev=7895d7333de5fda3c88c4e582e6c2f6af0302c03#7895d7333de5fda3c88c4e582e6c2f6af0302c03"
+source = "git+https://github.com/Observo-Inc/vrl.git?rev=31a47f93c86e5aec216debde3c93134ab3ca36be#31a47f93c86e5aec216debde3c93134ab3ca36be"
 dependencies = [
  "aes",
  "aes-siv",

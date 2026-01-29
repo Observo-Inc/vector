@@ -14,7 +14,7 @@ else
     export OPERATING_SYSTEM := $(shell uname)  # same as "uname -s"
     export RUST_TARGET ?= "x86_64-unknown-linux-gnu"
     export FEATURES ?= default
-	export EXCLUDE_WORKSPACES ?= --exclude sauth --exclude scol --exclude chkpts --exclude lv3 --exclude stcp --exclude obvrl --exclude gcs --exclude azs --exclude ssa --exclude wef
+	export EXCLUDE_WORKSPACES ?= --exclude sauth --exclude scol --exclude chkpts --exclude lv3 --exclude stcp --exclude obvrl --exclude gcs --exclude azs --exclude ssa --exclude wef --exclude lext
 	ifneq ($(findstring observo,$(FEATURES)),)
 		override EXCLUDE_WORKSPACES =
 	endif

@@ -104,6 +104,7 @@ members = [
   "lib/codecs",
   "lib/observo/azs",
   "lib/observo/chkpts",
+  "lib/observo/lext",
   "lib/observo/scol",
   "lib/observo/sauth",
   "lib/observo/lv3",
@@ -225,6 +226,7 @@ wasserglas.workspace = true
 # Internal libs
 azs = { path = "lib/observo/azs", optional = true }
 scol = { path = "lib/observo/scol", optional = true }
+lext = { path = "lib/observo/lext", optional = true }
 lv3 = { path = "lib/observo/lv3", optional = true }
 ssa = { path = "lib/observo/ssa", optional = true }
 chkpts = { path = "lib/observo/chkpts", optional = true }
@@ -739,7 +741,7 @@ transforms-aws_ec2_metadata = ["dep:arc-swap"]
 transforms-dedupe = ["transforms-impl-dedupe"]
 transforms-filter = []
 transforms-log_to_metric = []
-transforms-lua = ["dep:mlua", "vector-lib/lua", "dep:mlua-json"]
+transforms-lua = ["dep:mlua", "vector-lib/lua"]
 transforms-metric_to_log = []
 transforms-reduce = ["transforms-impl-reduce"]
 transforms-remap = []
@@ -986,11 +988,13 @@ shutdown-tests = ["api", "sinks-blackhole", "sinks-console", "sinks-prometheus",
 cli-tests = ["sinks-blackhole", "sinks-socket", "sources-demo_logs", "sources-file"]
 test-utils = []
 
+observo-lext = ["dep:lext"]
 observo-chkpts = ["dep:chkpts"]
 observo-lv3 = ["dep:lv3", "dep:mlua", "dep:mlua-json"]
 observo-vrl = ["vector-vrl-functions/observo"]
 observo-ssa = ["dep:ssa"]
 observo = [
+  "observo-lext",
   "sources-scol",
   "vector-lib/observo",
   "observo-lv3",
