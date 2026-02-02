@@ -112,9 +112,9 @@ struct LuaEvent {
 
 impl Lua {
     pub fn new(source: String, search_dirs: Vec<String>) -> crate::Result<Self> {
-        #[cfg(feature = "observo")]
+        #[cfg(feature = "observo-lext")]
         let lua = lext::new_rt().map_err(|e| format!("Failed to create Lua runtime: {}", e))?;
-        #[cfg(not(feature = "observo"))]
+        #[cfg(not(feature = "observo-lext"))]
         let lua = unsafe {
             // In order to support loading C modules in Lua, we need to create unsafe instance
             // without debug library.
@@ -602,5 +602,45 @@ mod tests {
 
     fn source_id() -> Arc<ComponentKey> {
         Arc::new(ComponentKey::from(test_util::random_string(16)))
+    }
+
+    #[test]
+    fn test_uses_sandboxed_os_when_lext_enabled() {
+        crate::test_util::trace_init();
+
+        let lua_code = r#"
+            local status, err = pcall(function()
+                os.execute('echo test')
+            end)
+            if status then
+                event["result"] = "os.execute succeeded"
+            else
+                event["result"] = "os.execute is nil"
+            end
+        "#;
+
+        #[cfg(feature = "observo-lext")]
+        {
+            // With lext enabled, os.execute should be nil
+            let mut transform = Lua::new(lua_code.to_string(), vec![]).unwrap();
+
+            let output = transform.transform_one(LogEvent::default().into()).unwrap();
+            assert_eq!(
+                output.as_log().get("result").unwrap().to_string_lossy(),
+                "os.execute is nil"
+            );
+        }
+
+        #[cfg(not(feature = "observo-lext"))]
+        {
+            // Without lext, os.execute should work
+            let mut transform = Lua::new(lua_code.to_string(), vec![]).unwrap();
+
+            let output = transform.transform_one(LogEvent::default().into()).unwrap();
+            assert_eq!(
+                output.as_log().get("result").unwrap().to_string_lossy(),
+                "os.execute succeeded"
+            );
+        }
     }
 }

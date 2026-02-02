@@ -206,9 +206,9 @@ fn make_registry_value(lua: &mlua::Lua, source: &str) -> mlua::Result<mlua::Regi
 
 impl Lua {
     pub fn new(config: &LuaConfig, key: ComponentKey) -> crate::Result<Self> {
-        #[cfg(feature = "observo")]
+        #[cfg(feature = "observo-lext")]
         let lua = lext::new_rt().map_err(|e| format!("Failed to create Lua runtime: {}", e))?;
-        #[cfg(not(feature = "observo"))]
+        #[cfg(not(feature = "observo-lext"))]
         let lua = unsafe {
             // In order to support loading C modules in Lua, we need to create unsafe instance
             // without debug library.
@@ -984,5 +984,72 @@ mod tests {
             },
         )
         .await;
+    }
+
+    #[test]
+    fn test_uses_sandboxed_os_when_lext_enabled() {
+        test_util::trace_init();
+
+        let config_template = |result_success: &str, result_fail: &str| -> String {
+            format!(
+                r#"
+                hooks.process = """function (event, emit)
+                    local status, err = pcall(function()
+                        os.execute('echo test')
+                    end)
+                    if status then
+                        event.log.result = "{}"
+                    else
+                        event.log.result = "{}"
+                    end
+                    emit(event)
+                end
+                """
+                "#,
+                result_success, result_fail
+            )
+        };
+
+        let lua_config = config_template("os.execute succeeded", "os.execute is nil");
+
+        #[cfg(feature = "observo-lext")]
+        {
+            // With lext enabled, os.execute should be nil
+            let mut transform = from_config(&lua_config).unwrap();
+
+            let output = transform
+                .process_single(LogEvent::default().into())
+                .expect("Failed to process event")
+                .expect("Expected an event");
+
+            if let Event::Log(log_evt) = output {
+                assert_eq!(
+                    log_evt.get("result").unwrap().to_string_lossy(),
+                    "os.execute is nil"
+                );
+            } else {
+                panic!("Expected a Log event");
+            }
+        }
+
+        #[cfg(not(feature = "observo-lext"))]
+        {
+            // Without lext, os.execute should work
+            let mut transform = from_config(&lua_config).unwrap();
+
+            let output = transform
+                .process_single(LogEvent::default().into())
+                .expect("Failed to process event")
+                .expect("Expected an event");
+
+            if let Event::Log(log_evt) = output {
+                assert_eq!(
+                    log_evt.get("result").unwrap().to_string_lossy(),
+                    "os.execute succeeded"
+                );
+            } else {
+                panic!("Expected a Log event");
+            }
+        }
     }
 }
