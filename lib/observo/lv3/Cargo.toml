@@ -21,7 +21,7 @@ snafu.workspace = true
 wasserglas.workspace = true
 serde.workspace = true
 tracing.workspace = true
-mlua-json = { version = "1.0.0" }
+lext = { path = "../lext" }
 futures = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["test-util"], optional = true }
 similar-asserts = { version = "1.6.0", optional = true }
