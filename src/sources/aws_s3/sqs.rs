@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
 use std::{future::ready, num::NonZeroUsize, panic, sync::Arc, sync::LazyLock};
 use std::time::Duration;
@@ -252,7 +252,7 @@ pub struct State {
     endpoint: Option<String>,
     proxy: ProxyConfig,
     tls_options: Option<TlsConfig>,
-    s3_client_cache: RwLock<HashMap<String, S3Client>>,
+    s3_client_cache: RwLock<BTreeMap<String, S3Client>>,
 
     multiline: Option<line_agg::Config>,
     compression: super::Compression,
@@ -318,7 +318,7 @@ impl Ingestor {
                 messages: config.max_number_of_messages,
             });
         }
-        let s3_client_cache = RwLock::new(HashMap::new());
+        let s3_client_cache = RwLock::new(BTreeMap::new());
 
         let state = Arc::new(State {
             region,
