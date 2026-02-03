@@ -379,8 +379,9 @@ mod integration_tests {
         config::{ProxyConfig, SourceConfig, SourceContext},
         event::EventStatus::{self, *},
         line_agg,
+        common::s3::S3ClientBuilder,
         sources::{
-            aws_s3::{sqs::S3Event, S3ClientBuilder},
+            aws_s3::sqs::S3Event,
             util::MultilineConfig,
         },
         test_util::{
