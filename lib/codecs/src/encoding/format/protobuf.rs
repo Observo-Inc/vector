@@ -12,7 +12,7 @@ use vector_core::{
 
 /// Config used to build a `ProtobufSerializer`.
 #[configurable_component]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ProtobufSerializerConfig {
     /// Options for the Protobuf serializer.
     pub protobuf: ProtobufSerializerOptions,
@@ -43,7 +43,7 @@ impl ProtobufSerializerConfig {
 
 /// Protobuf serializer options.
 #[configurable_component]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ProtobufSerializerOptions {
     /// The path to the protobuf descriptor set file.
     ///

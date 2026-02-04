@@ -7,7 +7,7 @@ use crate::MetricTagValues;
 
 /// Config used to build a `JsonSerializer`.
 #[configurable_component]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct JsonSerializerConfig {
     /// Controls how metric tag values are encoded.
     ///
@@ -23,7 +23,7 @@ pub struct JsonSerializerConfig {
 
 /// Options for the JsonSerializer.
 #[configurable_component]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct JsonSerializerOptions {
     /// Whether to use pretty JSON formatting.
     #[serde(default)]

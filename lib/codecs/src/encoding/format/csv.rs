@@ -37,7 +37,7 @@ pub enum QuoteStyle {
 
 /// Config used to build a `CsvSerializer`.
 #[configurable_component]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CsvSerializerConfig {
     /// The CSV Serializer Options.
     pub csv: CsvSerializerOptions,
@@ -73,7 +73,7 @@ impl CsvSerializerConfig {
 
 /// Config used to build a `CsvSerializer`.
 #[configurable_component]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CsvSerializerOptions {
     /// The field delimiter to use when writing CSV.
     #[configurable(metadata(docs::type_override = "ascii_char"))]

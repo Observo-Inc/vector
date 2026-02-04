@@ -7,7 +7,7 @@ use vector_config::configurable_component;
 
 /// Encoding configuration.
 #[configurable_component]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[configurable(description = "Configures how events are encoded into raw bytes.")]
 pub struct EncodingConfig {
     /// Encoding configuration.
@@ -58,7 +58,7 @@ where
 
 /// Encoding configuration.
 #[configurable_component]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct EncodingConfigWithFraming {
     /// Framing configuration.

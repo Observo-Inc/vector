@@ -212,6 +212,7 @@ h2 = { version = "0.4.7", default-features = false }
 typetag = { version = "0.2.18", default-features = false }
 async-trait = { version = "0.1.83", default-features = false }
 snap = { version = "1.1.1", default-features = false }
+hex = { version = "0.4.3", default-features = false, features = ["serde"] }
 
 [dependencies]
 pin-project.workspace = true
@@ -340,7 +341,7 @@ ratatui = { version = "0.29.0", optional = true, default-features = false, featu
 
 # Opentelemetry
 
-hex = { version = "0.4.3", default-features = false, optional = true }
+hex.workspace = true
 
 # GreptimeDB
 greptimedb-ingester = { git = "https://github.com/GreptimeTeam/greptimedb-ingester-rust", rev = "2e6b0c5eb6a5e7549c3100e4d356b07d15cce66d", optional = true }
@@ -678,7 +679,7 @@ sources-stcp = ["dep:stcp", "sources-utils-net-tcp"]
 sources-mongodb_metrics = ["dep:mongodb"]
 sources-nats = ["dep:async-nats", "dep:nkeys"]
 sources-nginx_metrics = ["dep:nom"]
-sources-opentelemetry = ["dep:hex", "vector-lib/opentelemetry", "dep:prost", "dep:prost-types", "sources-http_server", "sources-utils-http", "sources-utils-http-headers", "sources-vector"]
+sources-opentelemetry = ["vector-lib/opentelemetry", "dep:prost", "dep:prost-types", "sources-http_server", "sources-utils-http", "sources-utils-http-headers", "sources-vector"]
 sources-postgresql_metrics = ["dep:postgres-openssl", "dep:tokio-postgres"]
 sources-prometheus = ["sources-prometheus-scrape", "sources-prometheus-remote-write", "sources-prometheus-pushgateway"]
 sources-prometheus-scrape = ["sinks-prometheus", "sources-utils-http-client", "vector-lib/prometheus"]

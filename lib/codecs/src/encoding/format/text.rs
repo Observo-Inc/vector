@@ -8,7 +8,7 @@ use crate::MetricTagValues;
 
 /// Config used to build a `TextSerializer`.
 #[configurable_component]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct TextSerializerConfig {
     /// Controls how metric tag values are encoded.
     ///
