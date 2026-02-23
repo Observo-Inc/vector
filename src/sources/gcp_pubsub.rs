@@ -5,6 +5,7 @@ use std::{error::Error as _, future::Future, pin::Pin, task::Context, task::Poll
 use chrono::DateTime;
 use derivative::Derivative;
 use futures::{stream, stream::FuturesUnordered, FutureExt, Stream, StreamExt, TryFutureExt};
+use tracing::Instrument;
 use http::uri::{InvalidUri, Scheme, Uri};
 use serde_with::serde_as;
 use snafu::{ResultExt, Snafu};
@@ -437,7 +438,7 @@ impl PubsubSource {
         // when it has an idle interval it will mark itself as not
         // busy.
         let busy_flag = Arc::new(AtomicBool::new(false));
-        let task = tokio::spawn(self.clone().run(Arc::clone(&busy_flag)));
+        let task = tokio::spawn(self.clone().run(Arc::clone(&busy_flag)).in_current_span());
         tasks.push(Task { task, busy_flag });
     }
 
