@@ -10,7 +10,7 @@ use netflow_parser::variable_versions::ipfix::IPFix;
 use netflow_parser::variable_versions::v9::V9;
 use netflow_parser::static_versions::v5::V5;
 use netflow_parser::static_versions::v7::V7;
-use netflow_parser::{NetflowPacket, NetflowParser};
+use netflow_parser::{NetflowPacket, NetflowParseError, NetflowParser};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio_util::codec::{Decoder, LinesCodecError};
@@ -219,16 +219,21 @@ impl Decoder for NetflowDecoder {
         let mut parser = self.parser.lock().expect("Failed to lock NetflowParser");
         let parse_results = parser.parse_bytes(src.as_mut());
 
-        let mut all_done = true;
+        let mut had_fatal_error = false;
+        let mut is_incomplete = false;
         for result in parse_results {
             match result {
                 NetflowPacket::Error(err) => {
+                    if matches!(err.error, NetflowParseError::Incomplete(_) | NetflowParseError::Partial(_)) {
+                        is_incomplete = true;
+                        continue;
+                    }
                     warn!(
                         message = "Error parsing NetFlow packet",
                         error = ?err,
                         internal_log_rate_limit = true
                     );
-                    all_done = false
+                    had_fatal_error = true;
                 }
                 NetflowPacket::V9(v9pkt) => {
                     for flowset in &v9pkt.flowsets {
@@ -403,12 +408,20 @@ impl Decoder for NetflowDecoder {
             }
         }
 
+        if is_incomplete {
+            return Ok(None);
+        }
+
         if packets.is_empty() {
-            Ok(None) // Not enough data for a complete packet yet
-        } else {
-            if all_done {
+            if had_fatal_error {
                 src.clear();
+                return Err(BoxedFramingError::from(LinesCodecError::Io(
+                    io::Error::new(io::ErrorKind::InvalidData, "Failed to parse NetFlow packet"),
+                )));
             }
+            Ok(None)
+        } else {
+            src.clear();
             Ok(Some(Bytes::from(json!(packets).to_string())))
         }
     }
