@@ -4,10 +4,13 @@ use std::sync::{Arc, Mutex};
 
 use byteorder::{ByteOrder, NetworkEndian};
 use bytes::BytesMut;
-use bytes::{Buf, Bytes};
-use netflow_parser::variable_versions::common::FieldValue;
+use bytes::Bytes;
+use netflow_parser::variable_versions::data_number::FieldValue;
+use netflow_parser::variable_versions::ipfix::IPFix;
 use netflow_parser::variable_versions::v9::V9;
-use netflow_parser::{NetflowPacketResult, NetflowParser};
+use netflow_parser::static_versions::v5::V5;
+use netflow_parser::static_versions::v7::V7;
+use netflow_parser::{NetflowPacket, NetflowParseError, NetflowParser};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio_util::codec::{Decoder, LinesCodecError};
@@ -85,8 +88,7 @@ impl NetflowDecoder {
     pub fn new_with_max_length(max_length: usize) -> Self {
         Self {
             max_length,
-            parser: Arc::new(Mutex::new(NetflowParser::default())), // Initialize with Arc
-                                                                    //buffer: Default::default(),
+            parser: Arc::new(Mutex::new(NetflowParser::default())),
         }
     }
 
@@ -95,7 +97,7 @@ impl NetflowDecoder {
         self.max_length
     }
 
-    fn insert_header_fields(v9pkt: V9) -> BTreeMap<KeyString, Value> {
+    fn insert_v9_header_fields(v9pkt: &V9) -> BTreeMap<KeyString, Value> {
         let mut pkt: BTreeMap<KeyString, Value> = BTreeMap::new();
         pkt.insert(
             KeyString::from("version"),
@@ -119,9 +121,60 @@ impl NetflowDecoder {
         );
         pkt
     }
+
+    fn insert_v5_header_fields(v5pkt: &V5) -> BTreeMap<KeyString, Value> {
+        let mut pkt: BTreeMap<KeyString, Value> = BTreeMap::new();
+        pkt.insert(KeyString::from("version"), Value::from(v5pkt.header.version));
+        pkt.insert(KeyString::from("count"), Value::from(v5pkt.header.count));
+        pkt.insert(KeyString::from("sys_up_time"), Value::from(v5pkt.header.sys_up_time));
+        pkt.insert(KeyString::from("unix_secs"), Value::from(v5pkt.header.unix_secs));
+        pkt.insert(KeyString::from("unix_nsecs"), Value::from(v5pkt.header.unix_nsecs));
+        pkt.insert(KeyString::from("flow_sequence"), Value::from(v5pkt.header.flow_sequence));
+        pkt.insert(KeyString::from("engine_type"), Value::from(v5pkt.header.engine_type));
+        pkt.insert(KeyString::from("engine_id"), Value::from(v5pkt.header.engine_id));
+        pkt.insert(KeyString::from("sampling_interval"), Value::from(v5pkt.header.sampling_interval));
+        pkt
+    }
+
+    fn insert_v7_header_fields(v7pkt: &V7) -> BTreeMap<KeyString, Value> {
+        let mut pkt: BTreeMap<KeyString, Value> = BTreeMap::new();
+        pkt.insert(KeyString::from("version"), Value::from(v7pkt.header.version));
+        pkt.insert(KeyString::from("count"), Value::from(v7pkt.header.count));
+        pkt.insert(KeyString::from("sys_up_time"), Value::from(v7pkt.header.sys_up_time));
+        pkt.insert(KeyString::from("unix_secs"), Value::from(v7pkt.header.unix_secs));
+        pkt.insert(KeyString::from("unix_nsecs"), Value::from(v7pkt.header.unix_nsecs));
+        pkt.insert(KeyString::from("flow_sequence"), Value::from(v7pkt.header.flow_sequence));
+        pkt.insert(KeyString::from("reserved"), Value::from(v7pkt.header.reserved));
+        pkt
+    }
+
+    fn insert_ipfix_header_fields(ipfix: &IPFix) -> BTreeMap<KeyString, Value> {
+        let mut pkt: BTreeMap<KeyString, Value> = BTreeMap::new();
+        pkt.insert(KeyString::from("version"), Value::from(ipfix.header.version));
+        pkt.insert(KeyString::from("length"), Value::from(ipfix.header.length));
+        pkt.insert(KeyString::from("export_time"), Value::from(ipfix.header.export_time));
+        pkt.insert(KeyString::from("sequence_number"), Value::from(ipfix.header.sequence_number));
+        pkt.insert(KeyString::from("observation_domain_id"), Value::from(ipfix.header.observation_domain_id));
+        pkt
+    }
+
+    fn insert_data_fields(
+        pkt: &mut BTreeMap<KeyString, Value>,
+        data_fields: BTreeMap<usize, (impl Serialize, FieldValue)>,
+    ) {
+        for (_, (field_name, field_value)) in data_fields {
+            pkt.insert(
+                serialize(&field_name, |k| KeyString::from(k)),
+                FormattedFieldValue(field_value).stringify(),
+            );
+        }
+    }
 }
 
+pub const NETFLOW_V5_VERSION: u16 = 5;
+pub const NETFLOW_V7_VERSION: u16 = 7;
 pub const NETFLOW_V9_VERSION: u16 = 9;
+pub const NETFLOW_IPFIX_VERSION: u16 = 10;
 impl Decoder for NetflowDecoder {
     type Item = Bytes; // Output is json as bytes
     type Error = BoxedFramingError; // Or a custom error type
@@ -134,14 +187,18 @@ impl Decoder for NetflowDecoder {
 
         let version: u16 = NetworkEndian::read_u16(&src[0..2]);
 
-        if version != NETFLOW_V9_VERSION {
+        if !matches!(version, NETFLOW_V5_VERSION | NETFLOW_V7_VERSION | NETFLOW_V9_VERSION | NETFLOW_IPFIX_VERSION) {
             src.clear();
             warn!(
-                message = "Non v9 packet found",
+                message = "Unsupported NetFlow version",
+                version = version,
                 internal_log_rate_limit = true
             );
             return Err(BoxedFramingError::from(LinesCodecError::Io(
-                io::Error::new(io::ErrorKind::Other, "Non v9 packet discarding buf"),
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Unsupported NetFlow version {}, discarding buf", version),
+                ),
             )));
         }
 
@@ -162,37 +219,43 @@ impl Decoder for NetflowDecoder {
         let mut parser = self.parser.lock().expect("Failed to lock NetflowParser");
         let parse_results = parser.parse_bytes(src.as_mut());
 
-        let mut all_done = true;
+        let mut had_fatal_error = false;
+        let mut is_incomplete = false;
         for result in parse_results {
             match result {
-                NetflowPacketResult::Error(err) => {
+                NetflowPacket::Error(err) => {
+                    if matches!(err.error, NetflowParseError::Incomplete(_) | NetflowParseError::Partial(_)) {
+                        is_incomplete = true;
+                        continue;
+                    }
                     warn!(
                         message = "Error parsing NetFlow packet",
+                        error = ?err,
                         internal_log_rate_limit = true
                     );
-                    src.advance(src.len() - err.remaining.len());
-                    //Can be possible corrupt message which we handle in next decode call
-                    all_done = false
+                    had_fatal_error = true;
                 }
-                NetflowPacketResult::V9(v9pkt) => {
-                    for flowset in &v9pkt.flowsets {
-                        if let Some(templates) = &flowset.body.templates {
+                NetflowPacket::V9(v9pkt) => {
+                    let base_pkt = Self::insert_v9_header_fields(&v9pkt);
+                    for flowset in v9pkt.flowsets {
+                        let flowset_id = flowset.header.flowset_id;
+                        if let Some(templates) = flowset.body.templates {
                             for tmpl in templates {
-                                let mut pkt = Self::insert_header_fields(v9pkt.clone());
+                                let mut pkt = base_pkt.clone();
                                 let mut fields: Vec<BTreeMap<KeyString, Value>> = Vec::new();
-                                for tmpl in &tmpl.fields {
+                                for f in tmpl.fields {
                                     let mut field: BTreeMap<KeyString, Value> = BTreeMap::new();
                                     field.insert(
                                         KeyString::from("field_type_number"),
-                                        Value::from(tmpl.field_type_number),
+                                        Value::from(f.field_type_number),
                                     );
                                     field.insert(
                                         KeyString::from("field_length"),
-                                        Value::from(tmpl.field_length),
+                                        Value::from(f.field_length),
                                     );
                                     field.insert(
                                         KeyString::from("field_type"),
-                                        serialize(&tmpl.field_type, |v| Value::from(v)),
+                                        serialize(&f.field_type, |v| Value::from(v)),
                                     );
                                     fields.push(field)
                                 }
@@ -203,66 +266,193 @@ impl Decoder for NetflowDecoder {
                                 packets.push(pkt);
                             }
                         }
-                        if let Some(data) = &flowset.body.data {
-                            if flowset.header.flow_set_id > 255 {
-                                for pkts in &data.data_fields {
-                                    let mut pkt = Self::insert_header_fields(v9pkt.clone());
-                                    for k in pkts.keys() {
-                                        if let Some((field_name, field_value)) = pkts.get(k) {
-                                            let value = field_value.clone();
-                                            pkt.insert(
-                                                serialize(&field_name, |k| KeyString::from(k)),
-                                                FormattedV9FieldValue(value).stringify(),
-                                            );
-                                        }
-                                    }
+                        if let Some(data) = flowset.body.data {
+                            if flowset_id > 255 {
+                                for record in data.data_fields {
+                                    let mut pkt = base_pkt.clone();
+                                    Self::insert_data_fields(&mut pkt, record);
                                     pkt.insert(KeyString::from("template_type"), Value::from("data"));
                                     packets.push(pkt);
                                 }
                             }
                         }
-                        if let Some(_data) = &flowset.body.options_data {
-                            let mut pkt = Self::insert_header_fields(v9pkt.clone());
+                        if flowset.body.options_data.is_some() {
+                            let mut pkt = base_pkt.clone();
                             pkt.insert(KeyString::from("template_type"), Value::from("options_data"));
                             packets.push(pkt);
                         }
-                        if let Some(_data) = &flowset.body.options_templates {
-                            let mut pkt = Self::insert_header_fields(v9pkt.clone());
+                        if flowset.body.options_templates.is_some() {
+                            let mut pkt = base_pkt.clone();
                             pkt.insert(KeyString::from("template_type"), Value::from("options_templates"));
                             packets.push(pkt);
                         }
-                        if let Some(_data) = &flowset.body.unparsed_data {
-                            let mut pkt = Self::insert_header_fields(v9pkt.clone());
+                        if flowset.body.unparsed_data.is_some() {
+                            let mut pkt = base_pkt.clone();
                             pkt.insert(KeyString::from("template_type"), Value::from("unparsed_data"));
                             packets.push(pkt);
                         }
                     }
                 }
-                /*
-                NetflowPacketResult::V7(v7pkt) => {}
-                NetflowPacketResult::V5(v5pkt) => {}
-                NetflowPacketResult::IPFix(v5pkt) => {}
-                */
-                _ => {}
+                NetflowPacket::V5(v5pkt) => {
+                    let base_pkt = Self::insert_v5_header_fields(&v5pkt);
+                    for flowset in v5pkt.flowsets {
+                        let mut pkt = base_pkt.clone();
+                        pkt.insert(KeyString::from("src_addr"), Value::from(flowset.src_addr.to_string()));
+                        pkt.insert(KeyString::from("dst_addr"), Value::from(flowset.dst_addr.to_string()));
+                        pkt.insert(KeyString::from("next_hop"), Value::from(flowset.next_hop.to_string()));
+                        pkt.insert(KeyString::from("input"), Value::from(flowset.input));
+                        pkt.insert(KeyString::from("output"), Value::from(flowset.output));
+                        pkt.insert(KeyString::from("d_pkts"), Value::from(flowset.d_pkts));
+                        pkt.insert(KeyString::from("d_octets"), Value::from(flowset.d_octets));
+                        pkt.insert(KeyString::from("first"), Value::from(flowset.first));
+                        pkt.insert(KeyString::from("last"), Value::from(flowset.last));
+                        pkt.insert(KeyString::from("src_port"), Value::from(flowset.src_port));
+                        pkt.insert(KeyString::from("dst_port"), Value::from(flowset.dst_port));
+                        pkt.insert(KeyString::from("tcp_flags"), Value::from(flowset.tcp_flags));
+                        pkt.insert(KeyString::from("protocol_number"), Value::from(flowset.protocol_number));
+                        pkt.insert(KeyString::from("protocol_type"), serialize(&flowset.protocol_type, |v| Value::from(v)));
+                        pkt.insert(KeyString::from("tos"), Value::from(flowset.tos));
+                        pkt.insert(KeyString::from("src_as"), Value::from(flowset.src_as));
+                        pkt.insert(KeyString::from("dst_as"), Value::from(flowset.dst_as));
+                        pkt.insert(KeyString::from("src_mask"), Value::from(flowset.src_mask));
+                        pkt.insert(KeyString::from("dst_mask"), Value::from(flowset.dst_mask));
+                        pkt.insert(KeyString::from("template_type"), Value::from("data"));
+                        packets.push(pkt);
+                    }
+                }
+                NetflowPacket::V7(v7pkt) => {
+                    let base_pkt = Self::insert_v7_header_fields(&v7pkt);
+                    for flowset in v7pkt.flowsets {
+                        let mut pkt = base_pkt.clone();
+                        pkt.insert(KeyString::from("src_addr"), Value::from(flowset.src_addr.to_string()));
+                        pkt.insert(KeyString::from("dst_addr"), Value::from(flowset.dst_addr.to_string()));
+                        pkt.insert(KeyString::from("next_hop"), Value::from(flowset.next_hop.to_string()));
+                        pkt.insert(KeyString::from("input"), Value::from(flowset.input));
+                        pkt.insert(KeyString::from("output"), Value::from(flowset.output));
+                        pkt.insert(KeyString::from("d_pkts"), Value::from(flowset.d_pkts));
+                        pkt.insert(KeyString::from("d_octets"), Value::from(flowset.d_octets));
+                        pkt.insert(KeyString::from("first"), Value::from(flowset.first));
+                        pkt.insert(KeyString::from("last"), Value::from(flowset.last));
+                        pkt.insert(KeyString::from("src_port"), Value::from(flowset.src_port));
+                        pkt.insert(KeyString::from("dst_port"), Value::from(flowset.dst_port));
+                        pkt.insert(KeyString::from("flags_fields_valid"), Value::from(flowset.flags_fields_valid));
+                        pkt.insert(KeyString::from("tcp_flags"), Value::from(flowset.tcp_flags));
+                        pkt.insert(KeyString::from("protocol_number"), Value::from(flowset.protocol_number));
+                        pkt.insert(KeyString::from("protocol_type"), serialize(&flowset.protocol_type, |v| Value::from(v)));
+                        pkt.insert(KeyString::from("tos"), Value::from(flowset.tos));
+                        pkt.insert(KeyString::from("src_as"), Value::from(flowset.src_as));
+                        pkt.insert(KeyString::from("dst_as"), Value::from(flowset.dst_as));
+                        pkt.insert(KeyString::from("src_mask"), Value::from(flowset.src_mask));
+                        pkt.insert(KeyString::from("dst_mask"), Value::from(flowset.dst_mask));
+                        pkt.insert(KeyString::from("flags_fields_invalid"), Value::from(flowset.flags_fields_invalid));
+                        pkt.insert(KeyString::from("router_src"), Value::from(flowset.router_src.to_string()));
+                        pkt.insert(KeyString::from("template_type"), Value::from("data"));
+                        packets.push(pkt);
+                    }
+                }
+                NetflowPacket::IPFix(ipfix_pkt) => {
+                    let base_pkt = Self::insert_ipfix_header_fields(&ipfix_pkt);
+                    for flowset in ipfix_pkt.flowsets {
+                        if let Some(template) = flowset.body.templates {
+                            let mut pkt = base_pkt.clone();
+                            let mut fields: Vec<BTreeMap<KeyString, Value>> = Vec::new();
+                            for tmpl_field in template.fields {
+                                let mut field: BTreeMap<KeyString, Value> = BTreeMap::new();
+                                field.insert(
+                                    KeyString::from("field_type_number"),
+                                    Value::from(tmpl_field.field_type_number),
+                                );
+                                field.insert(
+                                    KeyString::from("field_length"),
+                                    Value::from(tmpl_field.field_length),
+                                );
+                                field.insert(
+                                    KeyString::from("field_type"),
+                                    serialize(&tmpl_field.field_type, |v| Value::from(v)),
+                                );
+                                if let Some(enterprise_number) = tmpl_field.enterprise_number {
+                                    field.insert(
+                                        KeyString::from("enterprise_number"),
+                                        Value::from(enterprise_number),
+                                    );
+                                }
+                                fields.push(field);
+                            }
+                            pkt.insert(KeyString::from("template_id"), Value::from(template.template_id));
+                            pkt.insert(KeyString::from("template_field_count"), Value::from(template.field_count));
+                            pkt.insert(KeyString::from("fields"), Value::from(fields));
+                            pkt.insert(KeyString::from("template_type"), Value::from("template"));
+                            packets.push(pkt);
+                        }
+                        if let Some(options_template) = flowset.body.options_templates {
+                            let mut pkt = base_pkt.clone();
+                            pkt.insert(KeyString::from("template_id"), Value::from(options_template.template_id));
+                            pkt.insert(KeyString::from("field_count"), Value::from(options_template.field_count));
+                            pkt.insert(KeyString::from("scope_field_count"), Value::from(options_template.scope_field_count));
+                            pkt.insert(KeyString::from("template_type"), Value::from("options_template"));
+                            packets.push(pkt);
+                        }
+                        if let Some(data) = flowset.body.data {
+                            for record in data.data_fields {
+                                let mut pkt = base_pkt.clone();
+                                Self::insert_data_fields(&mut pkt, record);
+                                pkt.insert(KeyString::from("template_type"), Value::from("data"));
+                                packets.push(pkt);
+                            }
+                        }
+                        if let Some(options_data) = flowset.body.options_data {
+                            for record in options_data.data_fields {
+                                let mut pkt = base_pkt.clone();
+                                Self::insert_data_fields(&mut pkt, record);
+                                pkt.insert(KeyString::from("template_type"), Value::from("options_data"));
+                                packets.push(pkt);
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        if all_done {
-            src.clear();
+        if is_incomplete {
+            return Ok(None);
         }
 
         if packets.is_empty() {
-            Ok(None) // Not enough data for a complete packet yet
+            if had_fatal_error {
+                src.clear();
+                return Err(BoxedFramingError::from(LinesCodecError::Io(
+                    io::Error::new(io::ErrorKind::InvalidData, "Failed to parse NetFlow packet"),
+                )));
+            }
+            Ok(None)
         } else {
+            src.clear();
             Ok(Some(Bytes::from(json!(packets).to_string())))
+        }
+    }
+
+    fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        match self.decode(src)? {
+            Some(frame) => Ok(Some(frame)),
+            None if src.is_empty() => Ok(None),
+            None => {
+                let len = src.len();
+                src.clear();
+                Err(BoxedFramingError::from(LinesCodecError::Io(
+                    io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!("Incomplete NetFlow packet: {} bytes remaining at EOF", len),
+                    ),
+                )))
+            }
         }
     }
 }
 
 #[derive(Debug)]
-struct FormattedV9FieldValue(FieldValue);
+struct FormattedFieldValue(FieldValue);
 
-impl FormattedV9FieldValue {
+impl FormattedFieldValue {
     pub fn stringify(self) -> Value {
         match self.0 {
             FieldValue::String(s) => Value::from(s),
@@ -271,24 +461,17 @@ impl FormattedV9FieldValue {
             FieldValue::Duration(d) => Value::from(d.as_secs()),
             FieldValue::Ip4Addr(ip) => Value::from(ip.to_string()),
             FieldValue::Ip6Addr(ip) => Value::from(ip.to_string()),
-            FieldValue::MacAddr(mac) => Value::from(mac.to_string()),
+            FieldValue::MacAddr(mac) => Value::from(mac),
             FieldValue::ProtocolType(proto) =>
                 serialize(&proto, |v| Value::from(v)),
             FieldValue::Vec(v) => Value::from(base64::encode(v)),
-            _ => Value::from(""),
+            FieldValue::Unknown => Value::from(""),
         }
     }
 }
 
-fn remove_quotes<'a>(s: &'a str) -> &'a str {
-    let mut trim_s = s;
-    if trim_s.starts_with('"') || trim_s.starts_with('\'') {
-        trim_s = &trim_s[1..];
-    }
-    if trim_s.ends_with('"') || trim_s.ends_with('\'') {
-        trim_s = &trim_s[..trim_s.len() - 1];
-    }
-    trim_s
+fn remove_quotes(s: &str) -> &str {
+    s.trim_matches(|c| c == '"' || c == '\'')
 }
 
 fn serialize<D, T>(f: &D, convert: fn(&str) -> T) -> T
@@ -313,7 +496,9 @@ mod tests {
         );
         let mut decoder = NetflowDecoder::new();
         let res = decoder.decode(&mut input).expect("Should not fail");
-        println!("{:?}", res.clone().unwrap());
+        if let Some(ref bytes) = res {
+            println!("{:?}", bytes);
+        }
         res
     }
 
@@ -643,5 +828,179 @@ mod tests {
         let data = "AAkACQAAsBRWFr4+AAAAAQAAAAAAAABABAAADgAIAAQADAAEABUABAAWAAQAAQAEAAIABAAKAAQADgAEAAcAAgALAAIABAABAAYAAQA8AAEABQABAAAAQAgAAA4AGwAQABwAEAAVAAQAFgAEAAEABAACAAQACgAEAA4ABAAHAAIACwACAAQAAQAGAAEAPAABAAUAAQQAAPSsECBkrBAg+AAABMEAAATAAAAATAAAAAEAAAAAAAAAAAB7AHsRAAQArBAg+KwQIGQAAATBAAAEwAAAAEwAAAABAAAAAAAAAAAAewB7EQAEAKwQIGSsECDJAAAa6gAAGukAAABMAAAAAQAAAAAAAAAAAHsAexEABACsECDJrBAgZAAAGuoAABrpAAAATAAAAAEAAAAAAAAAAAB7AHsRAAQArBAgZKwQIMoAACsaAAArGgAAAEwAAAABAAAAAAAAAAAAewB7EQAEAKwQIMqsECBkAAArGgAAKxoAAABMAAAAAQAAAAAAAAAAAHsAexEABAAIAABE/oAAAAAAAAACDCn//oM7bv8CAAAAAAAAAAAAAAAAAAEAAKAQAAALTwAAAqAAAAAHAAAAAAAAAAAAAIYAOgAGAA==";
         let res = test_data_decoder(data);
         assert_eq!(res.is_some(), true)
+    }
+
+    #[test]
+    fn test_data_decoder_netflow_v5() {
+        let data = "AAUAAwADeaNegMWGIqVasAAAAAAAAAAArBEAAqwRAAEAAAAAAAAAAAAAAAoAAANIAAAvTAAAUnYAAAgAAAABAAAAAAAAAAAArBEAAawRAAIAAAAAAAAAAAAAAAoAAANIAAAvTAAAUnYAAAAAAAABAAAAAAAAAAAArBEAAeAAAPsAAAAAAAAAAAAAAAEAAACpAADgHAAA4BwU6RTpAAARAAAAAAAAAAAA";
+        let res = test_data_decoder(data);
+        assert_eq!(res.is_some(), true);
+        let json_str = String::from_utf8(res.unwrap().to_vec()).expect("valid utf8");
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).expect("valid json");
+        let arr = parsed.as_array().expect("should be array");
+        assert_eq!(arr.len(), 3);
+        for record in arr {
+            assert_eq!(record["version"], 5);
+            assert_eq!(record["template_type"], "data");
+        }
+    }
+
+    #[test]
+    fn test_data_decoder_netflow_v7() {
+        let data = "AAcAAQAAA+hlU/EAAAAAAAAAAAEAAAAAwKgBAQoAAAHAqAH+AAEAAgAAAGQAABOIAAAB9AAAA+gwOQBQAAIGAABkAMgYGAAAwKgB/g==";
+        let res = test_data_decoder(data);
+        assert_eq!(res.is_some(), true);
+        let json_str = String::from_utf8(res.unwrap().to_vec()).expect("valid utf8");
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).expect("valid json");
+        let arr = parsed.as_array().expect("should be array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["version"], 7);
+        assert_eq!(arr[0]["template_type"], "data");
+    }
+
+    #[test]
+    fn test_data_decoder_ipfix_template() {
+        let data = "AAoAJGKgsbkAAAAIbGp+EQACABQBAAADAAgABAAMAAQABAAB";
+        let res = test_data_decoder(data);
+        assert_eq!(res.is_some(), true);
+        let json_str = String::from_utf8(res.unwrap().to_vec()).expect("valid utf8");
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).expect("valid json");
+        let arr = parsed.as_array().expect("should be array");
+        assert!(arr.len() >= 1);
+        assert_eq!(arr[0]["version"], 10);
+        assert_eq!(arr[0]["template_type"], "template");
+    }
+
+    #[test]
+    fn test_data_decoder_ipfix_template_then_data() {
+        let template_data = "AAoAJGKgsbkAAAAIbGp+EQACABQBAAADAAgABAAMAAQABAAB";
+        let data_data = "AAoAIGKxAbkAAAAJbGp+EQEAABDAqAABCgAAAQYAAAA=";
+
+        let mut decoder = NetflowDecoder::new();
+
+        let mut input1 = BytesMut::from(
+            base64::decode(template_data).expect("should decode").as_bytes(),
+        );
+        let res1 = decoder.decode(&mut input1).expect("Should not fail");
+        assert!(res1.is_some());
+        let json_str = String::from_utf8(res1.unwrap().to_vec()).expect("valid utf8");
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).expect("valid json");
+        let arr = parsed.as_array().expect("should be array");
+        assert!(arr.iter().any(|r| r["template_type"] == "template"));
+
+        let mut input2 = BytesMut::from(
+            base64::decode(data_data).expect("should decode").as_bytes(),
+        );
+        let res2 = decoder.decode(&mut input2).expect("Should not fail");
+        assert!(res2.is_some());
+        let json_str2 = String::from_utf8(res2.unwrap().to_vec()).expect("valid utf8");
+        let parsed2: serde_json::Value = serde_json::from_str(&json_str2).expect("valid json");
+        let arr2 = parsed2.as_array().expect("should be array");
+        assert!(arr2.iter().any(|r| r["template_type"] == "data"));
+    }
+
+    fn test_byte_at_a_time(decoder: &mut NetflowDecoder, packet_bytes: &[u8]) -> Vec<Bytes> {
+        let mut buf = BytesMut::new();
+        let mut results = Vec::new();
+        for (i, &b) in packet_bytes.iter().enumerate() {
+            buf.extend_from_slice(&[b]);
+            let res = decoder.decode(&mut buf);
+            match res {
+                Ok(None) => {}
+                Ok(Some(data)) => results.push(data),
+                Err(e) => panic!(
+                    "Decoder errored at byte {}/{}: {}",
+                    i + 1,
+                    packet_bytes.len(),
+                    e
+                ),
+            }
+        }
+        assert!(
+            !results.is_empty(),
+            "Decoder never returned data after feeding all {} bytes",
+            packet_bytes.len()
+        );
+        results
+    }
+
+    fn collect_records(results: &[Bytes]) -> Vec<serde_json::Value> {
+        let mut records = Vec::new();
+        for r in results {
+            let parsed: serde_json::Value = serde_json::from_slice(r).expect("valid json");
+            records.extend(parsed.as_array().unwrap().clone());
+        }
+        records
+    }
+
+    #[test]
+    fn test_byte_at_a_time_v5() {
+        let packet = base64::decode(
+            "AAUAAwADeaNegMWGIqVasAAAAAAAAAAArBEAAqwRAAEAAAAAAAAAAAAAAAoAAANIAAAvTAAAUnYAAAgAAAABAAAAAAAAAAAArBEAAawRAAIAAAAAAAAAAAAAAAoAAANIAAAvTAAAUnYAAAAAAAABAAAAAAAAAAAArBEAAeAAAPsAAAAAAAAAAAAAAAEAAACpAADgHAAA4BwU6RTpAAARAAAAAAAAAAAA",
+        ).unwrap();
+        let mut decoder = NetflowDecoder::new();
+        let results = test_byte_at_a_time(&mut decoder, &packet);
+        let all_records = collect_records(&results);
+        assert_eq!(all_records.len(), 3);
+        for r in &all_records {
+            assert_eq!(r["version"], 5);
+        }
+    }
+
+    #[test]
+    fn test_byte_at_a_time_v7() {
+        let packet = base64::decode(
+            "AAcAAQAAA+hlU/EAAAAAAAAAAAEAAAAAwKgBAQoAAAHAqAH+AAEAAgAAAGQAABOIAAAB9AAAA+gwOQBQAAIGAABkAMgYGAAAwKgB/g==",
+        ).unwrap();
+        let mut decoder = NetflowDecoder::new();
+        let results = test_byte_at_a_time(&mut decoder, &packet);
+        let all_records = collect_records(&results);
+        assert_eq!(all_records.len(), 1);
+        assert_eq!(all_records[0]["version"], 7);
+    }
+
+    #[test]
+    fn test_byte_at_a_time_v9() {
+        let packet = base64::decode(
+            "AAkAAWWdGn1YRo5sAXXKjgAACIEAAQAYAQAABAAIAAEABAAKAAQAUwBAAAA=",
+        ).unwrap();
+        let mut decoder = NetflowDecoder::new();
+        let results = test_byte_at_a_time(&mut decoder, &packet);
+        let all_records = collect_records(&results);
+        assert!(!all_records.is_empty());
+        for r in &all_records {
+            assert_eq!(r["version"], 9);
+        }
+    }
+
+    #[test]
+    fn test_byte_at_a_time_ipfix() {
+        let packet = base64::decode(
+            "AAoAJGKgsbkAAAAIbGp+EQACABQBAAADAAgABAAMAAQABAAB",
+        ).unwrap();
+        let mut decoder = NetflowDecoder::new();
+        let results = test_byte_at_a_time(&mut decoder, &packet);
+        let all_records = collect_records(&results);
+        assert!(!all_records.is_empty());
+        assert_eq!(all_records[0]["version"], 10);
+        assert_eq!(all_records[0]["template_type"], "template");
+    }
+
+    #[test]
+    fn test_byte_at_a_time_ipfix_template_then_data() {
+        let template = base64::decode(
+            "AAoAJGKgsbkAAAAIbGp+EQACABQBAAADAAgABAAMAAQABAAB",
+        ).unwrap();
+        let mut decoder = NetflowDecoder::new();
+        let tmpl_results = test_byte_at_a_time(&mut decoder, &template);
+        let tmpl_records = collect_records(&tmpl_results);
+        assert!(tmpl_records.iter().any(|r| r["template_type"] == "template"));
+
+        let data = base64::decode(
+            "AAoAIGKxAbkAAAAJbGp+EQEAABDAqAABCgAAAQYAAAA=",
+        ).unwrap();
+        let data_results = test_byte_at_a_time(&mut decoder, &data);
+        let data_records = collect_records(&data_results);
+        assert!(data_records.iter().any(|r| r["template_type"] == "data"));
     }
 }
