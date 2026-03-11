@@ -877,4 +877,139 @@ mod tests {
 
         assert_eq!(encoder.content_type(), "text/plain");
     }
+
+    #[test]
+    fn test_batch_encoder_serialization_error_emits_single_internal_event() {
+        // GELF requires 'host' and 'message'/'short_message'. An empty LogEvent
+        // will fail serialization. We verify that `component_errors_total` is
+        // emitted exactly once (not double-emitted by both codec and sink layers).
+        use crate::event::metric::MetricValue;
+        use crate::metrics::Controller;
+
+        vector_lib::metrics::init_test();
+
+        let encoding = build_batch_encoder(
+            FramingConfig::NewlineDelimited,
+            SerializerConfig::Gelf,
+        );
+
+        let events = vec![mk_log_event(&[("unrelated", "field")])]; // missing 'host'
+
+        let mut writer = Vec::new();
+        let result = encoding.encode_input(events, &mut writer);
+        assert!(result.is_err(), "GELF without required fields must error");
+
+        let controller = Controller::get().expect("no controller");
+        let metrics = controller.capture_metrics();
+
+        let error_count: f64 = metrics
+            .iter()
+            .filter(|m| {
+                m.name() == "component_errors_total"
+                    && m.tag_value("error_code").as_deref() == Some("encoder_serialize")
+            })
+            .filter_map(|m| match m.value() {
+                MetricValue::Counter { value } => Some(*value),
+                _ => None,
+            })
+            .sum();
+
+        assert_eq!(
+            error_count, 1.0,
+            "component_errors_total with error_code=encoder_serialize must be emitted exactly once"
+        );
+    }
+
+    #[test]
+    fn test_batch_encoder_all_or_nothing_on_error() {
+        // When the 2nd event fails serialization, the writer should receive 0 bytes
+        // because the BatchEncoder serializes into an internal buffer first, then writes.
+        let encoding = build_batch_encoder(
+            FramingConfig::NewlineDelimited,
+            SerializerConfig::Gelf,
+        );
+
+        // First event has required GELF fields, second does not.
+        // GELF requires 'host' and 'message' (or 'short_message').
+        let good_event = mk_log_event(&[("host", "myhost"), ("message", "hello")]);
+        let bad_event = mk_log_event(&[("unrelated", "field")]); // missing 'host'
+
+        let events = vec![good_event, bad_event];
+
+        let mut writer = Vec::new();
+        let result = encoding.encode_input(events, &mut writer);
+        assert!(result.is_err(), "batch with invalid GELF event must error");
+
+        // All-or-nothing: nothing written to the writer since the internal buffer
+        // never made it to write_all.
+        assert_eq!(
+            writer.len(),
+            0,
+            "writer must receive 0 bytes on serialization error (all-or-nothing)"
+        );
+    }
+
+    #[test]
+    fn test_batch_encoder_parquet_basic() {
+        use vector_lib::codecs::encoding::{
+            BatchSerializerConfig, ParquetSerializerConfig, ParquetSerializerOptions,
+        };
+
+        let schema = "message test { required binary name (UTF8); }";
+        let cfg = BatchEncodingConfig {
+            framing: None,
+            encoding: BatchSerializerConfig::Parquet(ParquetSerializerConfig {
+                parquet: ParquetSerializerOptions {
+                    schema: schema.to_string(),
+                    record_complete_event: None,
+                    ignore_type_mismatch_for_optional: None,
+                },
+            }),
+            transformer: Transformer::default(),
+        };
+        let encoding = {
+            let (encoder, transformer) = cfg.build().expect("build");
+            (transformer, encoder)
+        };
+
+        let events = vec![
+            mk_log_event(&[("name", "alice")]),
+            mk_log_event(&[("name", "bob")]),
+        ];
+
+        let mut writer = Vec::new();
+        let (written, _) = encoding.encode_input(events, &mut writer).unwrap();
+
+        assert!(written > 0, "Parquet output must be non-empty");
+        assert_eq!(written, writer.len());
+        // Parquet files start with magic bytes "PAR1"
+        assert_eq!(
+            &writer[..4],
+            b"PAR1",
+            "Parquet output must start with PAR1 magic bytes"
+        );
+    }
+
+    #[test]
+    fn test_batch_encoder_parquet_content_type() {
+        use vector_lib::codecs::encoding::{
+            BatchSerializerConfig, ParquetSerializerConfig, ParquetSerializerOptions,
+        };
+
+        let schema = "message test { required binary name (UTF8); }";
+        let cfg = BatchEncodingConfig {
+            framing: None,
+            encoding: BatchSerializerConfig::Parquet(ParquetSerializerConfig {
+                parquet: ParquetSerializerOptions {
+                    schema: schema.to_string(),
+                    record_complete_event: None,
+                    ignore_type_mismatch_for_optional: None,
+                },
+            }),
+            transformer: Transformer::default(),
+        };
+        let (encoder, _) = cfg.build().expect("build");
+
+        assert_eq!(encoder.content_type(), "application/octet-stream");
+    }
 }
