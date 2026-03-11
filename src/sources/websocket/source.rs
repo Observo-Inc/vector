@@ -121,10 +121,14 @@ impl WebSocketSource {
                             code = %frame.code,
                             reason = %frame.reason
                         );
+                        // Drive the close handshake to completion (flush tungstenite's auto-queued close response).
+                        // See: https://docs.rs/tungstenite/0.20.1/tungstenite/protocol/struct.WebSocket.html#method.read
+                        let _ = ws_source.next().await;
                         emit!(WebSocketConnectionShutdown);
                     }
                     WebSocketSourceError::RemoteClosedEmpty => {
                         warn!("Connection closed by server without a close frame.");
+                        let _ = ws_source.next().await;
                         emit!(WebSocketConnectionShutdown);
                     }
                     WebSocketSourceError::PongTimeout => {
