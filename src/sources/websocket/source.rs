@@ -721,7 +721,7 @@ mod integration_test {
         server_addr
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "current_thread")]
     async fn websocket_source_completes_close_handshake() {
         let server_addr = start_close_handshake_server().await;
         let config = make_config(&server_addr);
