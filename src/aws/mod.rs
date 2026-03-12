@@ -191,7 +191,7 @@ pub async fn create_client_and_region<T>(
 where
     T: ClientBuilder,
 {
-    let retry_config = RetryConfig::disabled();
+    let retry_config = RetryConfig::standard();
 
     // The default credentials chains will look for a region if not given but we'd like to
     // error up front if later SDK calls will fail due to lack of region configuration
