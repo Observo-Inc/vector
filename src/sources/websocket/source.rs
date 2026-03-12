@@ -682,6 +682,62 @@ mod integration_test {
         assert_eq!(events[0].as_log()["message"], "retry success".into());
     }
 
+    async fn start_close_handshake_server() -> String {
+        let addr = next_addr();
+        let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
+        let server_addr = format!("ws://{}", listener.local_addr().unwrap());
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut websocket = accept_async(stream).await.expect("Failed to accept");
+            websocket
+                .send(Message::Text("before close".to_string()))
+                .await
+                .unwrap();
+
+            websocket.send(Message::Close(None)).await.unwrap();
+
+            // Wait for the client's close response before accepting a new connection
+            let handshake_ok = loop {
+                match websocket.next().await {
+                    None => break true,
+                    Some(Ok(_)) => continue,
+                    Some(Err(_)) => break false,
+                }
+            };
+
+            if !handshake_ok {
+                return;
+            }
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut websocket = accept_async(stream).await.expect("Failed to accept");
+            websocket
+                .send(Message::Text("after close".to_string()))
+                .await
+                .unwrap();
+        });
+
+        server_addr
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn websocket_source_completes_close_handshake() {
+        let server_addr = start_close_handshake_server().await;
+        let config = make_config(&server_addr);
+
+        let events =
+            run_and_assert_source_compliance(config, Duration::from_secs(5), &SOURCE_TAGS).await;
+
+        assert_eq!(
+            events.len(),
+            2,
+            "Should receive messages from both connections (close handshake must complete)"
+        );
+        assert_eq!(events[0].as_log()["message"], "before close".into());
+        assert_eq!(events[1].as_log()["message"], "after close".into());
+    }
+
     async fn start_unresponsive_server() -> String {
         let addr = next_addr();
         let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
