@@ -4,14 +4,13 @@ use bytes::BytesMut;
 use itertools::{Itertools, Position};
 use tokio_util::codec::Encoder as _;
 use vector_lib::codecs::encoding::Framer;
-use vector_lib::json_size::JsonSize;
 use vector_lib::request_metadata::GroupedCountByteSize;
 use vector_lib::{config::telemetry, EstimatedJsonEncodedSizeOf};
 
 use crate::{
     codecs::Transformer,
     event::Event,
-    internal_events::{EncoderSerializeError, EncoderWriteError},
+    internal_events::EncoderWriteError,
 };
 
 pub trait Encoder<T> {
@@ -103,7 +102,7 @@ impl<T, D: Encoder<T> + ?Sized> Encoder<T> for Arc<D> {
     }
 }
 
-impl Encoder<Vec<Event>> for (Transformer, vector_lib::codecs::encoding::BatchSerializer) {
+impl Encoder<Vec<Event>> for (Transformer, vector_lib::codecs::encoding::BatchEncoder) {
     fn encode_input(
         &self,
         mut events: Vec<Event>,
@@ -112,27 +111,24 @@ impl Encoder<Vec<Event>> for (Transformer, vector_lib::codecs::encoding::BatchSe
         let mut encoder = self.1.clone();
         let n_events_pending = events.len();
 
+        let mut byte_size = telemetry().create_request_count_byte_size();
         for event in &mut events {
             self.0.transform(event);
+            byte_size.add_event(event, event.estimated_json_encoded_size_of());
         }
 
         let mut bytes = BytesMut::new();
         encoder.encode(events, &mut bytes).map_err(|error| {
-            let error: crate::Error = error.into();
-            emit!(EncoderSerializeError { error: &error });
+            // Do NOT emit internal events here — the codec layer
+            // (`Encoder<Framer>::serialize_at_start` / `encode`) already emits
+            // `EncoderSerializeError` or `EncoderFramingError` as appropriate.
             io::Error::new(io::ErrorKind::InvalidData, error)
         })?;
 
         write_all(writer, n_events_pending, &bytes)?;
         let num_bytes = bytes.len();
 
-        // TODO: https://observo.atlassian.net/browse/OB-5913
-        let mut grp_sz = GroupedCountByteSize::new_untagged();
-        grp_sz
-            .bulk_add(n_events_pending, JsonSize::new(num_bytes))
-            .expect("Couldn't bulk-add untagged-events");
-
-        Ok((num_bytes, grp_sz))
+        Ok((num_bytes, byte_size))
     }
 }
 
@@ -418,5 +414,602 @@ mod tests {
 
         assert_eq!(String::from_utf8(writer).unwrap(), r"value");
         assert_eq!(CountByteSize(1, input_json_size), json_size.size().unwrap());
+    }
+
+    // ---- Helper to build a (Transformer, BatchEncoder) from common params ----
+
+    use vector_lib::codecs::encoding::{
+        BatchEncodingConfig, BatchSerializerConfig, EventEncodingConfig, FramingConfig,
+        SerializerConfig, CharacterDelimitedEncoderConfig,
+    };
+
+    fn build_batch_encoder(
+        framing: FramingConfig,
+        serializer: SerializerConfig,
+    ) -> (Transformer, vector_lib::codecs::encoding::BatchEncoder) {
+        let cfg = BatchEncodingConfig {
+            framing: None, // auto-detect
+            encoding: BatchSerializerConfig::Stack(EventEncodingConfig {
+                framing: Some(framing),
+                serializer,
+            }),
+            transformer: Transformer::default(),
+        };
+        let (encoder, transformer) = cfg.build().expect("build");
+        (transformer, encoder)
+    }
+
+    fn build_batch_encoder_with_transformer(
+        framing: FramingConfig,
+        serializer: SerializerConfig,
+        transformer: Transformer,
+    ) -> (Transformer, vector_lib::codecs::encoding::BatchEncoder) {
+        let cfg = BatchEncodingConfig {
+            framing: None,
+            encoding: BatchSerializerConfig::Stack(EventEncodingConfig {
+                framing: Some(framing),
+                serializer,
+            }),
+            transformer,
+        };
+        let (encoder, t) = cfg.build().expect("build");
+        (t, encoder)
+    }
+
+    fn mk_log_event(pairs: &[(&str, &str)]) -> Event {
+        Event::Log(LogEvent::from(BTreeMap::from_iter(
+            pairs
+                .iter()
+                .map(|(k, v)| (KeyString::from(*k), Value::from(*v))),
+        )))
+    }
+
+    #[test]
+    fn test_batch_encoder_vs_old_encoder_ndjson_parity() {
+        // Old encoder: (Transformer, Encoder<Framer>)
+        let old = (
+            Transformer::default(),
+            crate::codecs::Encoder::<Framer>::new(
+                NewlineDelimitedEncoder::default().into(),
+                JsonSerializerConfig::default().build().into(),
+            ),
+        );
+
+        // New encoder: (Transformer, BatchEncoder)
+        let new = build_batch_encoder(
+            FramingConfig::NewlineDelimited,
+            SerializerConfig::Json(JsonSerializerConfig::default()),
+        );
+
+        let events = vec![
+            mk_log_event(&[("key", "value1")]),
+            mk_log_event(&[("key", "value2")]),
+            mk_log_event(&[("key", "value3")]),
+        ];
+
+        let mut old_buf = Vec::new();
+        let (old_written, old_json_size) = old.encode_input(events.clone(), &mut old_buf).unwrap();
+
+        let mut new_buf = Vec::new();
+        let (new_written, new_json_size) = new.encode_input(events, &mut new_buf).unwrap();
+
+        assert_eq!(
+            old_buf, new_buf,
+            "ndjson parity: old={}, new={}",
+            String::from_utf8_lossy(&old_buf),
+            String::from_utf8_lossy(&new_buf),
+        );
+        assert_eq!(old_written, new_written, "byte count must match");
+        assert_eq!(
+            old_json_size.size().unwrap(),
+            new_json_size.size().unwrap(),
+            "json size must match"
+        );
+    }
+
+    #[test]
+    fn test_batch_encoder_vs_old_encoder_comma_json_parity() {
+        let old = (
+            Transformer::default(),
+            crate::codecs::Encoder::<Framer>::new(
+                CharacterDelimitedEncoder::new(b',').into(),
+                JsonSerializerConfig::default().build().into(),
+            ),
+        );
+
+        let new = build_batch_encoder(
+            FramingConfig::CharacterDelimited(CharacterDelimitedEncoderConfig::new(b',')),
+            SerializerConfig::Json(JsonSerializerConfig::default()),
+        );
+
+        let events = vec![
+            mk_log_event(&[("key", "value1")]),
+            mk_log_event(&[("key", "value2")]),
+            mk_log_event(&[("key", "value3")]),
+        ];
+
+        let mut old_buf = Vec::new();
+        let (old_written, old_json_size) = old.encode_input(events.clone(), &mut old_buf).unwrap();
+
+        let mut new_buf = Vec::new();
+        let (new_written, new_json_size) = new.encode_input(events, &mut new_buf).unwrap();
+
+        assert_eq!(
+            old_buf, new_buf,
+            "comma-json parity: old={}, new={}",
+            String::from_utf8_lossy(&old_buf),
+            String::from_utf8_lossy(&new_buf),
+        );
+        assert_eq!(old_written, new_written, "byte count must match");
+        assert_eq!(
+            old_json_size.size().unwrap(),
+            new_json_size.size().unwrap(),
+            "json size must match"
+        );
+        // Verify it's a valid JSON array
+        let output = String::from_utf8(new_buf).unwrap();
+        assert!(output.starts_with('[') && output.ends_with(']'), "must be JSON array: {output}");
+    }
+
+    #[test]
+    fn test_batch_encoder_vs_old_encoder_text_newline_parity() {
+        let old = (
+            Transformer::default(),
+            crate::codecs::Encoder::<Framer>::new(
+                NewlineDelimitedEncoder::default().into(),
+                TextSerializerConfig::default().build().into(),
+            ),
+        );
+
+        let new = build_batch_encoder(
+            FramingConfig::NewlineDelimited,
+            SerializerConfig::Text(TextSerializerConfig::default()),
+        );
+
+        let events = vec![
+            mk_log_event(&[("message", "hello")]),
+            mk_log_event(&[("message", "world")]),
+            mk_log_event(&[("message", "test")]),
+        ];
+
+        let mut old_buf = Vec::new();
+        let (old_written, old_json_size) = old.encode_input(events.clone(), &mut old_buf).unwrap();
+
+        let mut new_buf = Vec::new();
+        let (new_written, new_json_size) = new.encode_input(events, &mut new_buf).unwrap();
+
+        assert_eq!(
+            old_buf, new_buf,
+            "text+newline parity: old={}, new={}",
+            String::from_utf8_lossy(&old_buf),
+            String::from_utf8_lossy(&new_buf),
+        );
+        assert_eq!(old_written, new_written, "byte count must match");
+        assert_eq!(
+            old_json_size.size().unwrap(),
+            new_json_size.size().unwrap(),
+            "json size must match"
+        );
+    }
+
+    // Parity for edge cases: empty batch and single event
+
+    #[test]
+    fn test_batch_encoder_vs_old_encoder_ndjson_empty_parity() {
+        let old = (
+            Transformer::default(),
+            crate::codecs::Encoder::<Framer>::new(
+                NewlineDelimitedEncoder::default().into(),
+                JsonSerializerConfig::default().build().into(),
+            ),
+        );
+        let new = build_batch_encoder(
+            FramingConfig::NewlineDelimited,
+            SerializerConfig::Json(JsonSerializerConfig::default()),
+        );
+
+        let mut old_buf = Vec::new();
+        let (old_written, old_json_size) = old.encode_input(vec![], &mut old_buf).unwrap();
+        let mut new_buf = Vec::new();
+        let (new_written, new_json_size) = new.encode_input(vec![], &mut new_buf).unwrap();
+
+        assert_eq!(old_buf, new_buf, "empty ndjson parity");
+        assert_eq!(old_written, new_written);
+        assert_eq!(
+            old_json_size.size().unwrap(),
+            new_json_size.size().unwrap(),
+            "json size must match for empty batch"
+        );
+    }
+
+    #[test]
+    fn test_batch_encoder_vs_old_encoder_comma_json_empty_parity() {
+        let old = (
+            Transformer::default(),
+            crate::codecs::Encoder::<Framer>::new(
+                CharacterDelimitedEncoder::new(b',').into(),
+                JsonSerializerConfig::default().build().into(),
+            ),
+        );
+        let new = build_batch_encoder(
+            FramingConfig::CharacterDelimited(CharacterDelimitedEncoderConfig::new(b',')),
+            SerializerConfig::Json(JsonSerializerConfig::default()),
+        );
+
+        let mut old_buf = Vec::new();
+        let (old_written, old_json_size) = old.encode_input(vec![], &mut old_buf).unwrap();
+        let mut new_buf = Vec::new();
+        let (new_written, new_json_size) = new.encode_input(vec![], &mut new_buf).unwrap();
+
+        assert_eq!(old_buf, new_buf, "empty comma-json parity");
+        assert_eq!(old_written, new_written);
+        assert_eq!(String::from_utf8(new_buf).unwrap(), "[]");
+        assert_eq!(
+            old_json_size.size().unwrap(),
+            new_json_size.size().unwrap(),
+            "json size must match for empty batch"
+        );
+    }
+
+    #[test]
+    fn test_batch_encoder_vs_old_encoder_single_event_parity() {
+        let old = (
+            Transformer::default(),
+            crate::codecs::Encoder::<Framer>::new(
+                CharacterDelimitedEncoder::new(b',').into(),
+                JsonSerializerConfig::default().build().into(),
+            ),
+        );
+        let new = build_batch_encoder(
+            FramingConfig::CharacterDelimited(CharacterDelimitedEncoderConfig::new(b',')),
+            SerializerConfig::Json(JsonSerializerConfig::default()),
+        );
+
+        let events = vec![mk_log_event(&[("key", "only")])];
+
+        let mut old_buf = Vec::new();
+        let (old_written, old_json_size) = old.encode_input(events.clone(), &mut old_buf).unwrap();
+        let mut new_buf = Vec::new();
+        let (new_written, new_json_size) = new.encode_input(events, &mut new_buf).unwrap();
+
+        assert_eq!(
+            old_buf, new_buf,
+            "single-event comma-json parity: old={}, new={}",
+            String::from_utf8_lossy(&old_buf),
+            String::from_utf8_lossy(&new_buf),
+        );
+        assert_eq!(old_written, new_written);
+        assert_eq!(
+            old_json_size.size().unwrap(),
+            new_json_size.size().unwrap(),
+            "json size must match for single event"
+        );
+    }
+
+    #[test]
+    fn test_batch_encoder_returns_correct_byte_count() {
+        let encoding = build_batch_encoder(
+            FramingConfig::CharacterDelimited(CharacterDelimitedEncoderConfig::new(b',')),
+            SerializerConfig::Json(JsonSerializerConfig::default()),
+        );
+
+        let events = vec![
+            mk_log_event(&[("a", "1")]),
+            mk_log_event(&[("a", "2")]),
+        ];
+
+        let mut writer = Vec::new();
+        let (written, _) = encoding.encode_input(events, &mut writer).unwrap();
+
+        assert_eq!(
+            written,
+            writer.len(),
+            "returned byte count must match actual bytes written"
+        );
+    }
+
+    #[test]
+    fn test_batch_encoder_transformer_except_fields() {
+        let transformer = Transformer::new(
+            None,
+            Some(vec!["drop_me".into()]),
+            None,
+            BTreeMap::new(),
+        )
+        .unwrap();
+
+        let encoding = build_batch_encoder_with_transformer(
+            FramingConfig::NewlineDelimited,
+            SerializerConfig::Json(JsonSerializerConfig::default()),
+            transformer,
+        );
+
+        let events = vec![
+            mk_log_event(&[("keep", "yes"), ("drop_me", "secret")]),
+            mk_log_event(&[("keep", "also"), ("drop_me", "hidden")]),
+        ];
+
+        let mut writer = Vec::new();
+        encoding.encode_input(events, &mut writer).unwrap();
+        let output = String::from_utf8(writer).unwrap();
+
+        assert!(
+            !output.contains("drop_me"),
+            "transformer must remove except_fields, got: {output}"
+        );
+        assert!(
+            !output.contains("secret"),
+            "field value must be removed, got: {output}"
+        );
+        assert!(output.contains("keep"), "non-excluded fields must remain: {output}");
+    }
+
+    #[test]
+    fn test_batch_encoder_transformer_except_fields_parity() {
+        // Verify the new encoder matches the old encoder when using except_fields.
+        let transformer = Transformer::new(
+            None,
+            Some(vec!["drop_me".into()]),
+            None,
+            BTreeMap::new(),
+        )
+        .unwrap();
+
+        let old = (
+            transformer.clone(),
+            crate::codecs::Encoder::<Framer>::new(
+                NewlineDelimitedEncoder::default().into(),
+                JsonSerializerConfig::default().build().into(),
+            ),
+        );
+        let new = build_batch_encoder_with_transformer(
+            FramingConfig::NewlineDelimited,
+            SerializerConfig::Json(JsonSerializerConfig::default()),
+            transformer,
+        );
+
+        let events = vec![
+            mk_log_event(&[("keep", "yes"), ("drop_me", "secret")]),
+            mk_log_event(&[("keep", "also"), ("drop_me", "hidden")]),
+        ];
+
+        let mut old_buf = Vec::new();
+        let (_, old_json_size) = old.encode_input(events.clone(), &mut old_buf).unwrap();
+        let mut new_buf = Vec::new();
+        let (_, new_json_size) = new.encode_input(events, &mut new_buf).unwrap();
+
+        assert_eq!(
+            old_buf, new_buf,
+            "except_fields parity: old={}, new={}",
+            String::from_utf8_lossy(&old_buf),
+            String::from_utf8_lossy(&new_buf),
+        );
+        assert_eq!(
+            old_json_size.size().unwrap(),
+            new_json_size.size().unwrap(),
+            "json size must match with except_fields transformer"
+        );
+    }
+
+    #[test]
+    fn test_batch_encoder_transformer_timestamp_format() {
+        use crate::codecs::TimestampFormat;
+        use chrono::{TimeZone, Utc};
+        use vector_lib::event::Event;
+
+        let transformer = Transformer::new(
+            None,
+            None,
+            Some(TimestampFormat::Unix),
+            BTreeMap::new(),
+        )
+        .unwrap();
+
+        let encoding = build_batch_encoder_with_transformer(
+            FramingConfig::NewlineDelimited,
+            SerializerConfig::Json(JsonSerializerConfig::default()),
+            transformer,
+        );
+
+        let ts = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let mut log = LogEvent::default();
+        log.insert("message", "hello");
+        log.insert("timestamp", ts);
+        let events = vec![Event::Log(log)];
+
+        let mut writer = Vec::new();
+        encoding.encode_input(events, &mut writer).unwrap();
+        let output = String::from_utf8(writer).unwrap();
+
+        // Unix timestamp format should produce a numeric timestamp, not an ISO 8601 string
+        assert!(
+            !output.contains("2025-06-15"),
+            "unix timestamp_format must not produce ISO date: {output}"
+        );
+    }
+
+    #[test]
+    fn test_batch_encoder_ndjson_content_type() {
+        let (encoder, _) = BatchEncodingConfig {
+            framing: None,
+            encoding: BatchSerializerConfig::Stack(EventEncodingConfig {
+                framing: Some(FramingConfig::NewlineDelimited),
+                serializer: SerializerConfig::Json(JsonSerializerConfig::default()),
+            }),
+            transformer: Transformer::default(),
+        }
+        .build()
+        .unwrap();
+
+        assert_eq!(encoder.content_type(), "application/x-ndjson");
+    }
+
+    #[test]
+    fn test_batch_encoder_comma_json_content_type() {
+        let (encoder, _) = BatchEncodingConfig {
+            framing: None,
+            encoding: BatchSerializerConfig::Stack(EventEncodingConfig {
+                framing: Some(FramingConfig::CharacterDelimited(
+                    CharacterDelimitedEncoderConfig::new(b','),
+                )),
+                serializer: SerializerConfig::Json(JsonSerializerConfig::default()),
+            }),
+            transformer: Transformer::default(),
+        }
+        .build()
+        .unwrap();
+
+        assert_eq!(encoder.content_type(), "application/json");
+    }
+
+    #[test]
+    fn test_batch_encoder_text_content_type() {
+        let (encoder, _) = BatchEncodingConfig {
+            framing: None,
+            encoding: BatchSerializerConfig::Stack(EventEncodingConfig {
+                framing: Some(FramingConfig::NewlineDelimited),
+                serializer: SerializerConfig::Text(TextSerializerConfig::default()),
+            }),
+            transformer: Transformer::default(),
+        }
+        .build()
+        .unwrap();
+
+        assert_eq!(encoder.content_type(), "text/plain");
+    }
+
+    #[test]
+    fn test_batch_encoder_serialization_error_emits_single_internal_event() {
+        // GELF requires 'host' and 'message'/'short_message'. An empty LogEvent
+        // will fail serialization. We verify that `component_errors_total` is
+        // emitted exactly once (not double-emitted by both codec and sink layers).
+        use crate::event::metric::MetricValue;
+        use crate::metrics::Controller;
+
+        vector_lib::metrics::init_test();
+
+        let encoding = build_batch_encoder(
+            FramingConfig::NewlineDelimited,
+            SerializerConfig::Gelf,
+        );
+
+        let events = vec![mk_log_event(&[("unrelated", "field")])]; // missing 'host'
+
+        let mut writer = Vec::new();
+        let result = encoding.encode_input(events, &mut writer);
+        assert!(result.is_err(), "GELF without required fields must error");
+
+        let controller = Controller::get().expect("no controller");
+        let metrics = controller.capture_metrics();
+
+        let error_count: f64 = metrics
+            .iter()
+            .filter(|m| {
+                m.name() == "component_errors_total"
+                    && m.tag_value("error_code").as_deref() == Some("encoder_serialize")
+            })
+            .filter_map(|m| match m.value() {
+                MetricValue::Counter { value } => Some(*value),
+                _ => None,
+            })
+            .sum();
+
+        assert_eq!(
+            error_count, 1.0,
+            "component_errors_total with error_code=encoder_serialize must be emitted exactly once"
+        );
+    }
+
+    #[test]
+    fn test_batch_encoder_all_or_nothing_on_error() {
+        // When the 2nd event fails serialization, the writer should receive 0 bytes
+        // because the BatchEncoder serializes into an internal buffer first, then writes.
+        let encoding = build_batch_encoder(
+            FramingConfig::NewlineDelimited,
+            SerializerConfig::Gelf,
+        );
+
+        // First event has required GELF fields, second does not.
+        // GELF requires 'host' and 'message' (or 'short_message').
+        let good_event = mk_log_event(&[("host", "myhost"), ("message", "hello")]);
+        let bad_event = mk_log_event(&[("unrelated", "field")]); // missing 'host'
+
+        let events = vec![good_event, bad_event];
+
+        let mut writer = Vec::new();
+        let result = encoding.encode_input(events, &mut writer);
+        assert!(result.is_err(), "batch with invalid GELF event must error");
+
+        // All-or-nothing: nothing written to the writer since the internal buffer
+        // never made it to write_all.
+        assert_eq!(
+            writer.len(),
+            0,
+            "writer must receive 0 bytes on serialization error (all-or-nothing)"
+        );
+    }
+
+    #[test]
+    fn test_batch_encoder_parquet_basic() {
+        use vector_lib::codecs::encoding::{
+            BatchSerializerConfig, ParquetSerializerConfig, ParquetSerializerOptions,
+        };
+
+        let schema = "message test { required binary name (UTF8); }";
+        let cfg = BatchEncodingConfig {
+            framing: None,
+            encoding: BatchSerializerConfig::Parquet(ParquetSerializerConfig {
+                parquet: ParquetSerializerOptions {
+                    schema: schema.to_string(),
+                    record_complete_event: None,
+                    ignore_type_mismatch_for_optional: None,
+                },
+            }),
+            transformer: Transformer::default(),
+        };
+        let encoding = {
+            let (encoder, transformer) = cfg.build().expect("build");
+            (transformer, encoder)
+        };
+
+        let events = vec![
+            mk_log_event(&[("name", "alice")]),
+            mk_log_event(&[("name", "bob")]),
+        ];
+
+        let mut writer = Vec::new();
+        let (written, _) = encoding.encode_input(events, &mut writer).unwrap();
+
+        assert!(written > 0, "Parquet output must be non-empty");
+        assert_eq!(written, writer.len());
+        // Parquet files start with magic bytes "PAR1"
+        assert_eq!(
+            &writer[..4],
+            b"PAR1",
+            "Parquet output must start with PAR1 magic bytes"
+        );
+    }
+
+    #[test]
+    fn test_batch_encoder_parquet_content_type() {
+        use vector_lib::codecs::encoding::{
+            BatchSerializerConfig, ParquetSerializerConfig, ParquetSerializerOptions,
+        };
+
+        let schema = "message test { required binary name (UTF8); }";
+        let cfg = BatchEncodingConfig {
+            framing: None,
+            encoding: BatchSerializerConfig::Parquet(ParquetSerializerConfig {
+                parquet: ParquetSerializerOptions {
+                    schema: schema.to_string(),
+                    record_complete_event: None,
+                    ignore_type_mismatch_for_optional: None,
+                },
+            }),
+            transformer: Transformer::default(),
+        };
+        let (encoder, _) = cfg.build().expect("build");
+
+        assert_eq!(encoder.content_type(), "application/octet-stream");
     }
 }

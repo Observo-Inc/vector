@@ -15,8 +15,9 @@ data_dir = "/var/lib/vector"
   bucket         = "my-log-archives"
   key_prefix     = "date=%Y-%m-%d"             # daily partitions, hive friendly format
   compression    = "gzip"                      # compress final objects
-  framing.method = "newline_delimited"         # new line delimited...
-  encoding.codec = "json"                      # ..JSON
+  encoding.codec = "stack"
+  encoding.serializer.codec = "json"           # ..JSON
+  encoding.serializer.framing.method = "newline_delimited"         # new line delimited...
   [sinks.s3_archives.batch]
     max_bytes   = 10000000                      # 10mb uncompressed
 

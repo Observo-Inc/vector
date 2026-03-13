@@ -1,16 +1,16 @@
-use std::sync::Arc;
 use bytes::Bytes;
 use chrono::Utc;
 use uuid::Uuid;
+use vector_lib::codecs::encoding::BatchEncoder;
 use vector_lib::request_metadata::RequestMetadata;
 use vector_lib::EstimatedJsonEncodedSizeOf;
 
 use crate::{
+    codecs::Transformer,
     event::{Event, Finalizable},
     sinks::{
         azure_common::config::{AzureBlobMetadata, AzureBlobRequest},
         util::{
-            encoding::Encoder,
             metadata::RequestMetadataBuilder, request_builder::EncodeResult, Compression,
             RequestBuilder,
         },
@@ -22,7 +22,7 @@ pub struct AzureBlobRequestOptions {
     pub container_name: String,
     pub blob_time_format: String,
     pub blob_append_uuid: bool,
-    pub encoder: Arc<dyn Encoder<Vec<Event>> + Send + Sync>,
+    pub encoder: (Transformer, BatchEncoder),
     pub compression: Compression,
     pub blob_extension: Option<String>,
     pub content_type: &'static str,
@@ -31,7 +31,7 @@ pub struct AzureBlobRequestOptions {
 impl RequestBuilder<(String, Vec<Event>)> for AzureBlobRequestOptions {
     type Metadata = AzureBlobMetadata;
     type Events = Vec<Event>;
-    type Encoder = Arc<dyn Encoder<Vec<Event>> + Send + Sync>;
+    type Encoder = (Transformer, BatchEncoder);
     type Payload = Bytes;
     type Request = AzureBlobRequest;
     type Error = std::io::Error;
