@@ -469,9 +469,8 @@ impl IngestorProcess {
                     aws_error_message,
                 });
                 
-                // Use AWS error message for backoff logs, fallback to generic message
-                let error_msg = aws_error_message.unwrap_or("Unknown SQS error");
-                return Err(error_msg.to_string().into());
+                // Propagate the original SDK error to preserve error context
+                return Err(err.into());
             }
         };
 

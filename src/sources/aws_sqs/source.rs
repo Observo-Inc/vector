@@ -149,10 +149,8 @@ impl SqsSource {
                     aws_error_code,
                     aws_error_message,
                 });
-                
-                // Use AWS error message for backoff logs, fallback to generic message
-                let error_msg = aws_error_message.unwrap_or("Unknown SQS error");
-                return Err(error_msg.to_string().into());
+
+                return Err(err.into());
             }
         };
 
