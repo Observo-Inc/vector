@@ -128,7 +128,7 @@ impl<E: std::fmt::Display> InternalEvent for SqsMessageReceiveError<'_, E> {
         let message = self.aws_error_message
             .map(|msg| format!("Failed to fetch SQS events: {}", msg))
             .unwrap_or_else(|| "Failed to fetch SQS events.".to_string());
-        
+
         error!(
             message = %message,
             error = %self.error,

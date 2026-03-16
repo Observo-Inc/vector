@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
 use std::{future::ready, num::NonZeroUsize, panic, sync::Arc, sync::LazyLock};
-use std::time::Duration;
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::Client as S3Client;
 use aws_sdk_sqs::operation::delete_message_batch::{
@@ -430,14 +429,19 @@ impl IngestorProcess {
                         backoff.reset();
                     }
                     Err(err) => {
-                        let delay = backoff.next().unwrap_or(Duration::from_secs(1));
+                        let delay = backoff.next().unwrap();
                         error!(
                                 message = "Error occurred when connecting to sqs. Retrying with backoff.",
                                 delay_ms = delay.as_millis(),
                                 error = %err,
                                 internal_log_rate_limit = true,
                         );
-                        tokio::time::sleep(delay).await;
+                        
+                        // Make sleep cancellable by shutdown
+                        select! {
+                            _ = &mut shutdown => break,
+                            _ = tokio::time::sleep(delay) => {}
+                        }
                     }
                 }
             },
@@ -456,13 +460,18 @@ impl IngestorProcess {
             }
             Err(err) => {
                 let meta = err.meta();
-                let error_message = meta.message().unwrap_or("Unknown error");
+                let aws_error_code = meta.code();
+                let aws_error_message = meta.message();
+                
                 emit!(SqsMessageReceiveError {
                     error: &err,
-                    aws_error_code: meta.code(),
-                    aws_error_message: meta.message(),
+                    aws_error_code,
+                    aws_error_message,
                 });
-                return Err(error_message.to_string().into());
+                
+                // Use AWS error message for backoff logs, fallback to generic message
+                let error_msg = aws_error_message.unwrap_or("Unknown SQS error");
+                return Err(error_msg.to_string().into());
             }
         };
 
