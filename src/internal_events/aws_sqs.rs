@@ -119,13 +119,20 @@ mod s3 {
 #[derive(Debug)]
 pub struct SqsMessageReceiveError<'a, E> {
     pub error: &'a E,
+    pub aws_error_code: Option<&'a str>,
+    pub aws_error_message: Option<&'a str>,
 }
 
 impl<E: std::fmt::Display> InternalEvent for SqsMessageReceiveError<'_, E> {
     fn emit(self) {
+        let message = self.aws_error_message
+            .map(|msg| format!("Failed to fetch SQS events: {}", msg))
+            .unwrap_or_else(|| "Failed to fetch SQS events.".to_string());
+        
         error!(
-            message = "Failed to fetch SQS events.",
+            message = %message,
             error = %self.error,
+            aws_error_code = self.aws_error_code,
             error_code = "failed_fetching_sqs_events",
             error_type = error_type::REQUEST_FAILED,
             stage = error_stage::RECEIVING,
