@@ -430,11 +430,11 @@ impl IngestorProcess {
                         backoff.reset();
                     }
                     Err(err) => {
-                        let delay= backoff.next().unwrap_or(Duration::from_secs(1));
+                        let delay = backoff.next().unwrap_or(Duration::from_secs(1));
                         error!(
                                 message = "Error occurred when connecting to sqs. Retrying with backoff.",
                                 delay_ms = delay.as_millis(),
-                                error = &err.to_string(),
+                                error = %err,
                                 internal_log_rate_limit = true,
                         );
                         tokio::time::sleep(delay).await;
