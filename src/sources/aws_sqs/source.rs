@@ -4,9 +4,11 @@ use aws_sdk_sqs::{
     types::{DeleteMessageBatchRequestEntry, MessageSystemAttributeName},
     Client as SqsClient,
 };
+use aws_smithy_types::error::metadata::ProvideErrorMetadata;
 use chrono::{DateTime, TimeZone, Utc};
 use futures::{FutureExt, StreamExt};
 use tokio::{pin, select};
+use tracing::error;
 use tracing_futures::Instrument;
 use vector_lib::config::LogNamespace;
 use vector_lib::finalizer::UnorderedFinalizer;
@@ -14,6 +16,7 @@ use vector_lib::internal_event::{EventsReceived, Registered};
 
 use crate::{
     codecs::Decoder,
+    common::sqs::fresh_backoff,
     event::{BatchNotifier, BatchStatus},
     internal_events::{
         EndpointBytesReceived, SqsMessageDeleteError, SqsMessageReceiveError, StreamClosedError,
@@ -72,10 +75,30 @@ impl SqsSource {
                 async move {
                     let finalizer = finalizer.as_ref();
                     pin!(shutdown);
+                    let mut backoff = fresh_backoff();
                     loop {
                         select! {
                             _ = &mut shutdown => break,
-                            _ = source.run_once(&mut out, finalizer, events_received.clone()) => {},
+                            result = source.run_once(&mut out, finalizer, events_received.clone()) => {
+                                match result {
+                                    Ok(()) => backoff.reset(),
+                                    Err(err) => {
+                                        let delay = backoff.next().unwrap();
+                                        error!(
+                                            message = "Error occurred when connecting to sqs. Retrying with backoff.",
+                                            delay_ms = delay.as_millis(),
+                                            error = %err,
+                                            internal_log_rate_limit = true,
+                                        );
+
+                                        // Make sleep cancellable by shutdown
+                                        select! {
+                                            _ = &mut shutdown => break,
+                                            _ = tokio::time::sleep(delay) => {}
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -100,7 +123,7 @@ impl SqsSource {
         out: &mut SourceSender,
         finalizer: Option<&Arc<Finalizer>>,
         events_received: Registered<EventsReceived>,
-    ) {
+    ) -> crate::Result<()> {
         let result = self
             .client
             .receive_message()
@@ -117,8 +140,17 @@ impl SqsSource {
         let receive_message_output = match result {
             Ok(output) => output,
             Err(err) => {
-                emit!(SqsMessageReceiveError { error: &err });
-                return;
+                let meta = err.meta();
+                let aws_error_code = meta.code();
+                let aws_error_message = meta.message();
+                
+                emit!(SqsMessageReceiveError {
+                    error: &err,
+                    aws_error_code,
+                    aws_error_message,
+                });
+
+                return Err(err.into());
             }
         };
 
@@ -183,6 +215,7 @@ impl SqsSource {
                 Err(_) => emit!(StreamClosedError { count }),
             }
         }
+        Ok(())
     }
 }
 

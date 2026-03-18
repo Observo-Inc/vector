@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
 use std::{future::ready, num::NonZeroUsize, panic, sync::Arc, sync::LazyLock};
-use std::time::Duration;
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::Client as S3Client;
 use aws_sdk_sqs::operation::delete_message_batch::{
@@ -12,6 +11,7 @@ use aws_sdk_sqs::types::{DeleteMessageBatchRequestEntry, Message};
 use aws_sdk_sqs::Client as SqsClient;
 use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
 use aws_smithy_runtime_api::client::result::SdkError;
+use aws_smithy_types::error::metadata::ProvideErrorMetadata;
 use aws_types::region::Region;
 use bytes::Bytes;
 use chrono::{DateTime, TimeZone, Utc};
@@ -51,7 +51,7 @@ use crate::{
 use vector_lib::config::{log_schema, LegacyKey, LogNamespace};
 use vector_lib::event::MaybeAsLogMut;
 use vector_lib::lookup::{metadata_path, path, PathPrefix};
-use crate::common::backoff::ExponentialBackoff;
+use crate::common::sqs::fresh_backoff;
 use super::sqs_message_parsers;
 
 static SUPPORTED_S3_EVENT_VERSION: LazyLock<semver::VersionReq> =
@@ -395,14 +395,6 @@ pub struct IngestorProcess {
     events_received: Registered<EventsReceived>,
 }
 
-
-const fn fresh_backoff() -> ExponentialBackoff {
-    // TODO: make configurable
-    ExponentialBackoff::from_millis(2)
-        .factor(250)
-        .max_delay(Duration::from_secs(60))
-}
-
 impl IngestorProcess {
     pub fn new(
         state: Arc<State>,
@@ -437,12 +429,19 @@ impl IngestorProcess {
                         backoff.reset();
                     }
                     Err(err) => {
-                        let delay= backoff.next().unwrap_or(Duration::from_secs(1));
+                        let delay = backoff.next().unwrap();
                         error!(
                                 message = "Error occurred when connecting to sqs. Retrying with backoff.",
                                 delay_ms = delay.as_millis(),
-                                error = &err.to_string());
-                        tokio::time::sleep(delay).await;
+                                error = %err,
+                                internal_log_rate_limit = true,
+                        );
+                        
+                        // Make sleep cancellable by shutdown
+                        select! {
+                            _ = &mut shutdown => break,
+                            _ = tokio::time::sleep(delay) => {}
+                        }
                     }
                 }
             },
@@ -460,7 +459,17 @@ impl IngestorProcess {
                 messages
             }
             Err(err) => {
-                emit!(SqsMessageReceiveError { error: &err });
+                let meta = err.meta();
+                let aws_error_code = meta.code();
+                let aws_error_message = meta.message();
+                
+                emit!(SqsMessageReceiveError {
+                    error: &err,
+                    aws_error_code,
+                    aws_error_message,
+                });
+                
+                // Propagate the original SDK error to preserve error context
                 return Err(err.into());
             }
         };
