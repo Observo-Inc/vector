@@ -12,7 +12,7 @@ default-run = "vector"
 autobenches = false # our benchmarks are not runnable on their own either way
 # Minimum supported rust version
 # See docs/DEVELOPING.md for policy
-rust-version = "1.81"
+rust-version = "1.85"
 
 [[bin]]
 name = "vector"
@@ -110,6 +110,7 @@ members = [
   "lib/observo/lv3",
   "lib/observo/stcp",
   "lib/observo/wef",
+  "lib/observo/eventhub",
   "lib/observo/ssa",
   "lib/observo/obvrl",
   "lib/observo/gcs",
@@ -175,7 +176,7 @@ prost-build = { version = "0.12", default-features = false }
 prost-reflect = { version = "0.14", features = ["serde"], default-features = false }
 prost-types = { version = "0.12", default-features = false }
 rand = { version = "0.8.5", default-features = false, features = ["small_rng"] }
-serde_json = { version = "=1.0.133", default-features = false, features = ["raw_value", "std"] }
+serde_json = { version = "=1.0.149", default-features = false, features = ["raw_value", "std"] }
 serde = { version = "1.0.215", default-features = false, features = ["alloc", "derive", "rc"] }
 serde_with = { version = "3.12.0", default-features = false, features = ["macros", "std"] }
 snafu = { version = "0.7.5", default-features = false, features = ["futures", "std"] }
@@ -234,6 +235,7 @@ ssa = { path = "lib/observo/ssa", optional = true }
 chkpts = { path = "lib/observo/chkpts", optional = true }
 stcp = { path = "lib/observo/stcp", optional = true }
 wef = { path = "lib/observo/wef", optional = true }
+eventhub = { path = "lib/observo/eventhub", optional = true }
 dnsmsg-parser = { path = "lib/dnsmsg-parser", optional = true }
 dnstap-parser = { path = "lib/dnstap-parser", optional = true }
 fakedata = { path = "lib/fakedata", optional = true }
@@ -708,6 +710,7 @@ sources-utils-net-udp = ["listenfd", "vector-lib/sources-utils-net-udp"]
 sources-utils-net-unix = []
 sources-websocket = ["dep:tokio-tungstenite"]
 sources-wef = ["dep:wef"]
+sources-eventhub = ["dep:eventhub"]
 
 sources-vector = ["dep:prost", "dep:tonic", "dep:jsonwebtoken", "protobuf-build"]
 
@@ -1004,6 +1007,7 @@ observo = [
   "observo-chkpts",
   "sources-stcp",
   "sources-wef",
+  "sources-eventhub",
   "observo-vrl",
   "sources-gcs",
   "sinks-azs",
