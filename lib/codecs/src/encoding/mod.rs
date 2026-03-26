@@ -1022,14 +1022,19 @@ mod tests {
         assert_matches!(cfg.framing, None);
     }
 
-    #[test]
-    fn batch_encoding_stacked_csv_with_encap_framing() {
-        let c = r#"
+    fn test_encap_framing(prefix_hex: Option<&str>, suffix_hex: Option<&str>, expected_prefix: &str, expected_suffix: &str) {
+        let framing_lines = match (prefix_hex, suffix_hex) {
+            (Some(p), Some(s)) => format!("prefix = \"{p}\"\nsuffix = \"{s}\""),
+            (Some(p), None) => format!("prefix = \"{p}\""),
+            (None, Some(s)) => format!("suffix = \"{s}\""),
+            (None, None) => String::new(),
+        };
+
+        let c = format!(r#"
             [framing]
             method = "encap"
             [framing.const]
-            prefix = "5b5b"
-            suffix = "5d5d"
+            {framing_lines}
 
             [encoding]
             codec = "stack"
@@ -1042,9 +1047,9 @@ mod tests {
 
             [transformer]
             except_fields = ["ignore"]
-        "#;
+        "#);
 
-        let cfg: BatchEncodingConfig = toml::from_str(c).expect("deser");
+        let cfg: BatchEncodingConfig = toml::from_str(&c).expect("deser");
         assert_matches!(cfg.framing, Some(BatchFramerConfig::Encap(_)));
         assert_matches!(cfg.encoding, BatchSerializerConfig::Stack(_));
         assert_eq!(cfg.transformer.except_fields(), &Some(vec!["ignore".into()]));
@@ -1067,13 +1072,29 @@ mod tests {
         let mut buf = BytesMut::new();
         enc.encode(events, &mut buf).expect("encode");
         let out = String::from_utf8(buf.to_vec()).expect("utf8");
-        assert!(out.starts_with("[["), "expected [[ prefix, got: {out}");
-        assert!(out.ends_with("]]"), "expected ]] suffix, got: {out}");
 
-        let inner = &out[2..out.len() - 2];
+        assert!(out.starts_with(expected_prefix), "expected prefix {expected_prefix:?}, got: {out:?}");
+        assert!(out.ends_with(expected_suffix), "expected suffix {expected_suffix:?}, got: {out:?}");
+
+        let inner = &out[expected_prefix.len()..out.len() - expected_suffix.len()];
         assert!(inner.contains(";"), "expected ; delimiter, got: {inner}");
         assert!(inner.contains("\"alice\""), "expected quoted alice, got: {inner}");
         assert!(inner.contains("\"bob\""), "expected quoted bob, got: {inner}");
+    }
+
+    #[test]
+    fn batch_encoding_stacked_csv_with_encap_framing() {
+        test_encap_framing(Some("5b5b"), Some("5d5d"), "[[", "]]");
+    }
+
+    #[test]
+    fn batch_encoding_stacked_csv_with_encap_prefix_only() {
+        test_encap_framing(Some("0A0A"), None, "\n\n", "");
+    }
+
+    #[test]
+    fn batch_encoding_stacked_csv_with_encap_suffix_only() {
+        test_encap_framing(None, Some("0A0A"), "", "\n\n");
     }
 
     fn mk_event(pairs: &[(&str, &str)]) -> Event {

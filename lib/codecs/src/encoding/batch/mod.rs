@@ -45,12 +45,16 @@ impl Encoder<()> for EncapFramer {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConstFrameEncap {
     /// Frame prefix bytes.
-    #[serde(with = "hex::serde")]
+    #[serde(with = "hex::serde", default = "default_frame_marker_bytes")]
     pub prefix: Vec<u8>,
 
     /// Frame suffix bytes.
-    #[serde(with = "hex::serde")]
+    #[serde(with = "hex::serde", default = "default_frame_marker_bytes")]
     pub suffix: Vec<u8>,
+}
+
+fn default_frame_marker_bytes() -> Vec<u8> {
+    Vec::new()
 }
 
 impl ConstFrameEncap {
