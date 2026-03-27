@@ -114,12 +114,20 @@ fn parse_with_format(s: &str, fmt: &str) -> Result<DateTime<Utc>, chrono::ParseE
         return Ok(dt.with_timezone(&Utc));
     }
 
+    if is_iso8601_with_fractional_seconds_and_z(fmt){
+        // Try RFC3339 parsing which handles variable-length fractional seconds
+        if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+            return Ok(dt.with_timezone(&Utc));
+        }
+    }
+
     // If the user format contains a literal 'Z' (UTC) strip it and parse NaiveDateTime
     if fmt.contains('Z') {
         let s_trim = s.strip_suffix('Z').unwrap_or(s);
         let fmt_trim = fmt.trim_end_matches('Z');
-        let naive = NaiveDateTime::parse_from_str(s_trim, fmt_trim)?;
-        return Ok(Utc.from_utc_datetime(&naive));
+        if let Ok(naive) = NaiveDateTime::parse_from_str(s_trim, fmt_trim) {
+            return Ok(Utc.from_utc_datetime(&naive));
+        }
     }
 
 
@@ -129,8 +137,22 @@ fn parse_with_format(s: &str, fmt: &str) -> Result<DateTime<Utc>, chrono::ParseE
     }
 
     // Otherwise expect the format to include an offset specifier like %z or %:z
-    let dt = DateTime::parse_from_str(s, fmt)?;
-    Ok(dt.with_timezone(&Utc))
+    match DateTime::parse_from_str(s, fmt) {
+        Ok(dt) => Ok(dt.with_timezone(&Utc)),
+        Err(e) => {
+            if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+                Ok(dt.with_timezone(&Utc))
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+fn is_iso8601_with_fractional_seconds_and_z(fmt: &str) -> bool {
+    fmt.contains("%Y-%m-%dT%H:%M:%S")
+        && (fmt.contains("%f") || fmt.contains("%N"))
+        && fmt.ends_with("Z")
 }
 
 #[cfg(test)]
@@ -254,6 +276,260 @@ mod tests {
                     panic!(
                         "Test case '{}' failed: expected Ok({:?}), but got error '{}'",
                         test_case.name, e, a_err);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_with_format() {
+        struct TestCase {
+            name: &'static str,
+            input: &'static str,
+            format: &'static str,
+            expected: Result<DateTime<Utc>, chrono::ParseError>,
+        }
+
+        fn utc(s: &str) -> Result<DateTime<Utc>, chrono::ParseError> {
+            Ok(DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc))
+        }
+
+        fn err(fmt: &str, input: &str) -> Result<DateTime<Utc>, chrono::ParseError> {
+            // Deliberately trigger a chrono::ParseError using a bad format+input pair
+            DateTime::parse_from_str(input, fmt).map(|dt| dt.with_timezone(&Utc))
+        }
+
+        let testcases = vec![
+            // ── RFC 3339 fast path ────────────────────────────────────────────────
+            TestCase {
+                name: "rfc3339 - nanosecond precision with Z",
+                input: "2026-01-29T21:52:10.647123456Z",
+                format: "rfc3339",
+                expected: utc("2026-01-29T21:52:10.647123456Z"),
+            },
+            TestCase {
+                name: "rfc3339 - microsecond precision with Z",
+                input: "2026-01-29T21:52:10.647123Z",
+                format: "rfc3339",
+                expected: utc("2026-01-29T21:52:10.647123Z"),
+            },
+            TestCase {
+                name: "rfc3339 - millisecond precision with Z",
+                input: "2026-01-29T21:52:10.647Z",
+                format: "rfc3339",
+                expected: utc("2026-01-29T21:52:10.647Z"),
+            },
+            TestCase {
+                name: "rfc3339 - no fractional seconds with Z",
+                input: "2026-01-29T21:52:10Z",
+                format: "rfc3339",
+                expected: utc("2026-01-29T21:52:10Z"),
+            },
+            TestCase {
+                name: "rfc3339 - with positive offset",
+                input: "2026-01-29T21:52:10+05:30",
+                format: "rfc3339",
+                expected: utc("2026-01-29T16:22:10Z"),
+            },
+            TestCase {
+                name: "rfc3339 - with negative offset",
+                input: "2026-01-29T21:52:10-07:00",
+                format: "rfc3339",
+                expected: utc("2026-01-30T04:52:10Z"),
+            },
+            TestCase {
+                name: "rfc3339 - empty format string defaults to rfc3339",
+                input: "2026-01-29T21:52:10.123456Z",
+                format: "",
+                expected: utc("2026-01-29T21:52:10.123456Z"),
+            },
+
+            // ── Literal Z suffix formats ──────────────────────────────────────────
+            TestCase {
+                name: "literal Z - nanosecond (9-digit) fractional seconds",
+                input: "2026-01-29T21:52:10.647189854Z",
+                format: "%Y-%m-%dT%H:%M:%S.%fZ",
+                expected: utc("2026-01-29T21:52:10.647189854Z"),
+            },
+            TestCase {
+                name: "literal Z - microsecond (6-digit) fractional seconds",
+                input: "2026-01-29T21:52:10.647189Z",
+                format: "%Y-%m-%dT%H:%M:%S.%fZ",
+                expected: utc("2026-01-29T21:52:10.647189Z"),
+            },
+            TestCase {
+                name: "literal Z - millisecond (3-digit) fractional seconds",
+                input: "2026-01-29T21:52:10.647Z",
+                format: "%Y-%m-%dT%H:%M:%S.%fZ",
+                expected: utc("2026-01-29T21:52:10.647Z"),
+            },
+            TestCase {
+                name: "literal Z - no fractional seconds",
+                input: "2026-01-29T21:52:10Z",
+                format: "%Y-%m-%dT%H:%M:%SZ",
+                expected: utc("2026-01-29T21:52:10Z"),
+            },
+            TestCase {
+                name: "literal Z - date and time with slash separators",
+                input: "29/01/2026 21:52:10Z",
+                format: "%d/%m/%Y %H:%M:%SZ",
+                expected: utc("2026-01-29T21:52:10Z"),
+            },
+
+            // ── Naive (no offset) formats — assumed UTC ───────────────────────────
+            TestCase {
+                name: "naive - datetime no fractional seconds",
+                input: "2026-01-29T21:52:10",
+                format: "%Y-%m-%dT%H:%M:%S",
+                expected: utc("2026-01-29T21:52:10Z"),
+            },
+            TestCase {
+                name: "naive - datetime with microseconds",
+                input: "2026-01-29T21:52:10.123456",
+                format: "%Y-%m-%dT%H:%M:%S.%f",
+                expected: utc("2026-01-29T21:52:10.000123456Z"),
+            },
+            TestCase {
+                name: "naive - datetime with nanoseconds normalized to microseconds",
+                input: "2026-01-29T21:52:10.123456789",
+                format: "%Y-%m-%dT%H:%M:%S.%f",
+                expected: utc("2026-01-29T21:52:10.123456789Z"),
+            },
+            TestCase {
+                name: "naive - slash date format",
+                input: "29/01/2026 21:52:10",
+                format: "%d/%m/%Y %H:%M:%S",
+                expected: utc("2026-01-29T21:52:10Z"),
+            },
+            TestCase {
+                name: "naive - space separated date",
+                input: "2026-01-29 21:52:10",
+                format: "%Y-%m-%d %H:%M:%S",
+                expected: utc("2026-01-29T21:52:10Z"),
+            },
+            TestCase {
+                name: "naive - with %NZ",
+                input: "2026-01-29T21:52:10.647123456Z",
+                format: "%Y-%m-%dT%H:%M:%S.%NZ",
+                expected: utc("2026-01-29T21:52:10.647123456Z"),
+            },
+
+            // ── Offset-aware formats ──────────────────────────────────────────────
+            TestCase {
+                name: "offset - compact %z positive",
+                input: "2026-01-29T21:52:10+0530",
+                format: "%Y-%m-%dT%H:%M:%S%z",
+                expected: utc("2026-01-29T21:52:10Z"),
+            },
+            TestCase {
+                name: "offset - colon %:z negative",
+                input: "2026-01-29T21:52:10-07:00",
+                format: "%Y-%m-%dT%H:%M:%S%:z",
+                expected: utc("2026-01-29T21:52:10Z"),
+            },
+            TestCase {
+                name: "offset - with microseconds and offset",
+                input: "2026-01-29T21:52:10.123456+05:30",
+                format: "%Y-%m-%dT%H:%M:%S.%f%:z",
+                expected: utc("2026-01-29T21:52:10.000123456Z"),
+            },
+            TestCase {
+                name: "offset - with nanoseconds normalized and offset",
+                input: "2026-01-29T21:52:10.123456789+05:30",
+                format: "%Y-%m-%dT%H:%M:%S.%f%:z",
+                expected: utc("2026-01-29T21:52:10.123456789Z"),
+            },
+
+            // ── Edge cases ────────────────────────────────────────────────────────
+            TestCase {
+                name: "edge - midnight UTC",
+                input: "2026-01-29T00:00:00Z",
+                format: "rfc3339",
+                expected: utc("2026-01-29T00:00:00Z"),
+            },
+            TestCase {
+                name: "edge - end of day UTC",
+                input: "2026-01-29T23:59:59.999999Z",
+                format: "rfc3339",
+                expected: utc("2026-01-29T23:59:59.999999Z"),
+            },
+            TestCase {
+                name: "edge - leap day",
+                input: "2024-02-29T12:00:00Z",
+                format: "rfc3339",
+                expected: utc("2024-02-29T12:00:00Z"),
+            },
+            TestCase {
+                name: "edge - nanoseconds",
+                input: "2026-01-29T21:52:10.000000999Z",
+                format: "%Y-%m-%dT%H:%M:%S.%fZ",
+                expected: utc("2026-01-29T21:52:10.000000999Z"),
+            },
+            TestCase {
+                name: "edge - %f%Z",
+                input: "2026-01-29T21:52:10.6471234Z",
+                format: "%Y-%m-%dT%H:%M:%S.%f%Z",
+                expected: utc("2026-01-29T21:52:10.6471234Z"),
+            },
+            TestCase {
+                name: "edge - 5 precision",
+                input: "2026-01-29T21:52:10.00999Z",
+                format: "%Y-%m-%dT%H:%M:%S.%fZ",
+                expected: utc("2026-01-29T21:52:10.009990Z"),
+            },
+            TestCase {
+                name: "edge - 4 precision",
+                input: "2026-01-29T21:52:10.0999Z",
+                format: "%Y-%m-%dT%H:%M:%S.%fZ",
+                expected: utc("2026-01-29T21:52:10.099900Z"),
+            },
+
+            // ── Error cases ───────────────────────────────────────────────────────
+            TestCase {
+                name: "error - completely invalid input",
+                input: "not-a-timestamp",
+                format: "rfc3339",
+                expected: err("%Y-%m-%dT%H:%M:%S%.fZ", "not-a-timestamp"),
+            },
+            TestCase {
+                name: "fallback to rfc3339",
+                input: "2026-01-29T21:52:10Z",
+                format: "%d/%m/%Y %H:%M:%S",
+                expected: utc("2026-01-29T21:52:10Z"),
+            },
+            TestCase {
+                name: "error - invalid month",
+                input: "2026-13-29T21:52:10Z",
+                format: "rfc3339",
+                expected: err("%Y-%m-%dT%H:%M:%S%.fZ", "2026-13-29T21:52:10Z"),
+            },
+            TestCase {
+                name: "error - invalid day",
+                input: "2026-01-32T21:52:10Z",
+                format: "rfc3339",
+                expected: err("%Y-%m-%dT%H:%M:%S%.fZ", "2026-01-32T21:52:10Z"),
+            },
+            TestCase {
+                name: "bcg input test",
+                input: "2026-03-26T17:34:36.927751299Z",
+                format: "rfc3339",
+                expected: utc("2026-03-26T17:34:36.927751299Z")
+            },
+        ];
+
+        for test_case in testcases {
+            match (parse_with_format(test_case.input, test_case.format), test_case.expected) {
+                (Ok(actual_dt), Ok(expected_dt)) => {
+                    assert_eq!(actual_dt, expected_dt, "Test case '{}' failed", test_case.name);
+                },
+                (Err(actual_err), Err(expected_err)) => {
+                    assert_eq!(actual_err.to_string(), expected_err.to_string(), "Test case '{}' failed", test_case.name);
+                },
+                (Ok(actual_dt), Err(expected_err)) => {
+                    panic!("Test case '{}' failed: expected error '{}', but got Ok({:?})", test_case.name, expected_err, actual_dt);
+                },
+                (Err(actual_err), Ok(expected_dt)) => {
+                    panic!("Test case '{}' failed: expected Ok({:?}), but got error '{}'", test_case.name, expected_dt, actual_err);
                 }
             }
         }
