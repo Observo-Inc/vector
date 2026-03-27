@@ -125,8 +125,9 @@ fn parse_with_format(s: &str, fmt: &str) -> Result<DateTime<Utc>, chrono::ParseE
     if fmt.contains('Z') {
         let s_trim = s.strip_suffix('Z').unwrap_or(s);
         let fmt_trim = fmt.trim_end_matches('Z');
-        let naive = NaiveDateTime::parse_from_str(s_trim, fmt_trim)?;
-        return Ok(Utc.from_utc_datetime(&naive));
+        if let Ok(naive) = NaiveDateTime::parse_from_str(s_trim, fmt_trim) {
+            return Ok(Utc.from_utc_datetime(&naive));
+        }
     }
 
 
@@ -136,8 +137,16 @@ fn parse_with_format(s: &str, fmt: &str) -> Result<DateTime<Utc>, chrono::ParseE
     }
 
     // Otherwise expect the format to include an offset specifier like %z or %:z
-    let dt = DateTime::parse_from_str(s, fmt)?;
-    Ok(dt.with_timezone(&Utc))
+    match DateTime::parse_from_str(s, fmt) {
+        Ok(dt) => Ok(dt.with_timezone(&Utc)),
+        Err(e) => {
+            if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+                Ok(dt.with_timezone(&Utc))
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
 fn is_iso8601_with_fractional_seconds_and_z(fmt: &str) -> bool {
@@ -483,10 +492,10 @@ mod tests {
                 expected: err("%Y-%m-%dT%H:%M:%S%.fZ", "not-a-timestamp"),
             },
             TestCase {
-                name: "error - mismatched format and input",
+                name: "fallback to rfc3339",
                 input: "2026-01-29T21:52:10Z",
                 format: "%d/%m/%Y %H:%M:%S",
-                expected: err("%d/%m/%Y %H:%M:%S", "2026-01-29T21:52:10Z"),
+                expected: utc("2026-01-29T21:52:10Z"),
             },
             TestCase {
                 name: "error - invalid month",
@@ -499,6 +508,12 @@ mod tests {
                 input: "2026-01-32T21:52:10Z",
                 format: "rfc3339",
                 expected: err("%Y-%m-%dT%H:%M:%S%.fZ", "2026-01-32T21:52:10Z"),
+            },
+            TestCase {
+                name: "bcg input test",
+                input: "2026-03-26T17:34:36.927751299Z",
+                format: "rfc3339",
+                expected: utc("2026-03-26T17:34:36.927751299Z")
             },
         ];
 
