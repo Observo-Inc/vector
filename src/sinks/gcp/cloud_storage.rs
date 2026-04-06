@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::{collections::HashMap, convert::TryFrom, io};
 
 use bytes::Bytes;
@@ -10,16 +9,16 @@ use snafu::ResultExt;
 use snafu::Snafu;
 use tower::ServiceBuilder;
 use uuid::Uuid;
-use vector_lib::codecs::encoding::Framer;
+use vector_lib::codecs::encoding::{BatchEncodingConfig, BatchEncoder};
 use vector_lib::configurable::configurable_component;
 use vector_lib::event::{EventFinalizers, Finalizable};
 use vector_lib::{request_metadata::RequestMetadata, TimeZone};
 
+use crate::codecs::Transformer;
 use crate::sinks::util::metadata::RequestMetadataBuilder;
 use crate::sinks::util::service::TowerRequestConfigDefaults;
 use crate::APP_INFO;
 use crate::{
-    codecs::{Encoder, EncodingConfigWithFraming, SinkType},
     config::{AcknowledgementsConfig, DataType, GenerateConfig, Input, SinkConfig, SinkContext},
     event::Event,
     gcp::{GcpAuthConfig, GcpAuthenticator, Scope},
@@ -148,7 +147,7 @@ pub struct GcsSinkConfig {
     filename_extension: Option<String>,
 
     #[serde(flatten)]
-    encoding: EncodingConfigWithFraming,
+    encoding: BatchEncodingConfig,
 
     /// Compression configuration.
     ///
@@ -198,7 +197,7 @@ fn default_time_format() -> String {
 }
 
 #[cfg(test)]
-fn default_config(encoding: EncodingConfigWithFraming) -> GcsSinkConfig {
+fn default_config(encoding: BatchEncodingConfig) -> GcsSinkConfig {
     GcsSinkConfig {
         bucket: Default::default(),
         acl: Default::default(),
@@ -225,8 +224,9 @@ impl GenerateConfig for GcsSinkConfig {
         toml::from_str(indoc! {r#"
             bucket = "my-bucket"
             credentials_path = "/path/to/credentials.json"
-            framing.method = "newline_delimited"
-            encoding.codec = "json"
+            encoding.codec = "stack"
+            encoding.serializer.codec = "json"
+            encoding.framing.method = "newline_delimited"
         "#})
         .unwrap()
     }
@@ -256,7 +256,7 @@ impl SinkConfig for GcsSinkConfig {
     }
 
     fn input(&self) -> Input {
-        Input::new(self.encoding.config().1.input_type() & DataType::Log)
+        Input::new(self.encoding.input_type() & DataType::Log)
     }
 
     fn acknowledgements(&self) -> &AcknowledgementsConfig {
@@ -313,7 +313,7 @@ struct RequestSettings {
     extension: String,
     time_format: String,
     append_uuid: bool,
-    encoder: Arc<dyn crate::sinks::util::encoding::Encoder<Vec<Event>> + Send + Sync>,
+    encoder: (Transformer, BatchEncoder),
     compression: Compression,
     tz_offset: Option<FixedOffset>,
 }
@@ -321,7 +321,7 @@ struct RequestSettings {
 impl RequestBuilder<(String, Vec<Event>)> for RequestSettings {
     type Metadata = (String, EventFinalizers);
     type Events = Vec<Event>;
-    type Encoder = Arc<dyn crate::sinks::util::encoding::Encoder<Vec<Event>> + Send + Sync>;
+    type Encoder = (Transformer, BatchEncoder);
     type Payload = Bytes;
     type Request = GcsRequest;
     type Error = io::Error;
@@ -390,17 +390,8 @@ impl RequestBuilder<(String, Vec<Event>)> for RequestSettings {
 
 impl RequestSettings {
     fn new(config: &GcsSinkConfig, cx: SinkContext) -> crate::Result<Self> {
-        let transformer = config.encoding.transformer();
-        let mut content_type_value = "parquet";
-        let encoder = if let Some(serializer) = config.encoding.build_batched()? {
-            Arc::new((transformer, serializer))
-                as Arc<dyn crate::sinks::util::encoding::Encoder<Vec<Event>> + Send + Sync>
-        } else {
-            let (framer, serializer) = config.encoding.build(SinkType::MessageBased)?;
-            let encoder = Encoder::<Framer>::new(framer, serializer);
-            content_type_value = encoder.content_type();
-            Arc::new((transformer, encoder)) as _
-        };
+        let (encoder, transformer) = config.encoding.build()?;
+        let content_type_value = encoder.content_type();
         let acl = config
             .acl
             .map(|acl| HeaderValue::from_str(&to_string(acl)).unwrap());
@@ -424,7 +415,11 @@ impl RequestSettings {
         let extension = config
             .filename_extension
             .clone()
-            .unwrap_or_else(|| config.compression.extension().into());
+            .unwrap_or_else(|| {
+                config.encoding.file_extension()
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| config.compression.extension().into())
+            });
         let time_format = config.filename_time_format.clone();
         let append_uuid = config.filename_append_uuid;
         let offset = config
@@ -442,7 +437,7 @@ impl RequestSettings {
             time_format,
             append_uuid,
             compression: config.compression,
-            encoder: encoder,
+            encoder: (transformer, encoder),
             tz_offset: offset,
         })
     }
@@ -459,14 +454,15 @@ fn make_header((name, value): (&String, &String)) -> crate::Result<(HeaderName, 
 #[cfg(test)]
 mod tests {
     use futures_util::{future::ready, stream};
-    use vector_lib::codecs::encoding::FramingConfig;
-    use vector_lib::codecs::{
-        JsonSerializerConfig, NewlineDelimitedEncoderConfig, TextSerializerConfig,
+    use vector_lib::codecs::encoding::{
+        BatchEncodingConfig, BatchSerializerConfig, EventEncodingConfig,
+        FramingConfig, JsonSerializerConfig, SerializerConfig, TextSerializerConfig,
     };
     use vector_lib::partition::Partitioner;
     use vector_lib::request_metadata::GroupedCountByteSize;
     use vector_lib::EstimatedJsonEncodedSizeOf;
 
+    use crate::codecs::Transformer;
     use crate::event::LogEvent;
     use crate::test_util::{
         components::{run_and_assert_sink_compliance, SINK_TAGS},
@@ -474,6 +470,31 @@ mod tests {
     };
 
     use super::*;
+
+    fn stack_encoding_config(serializer: SerializerConfig) -> BatchEncodingConfig {
+        BatchEncodingConfig {
+            framing: None,
+            encoding: BatchSerializerConfig::Stack(EventEncodingConfig {
+                framing: None,
+                serializer,
+            }),
+            transformer: Transformer::default(),
+        }
+    }
+
+    fn stack_encoding_config_with_framing(
+        framing: FramingConfig,
+        serializer: SerializerConfig,
+    ) -> BatchEncodingConfig {
+        BatchEncodingConfig {
+            framing: None,
+            encoding: BatchSerializerConfig::Stack(EventEncodingConfig {
+                framing: Some(framing),
+                serializer,
+            }),
+            transformer: Transformer::default(),
+        }
+    }
 
     #[test]
     fn generate_config() {
@@ -492,7 +513,7 @@ mod tests {
             .expect("should not fail to create HTTP client");
 
         let config =
-            default_config((None::<FramingConfig>, JsonSerializerConfig::default()).into());
+            default_config(stack_encoding_config(JsonSerializerConfig::default().into()));
         let sink = config
             .build_sink(
                 client,
@@ -516,7 +537,7 @@ mod tests {
 
         let sink_config = GcsSinkConfig {
             key_prefix: Some("key: {{ key }}".into()),
-            ..default_config((None::<FramingConfig>, TextSerializerConfig::default()).into())
+            ..default_config(stack_encoding_config(TextSerializerConfig::default().into()))
         };
         let key = sink_config
             .key_partitioner()
@@ -539,13 +560,10 @@ mod tests {
             filename_extension: extension.map(Into::into),
             filename_append_uuid: uuid,
             compression,
-            ..default_config(
-                (
-                    Some(NewlineDelimitedEncoderConfig::new()),
-                    JsonSerializerConfig::default(),
-                )
-                    .into(),
-            )
+            ..default_config(stack_encoding_config_with_framing(
+                FramingConfig::NewlineDelimited,
+                JsonSerializerConfig::default().into(),
+            ))
         };
         let log = LogEvent::default().into();
         let key = sink_config

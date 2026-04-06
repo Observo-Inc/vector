@@ -41,7 +41,7 @@ impl AvroSerializerConfig {
 
 /// Apache Avro serializer options.
 #[configurable_component]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AvroSerializerOptions {
     /// The Avro schema.
     #[configurable(metadata(

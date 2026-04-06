@@ -1,0 +1,13 @@
+[
+  "lib/observo/azs/src/azs",
+  "lib/observo/chkpts/src/chkpts",
+  "lib/observo/gcs/src/gcs",
+  "lib/observo/lext/src/lext",
+  "lib/observo/lv3/src/lv3",
+  "lib/observo/obvrl/src/obvrl",
+  "lib/observo/sauth/src/sauth",
+  "lib/observo/scol/src/scol",
+  "lib/observo/ssa/src/ssa",
+  "lib/observo/stcp/src/stcp",
+  "lib/observo/wef/src/wef"
+]

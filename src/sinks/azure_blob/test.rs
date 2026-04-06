@@ -1,21 +1,20 @@
-use std::sync::Arc;
 use bytes::Bytes;
 use chrono::Utc;
-use vector_lib::codecs::{
-    encoding::{Framer, FramingConfig},
-    NewlineDelimitedEncoder, TextSerializerConfig,
+use vector_lib::codecs::encoding::{
+    BatchEncodingConfig, BatchSerializerConfig, EventEncodingConfig,
+    FramingConfig, TextSerializerConfig,
 };
 use vector_lib::request_metadata::GroupedCountByteSize;
 use vector_lib::{partition::Partitioner, EstimatedJsonEncodedSizeOf};
 
 use super::config::AzureBlobSinkConfig;
 use super::request_builder::AzureBlobRequestOptions;
-use crate::codecs::EncodingConfigWithFraming;
+use crate::codecs::Transformer;
 use crate::event::{Event, LogEvent};
 use crate::sinks::util::{request_builder::RequestBuilder, Compression};
-use crate::{codecs::Encoder, sinks::util::request_builder::EncodeResult};
+use crate::sinks::util::request_builder::EncodeResult;
 
-fn default_config(encoding: EncodingConfigWithFraming) -> AzureBlobSinkConfig {
+fn default_config(encoding: BatchEncodingConfig) -> AzureBlobSinkConfig {
     AzureBlobSinkConfig {
         connection_string: Default::default(),
         storage_account: Default::default(),
@@ -32,6 +31,17 @@ fn default_config(encoding: EncodingConfigWithFraming) -> AzureBlobSinkConfig {
     }
 }
 
+fn text_encoding_config() -> BatchEncodingConfig {
+    BatchEncodingConfig {
+        framing: None,
+        encoding: BatchSerializerConfig::Stack(EventEncodingConfig {
+            framing: Some(FramingConfig::NewlineDelimited),
+            serializer: TextSerializerConfig::default().into(),
+        }),
+        transformer: Transformer::default(),
+    }
+}
+
 #[test]
 fn generate_config() {
     crate::test_util::test_generate_config::<AzureBlobSinkConfig>();
@@ -42,10 +52,11 @@ fn azure_blob_build_request_without_compression() {
     let log = Event::Log(LogEvent::from("test message"));
     let compression = Compression::None;
     let container_name = String::from("logs");
+    let encoding = text_encoding_config();
     let sink_config = AzureBlobSinkConfig {
         blob_prefix: "blob".try_into().unwrap(),
         container_name: container_name.clone(),
-        ..default_config((None::<FramingConfig>, TextSerializerConfig::default()).into())
+        ..default_config(encoding.clone())
     };
     let blob_time_format = String::from("");
     let blob_append_uuid = false;
@@ -56,20 +67,17 @@ fn azure_blob_build_request_without_compression() {
         .partition(&log)
         .expect("key wasn't provided");
 
-    let encoder = Encoder::<Framer>::new(
-        NewlineDelimitedEncoder::default().into(),
-        TextSerializerConfig::default().build().into(),
-    );
+    let (encoder, transformer) = encoding.build().expect("failed to build encoder");
     let content_type = encoder.content_type();
 
     let request_options = AzureBlobRequestOptions {
         container_name,
         blob_time_format,
         blob_append_uuid,
-        encoder: Arc::new((Default::default(), encoder)),
+        encoder: (transformer, encoder),
         compression,
-        blob_extension: None,
-        content_type: content_type,
+        blob_extension: Some(compression.extension().to_string()),
+        content_type,
     };
 
     let mut byte_size = GroupedCountByteSize::new_untagged();
@@ -92,10 +100,11 @@ fn azure_blob_build_request_with_compression() {
     let log = Event::Log(LogEvent::from("test message"));
     let compression = Compression::gzip_default();
     let container_name = String::from("logs");
+    let encoding = text_encoding_config();
     let sink_config = AzureBlobSinkConfig {
         blob_prefix: "blob".try_into().unwrap(),
         container_name: container_name.clone(),
-        ..default_config((None::<FramingConfig>, TextSerializerConfig::default()).into())
+        ..default_config(encoding.clone())
     };
     let blob_time_format = String::from("");
     let blob_append_uuid = false;
@@ -106,19 +115,16 @@ fn azure_blob_build_request_with_compression() {
         .partition(&log)
         .expect("key wasn't provided");
 
-    let encoder = Encoder::<Framer>::new(
-        NewlineDelimitedEncoder::default().into(),
-        TextSerializerConfig::default().build().into(),
-    );
+    let (encoder, transformer) = encoding.build().expect("failed to build encoder");
     let content_type = encoder.content_type();
 
     let request_options = AzureBlobRequestOptions {
         container_name,
         blob_time_format,
         blob_append_uuid,
-        encoder: Arc::new((Default::default(), encoder)),
+        encoder: (transformer, encoder),
         compression,
-        blob_extension: None,
+        blob_extension: Some(compression.extension().to_string()),
         content_type,
     };
 
@@ -142,10 +148,11 @@ fn azure_blob_build_request_with_time_format() {
     let log = Event::Log(LogEvent::from("test message"));
     let compression = Compression::None;
     let container_name = String::from("logs");
+    let encoding = text_encoding_config();
     let sink_config = AzureBlobSinkConfig {
         blob_prefix: "blob".try_into().unwrap(),
         container_name: container_name.clone(),
-        ..default_config((None::<FramingConfig>, TextSerializerConfig::default()).into())
+        ..default_config(encoding.clone())
     };
     let blob_time_format = String::from("%F");
     let blob_append_uuid = false;
@@ -155,20 +162,18 @@ fn azure_blob_build_request_with_time_format() {
         .unwrap()
         .partition(&log)
         .expect("key wasn't provided");
-    let encoder = Encoder::<Framer>::new(
-        NewlineDelimitedEncoder::default().into(),
-        TextSerializerConfig::default().build().into(),
-    );
+
+    let (encoder, transformer) = encoding.build().expect("failed to build encoder");
     let content_type = encoder.content_type();
 
     let request_options = AzureBlobRequestOptions {
         container_name,
         blob_time_format,
         blob_append_uuid,
-        encoder: Arc::new((Default::default(), encoder)),
+        encoder: (transformer, encoder),
         compression,
-        blob_extension: None,
-        content_type: content_type,
+        blob_extension: Some(compression.extension().to_string()),
+        content_type,
     };
 
     let mut byte_size = GroupedCountByteSize::new_untagged();
@@ -194,10 +199,11 @@ fn azure_blob_build_request_with_uuid() {
     let log = Event::Log(LogEvent::from("test message"));
     let compression = Compression::None;
     let container_name = String::from("logs");
+    let encoding = text_encoding_config();
     let sink_config = AzureBlobSinkConfig {
         blob_prefix: "blob".try_into().unwrap(),
         container_name: container_name.clone(),
-        ..default_config((None::<FramingConfig>, TextSerializerConfig::default()).into())
+        ..default_config(encoding.clone())
     };
     let blob_time_format = String::from("");
     let blob_append_uuid = true;
@@ -207,20 +213,18 @@ fn azure_blob_build_request_with_uuid() {
         .unwrap()
         .partition(&log)
         .expect("key wasn't provided");
-    let encoder = Encoder::<Framer>::new(
-        NewlineDelimitedEncoder::default().into(),
-        TextSerializerConfig::default().build().into(),
-    );
+
+    let (encoder, transformer) = encoding.build().expect("failed to build encoder");
     let content_type = encoder.content_type();
 
     let request_options = AzureBlobRequestOptions {
         container_name,
         blob_time_format,
         blob_append_uuid,
-        encoder: Arc::new((Default::default(), encoder)),
+        encoder: (transformer, encoder),
         compression,
-        blob_extension: None,
-        content_type: content_type,
+        blob_extension: Some(compression.extension().to_string()),
+        content_type,
     };
 
     let mut byte_size = GroupedCountByteSize::new_untagged();

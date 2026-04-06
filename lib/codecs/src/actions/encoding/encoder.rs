@@ -14,8 +14,11 @@ pub struct Encoder<Framer>
 where
     Framer: Clone,
 {
-    framer: Framer,
-    serializer: Serializer,
+    /// The framer to wrap the serialized event into a byte frame.
+    pub framer: Framer,
+
+    /// The serializer to produce bytes from a structured event.
+    pub serializer: Serializer,
 }
 
 impl Default for Encoder<Framer> {
