@@ -88,6 +88,7 @@ impl ConstFrameEncoder {
 impl Framer for ConstFrameEncoder {
     fn frame(&mut self, buffer: &mut BytesMut) -> Result<(), BoxedFramingError> {
         let data = buffer.split();
+        buffer.reserve(self.prefix.len() + data.len() + self.suffix.len());
         buffer.extend_from_slice(&self.prefix);
         buffer.extend_from_slice(&data);
         buffer.extend_from_slice(&self.suffix);

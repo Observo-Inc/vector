@@ -65,9 +65,8 @@ pub struct EncodingConfigWithFraming {
     #[configurable(derived)]
     pub framing: Option<FramingConfig>,
 
-    /// Encoding configuration (alias: `serializer`).
+    /// Encoding configuration.
     #[configurable(derived)]
-    #[serde(alias = "serializer")]
     pub encoding: EncodingConfig,
 }
 

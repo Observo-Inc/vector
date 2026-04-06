@@ -695,7 +695,7 @@ impl BatchSerializerConfig {
             )),
             BatchSerializerConfig::Stack(cfg) => {
                 let serializer = cfg.serializer.build()?;
-                let framer = cfg.framing.as_ref().map(|c| c.clone()).unwrap_or(cfg.serializer.default_stream_framing()).build();
+                let framer = cfg.framing.clone().unwrap_or(cfg.serializer.default_stream_framing()).build();
                 Ok(BatchSerializer::Stack(StackSerializer(EventEncoder::<Framer>::new(framer, serializer))))
             },
         }
