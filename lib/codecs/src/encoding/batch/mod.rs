@@ -1,10 +1,15 @@
 //! Configuration for frame encapsulation.
 
 use bytes::BytesMut;
-use tokio_util::codec::Encoder;
 use vector_config::configurable_component;
 
 use crate::encoding::BoxedFramingError;
+
+/// A trait for framing bytes into frames with defined boundaries.
+pub trait Framer {
+    /// Frame the bytes in `buffer` by applying framing to it.
+    fn frame(&mut self, buffer: &mut BytesMut) -> Result<(), BoxedFramingError>;
+}
 
 /// Configuration for character-delimited framing.
 #[configurable_component]
@@ -31,11 +36,10 @@ impl EncapFramingConfig {
     }
 }
 
-impl Encoder<()> for EncapFramer {
-    type Error = BoxedFramingError;
-    fn encode(&mut self, _: (), buffer: &mut BytesMut) -> Result<(), BoxedFramingError> {
+impl Framer for EncapFramer {
+    fn frame(&mut self, buffer: &mut BytesMut) -> Result<(), BoxedFramingError> {
         match self {
-            EncapFramer::Const(encoder) => encoder.encode((), buffer),
+            EncapFramer::Const(encoder) => encoder.frame(buffer),
         }
     }
 }
@@ -81,10 +85,8 @@ impl ConstFrameEncoder {
     }
 }
 
-impl Encoder<()> for ConstFrameEncoder {
-    type Error = BoxedFramingError;
-
-    fn encode(&mut self, _: (), buffer: &mut BytesMut) -> Result<(), BoxedFramingError> {
+impl Framer for ConstFrameEncoder {
+    fn frame(&mut self, buffer: &mut BytesMut) -> Result<(), BoxedFramingError> {
         let data = buffer.split();
         buffer.extend_from_slice(&self.prefix);
         buffer.extend_from_slice(&data);

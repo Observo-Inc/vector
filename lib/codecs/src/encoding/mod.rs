@@ -29,7 +29,7 @@ pub use framing::{
 use vector_config::configurable_component;
 use vector_core::{config::DataType, event::Event, schema};
 
-use crate::{actions::{Transformer, Encoder as EventEncoder}, encoding::batch::{EncapFramer, ConstFrameEncoder}};
+use crate::{actions::{Transformer, Encoder as EventEncoder}, encoding::batch::{Framer as BFrmr, EncapFramer, ConstFrameEncoder}};
 pub use crate::encoding::{format::{SyslogSerializer, SyslogSerializerConfig, SyslogFormat, Rfc5424, SyslogTimeRes, Truncation}, framing::OctetCountedEncoder};
 
 /// An error that occurred while building an encoder.
@@ -821,12 +821,12 @@ pub enum BatchFramer {
     Encap(EncapFramer),
 }
 
-impl BatchFramer {
+impl BFrmr for BatchFramer {
     /// Encode framing into the buffer.
-    pub fn encode(&mut self, buffer: &mut BytesMut) -> Result<(), BoxedFramingError> {
+    fn frame(&mut self, buffer: &mut BytesMut) -> Result<(), BoxedFramingError> {
         match self {
             BatchFramer::Identity => Ok(()),
-            BatchFramer::Encap(encap) => encap.encode((), buffer),
+            BatchFramer::Encap(encap) => encap.frame(buffer),
         }
     }
 }
@@ -851,7 +851,7 @@ impl Encoder<Vec<Event>> for BatchEncoder {
 
     fn encode(&mut self, events: Vec<Event>, buffer: &mut BytesMut) -> Result<(), Self::Error> {
         self.serializer.encode(events, buffer)?;
-        self.framer.encode(buffer)?;
+        self.framer.frame(buffer)?;
         Ok(())
     }
 }
