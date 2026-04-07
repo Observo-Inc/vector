@@ -16,7 +16,7 @@ path = "src/lib.rs"
 arc-swap = { version = "1.7", default-features = false }
 dashmap = { version = "5.5" }
 lext = { path = "../lext" }
-mlua = { version = "0.10.2", default-features = false, features = ["lua54", "send", "vendored", "macros"]}
+mlua = { version = "0.10.2", default-features = false, features = ["lua54", "send", "vendored", "macros", "async"]}
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
