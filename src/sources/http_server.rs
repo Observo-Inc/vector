@@ -14,6 +14,7 @@ use vector_lib::codecs::{
     NewlineDelimitedDecoderConfig,
 };
 use vector_lib::configurable::configurable_component;
+use vector_lib::ipallowlist::IpAllowlistConfig;
 use vector_lib::lookup::{lookup_v2::OptionalValuePath, owned_value_path, path};
 use vector_lib::{
     config::{DataType, LegacyKey, LogNamespace},
@@ -174,6 +175,9 @@ pub struct SimpleHttpConfig {
     #[configurable(derived)]
     #[serde(default)]
     keepalive: KeepaliveConfig,
+
+    #[configurable(derived)]
+    pub permit_origin: Option<IpAllowlistConfig>,
 }
 
 impl SimpleHttpConfig {
@@ -285,6 +289,7 @@ impl Default for SimpleHttpConfig {
             acknowledgements: SourceAcknowledgementsConfig::default(),
             log_namespace: None,
             keepalive: KeepaliveConfig::default(),
+            permit_origin: None,
         }
     }
 }
@@ -384,6 +389,7 @@ impl SourceConfig for SimpleHttpConfig {
             cx,
             self.acknowledgements,
             self.keepalive.clone(),
+            self.permit_origin.clone(),
         )
     }
 
@@ -610,6 +616,7 @@ mod tests {
                 acknowledgements: acknowledgements.into(),
                 log_namespace: None,
                 keepalive: Default::default(),
+                permit_origin: None,
             }
             .build(context)
             .await
@@ -667,6 +674,7 @@ mod tests {
                 acknowledgements: acknowledgements.into(),
                 log_namespace: None,
                 keepalive: Default::default(),
+                permit_origin: None,
             }
             .build(context)
             .await

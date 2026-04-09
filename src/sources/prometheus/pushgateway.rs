@@ -19,6 +19,7 @@ use bytes::Bytes;
 use itertools::Itertools;
 use vector_lib::config::LogNamespace;
 use vector_lib::configurable::configurable_component;
+use vector_lib::ipallowlist::IpAllowlistConfig;
 use warp::http::HeaderMap;
 
 use super::parser;
@@ -70,6 +71,9 @@ pub struct PrometheusPushgatewayConfig {
     /// meaningfully aggregated.
     #[serde(default = "crate::serde::default_false")]
     aggregate_metrics: bool,
+
+    #[configurable(derived)]
+    pub permit_origin: Option<IpAllowlistConfig>,
 }
 
 impl GenerateConfig for PrometheusPushgatewayConfig {
@@ -81,6 +85,7 @@ impl GenerateConfig for PrometheusPushgatewayConfig {
             acknowledgements: SourceAcknowledgementsConfig::default(),
             aggregate_metrics: false,
             keepalive: KeepaliveConfig::default(),
+            permit_origin: None,
         })
         .unwrap()
     }
@@ -104,6 +109,7 @@ impl SourceConfig for PrometheusPushgatewayConfig {
             cx,
             self.acknowledgements,
             self.keepalive.clone(),
+            self.permit_origin.clone(),
         )
     }
 
@@ -374,6 +380,7 @@ mod test {
                 acknowledgements: SourceAcknowledgementsConfig::default(),
                 keepalive: KeepaliveConfig::default(),
                 aggregate_metrics: true,
+                permit_origin: None,
             };
             let source = source
                 .build(SourceContext::new_test(tx, None))

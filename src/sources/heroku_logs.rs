@@ -18,6 +18,7 @@ use vrl::value::{kind::Collection, Kind};
 use warp::http::{HeaderMap, StatusCode};
 
 use vector_lib::configurable::configurable_component;
+use vector_lib::ipallowlist::IpAllowlistConfig;
 use vector_lib::{
     config::{LegacyKey, LogNamespace},
     schema::Definition,
@@ -92,6 +93,9 @@ pub struct LogplexConfig {
     #[configurable(derived)]
     #[serde(default)]
     keepalive: KeepaliveConfig,
+
+    #[configurable(derived)]
+    pub permit_origin: Option<IpAllowlistConfig>,
 }
 
 impl LogplexConfig {
@@ -162,6 +166,7 @@ impl Default for LogplexConfig {
             acknowledgements: SourceAcknowledgementsConfig::default(),
             log_namespace: None,
             keepalive: KeepaliveConfig::default(),
+            permit_origin: None,
         }
     }
 }
@@ -202,6 +207,7 @@ impl SourceConfig for LogplexConfig {
             cx,
             self.acknowledgements,
             self.keepalive.clone(),
+            self.permit_origin.clone(),
         )
     }
 
@@ -474,6 +480,7 @@ mod tests {
                 acknowledgements: acknowledgements.into(),
                 log_namespace: None,
                 keepalive: Default::default(),
+                permit_origin: None,
             }
             .build(context)
             .await

@@ -27,6 +27,8 @@ use warp::{
     Filter,
 };
 
+use vector_lib::ipallowlist::IpAllowlistConfig;
+
 use crate::{
     config::SourceContext,
     http::{build_http_trace_layer, KeepaliveConfig, MaxConnectionAgeLayer},
@@ -83,6 +85,7 @@ pub trait HttpSource: Clone + Send + Sync + 'static {
         cx: SourceContext,
         acknowledgements: SourceAcknowledgementsConfig,
         keepalive_settings: KeepaliveConfig,
+        permit_origin: Option<IpAllowlistConfig>,
     ) -> crate::Result<crate::sources::Source> {
         let tls = MaybeTlsSettings::from_config(tls, true)?;
         let protocol = tls.http_protocol_name();
@@ -220,6 +223,8 @@ pub trait HttpSource: Clone + Send + Sync + 'static {
             let listener = tls.bind(&address).await.map_err(|err| {
                 error!("An error occurred: {:?}.", err);
             })?;
+            let listener = listener
+                .with_allowlist(permit_origin.map(Into::into));
 
             Server::builder(hyper::server::accept::from_stream(listener.accept_stream()))
                 .serve(make_svc)

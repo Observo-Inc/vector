@@ -4,6 +4,7 @@ use bytes::Bytes;
 use prost::Message;
 use vector_lib::config::LogNamespace;
 use vector_lib::configurable::configurable_component;
+use vector_lib::ipallowlist::IpAllowlistConfig;
 use vector_lib::prometheus::parser::proto;
 use warp::http::{HeaderMap, StatusCode};
 
@@ -50,6 +51,9 @@ pub struct PrometheusRemoteWriteConfig {
     #[configurable(derived)]
     #[serde(default)]
     keepalive: KeepaliveConfig,
+
+    #[configurable(derived)]
+    pub permit_origin: Option<IpAllowlistConfig>,
 }
 
 impl PrometheusRemoteWriteConfig {
@@ -61,6 +65,7 @@ impl PrometheusRemoteWriteConfig {
             auth: None,
             acknowledgements: false.into(),
             keepalive: KeepaliveConfig::default(),
+            permit_origin: None,
         }
     }
 }
@@ -73,6 +78,7 @@ impl GenerateConfig for PrometheusRemoteWriteConfig {
             auth: None,
             acknowledgements: SourceAcknowledgementsConfig::default(),
             keepalive: KeepaliveConfig::default(),
+            permit_origin: None,
         })
         .unwrap()
     }
@@ -94,6 +100,7 @@ impl SourceConfig for PrometheusRemoteWriteConfig {
             cx,
             self.acknowledgements,
             self.keepalive.clone(),
+            self.permit_origin.clone(),
         )
     }
 
@@ -192,6 +199,7 @@ mod test {
             tls: tls.clone(),
             acknowledgements: SourceAcknowledgementsConfig::default(),
             keepalive: KeepaliveConfig::default(),
+            permit_origin: None,
         };
         let source = source
             .build(SourceContext::new_test(tx, None))
@@ -285,6 +293,7 @@ mod test {
             tls: None,
             acknowledgements: SourceAcknowledgementsConfig::default(),
             keepalive: KeepaliveConfig::default(),
+            permit_origin: None,
         };
         let source = source
             .build(SourceContext::new_test(tx, None))
