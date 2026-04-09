@@ -33,6 +33,8 @@ use vector_lib::{
     EstimatedJsonEncodedSizeOf,
 };
 use vector_lib::{configurable::configurable_component, tls::MaybeTlsIncomingStream};
+use vector_lib::ipallowlist::IpAllowlistConfig;
+
 use vrl::path::OwnedTargetPath;
 use vrl::value::{kind::Collection, Kind};
 use warp::{filters::BoxedFilter, path, reject::Rejection, reply::Response, Filter, Reply};
@@ -117,6 +119,9 @@ pub struct SplunkConfig {
     #[configurable(derived)]
     #[serde(default)]
     keepalive: KeepaliveConfig,
+
+    #[configurable(derived)]
+    pub permit_origin: Option<IpAllowlistConfig>,
 }
 
 impl_generate_config_from_default!(SplunkConfig);
@@ -132,6 +137,7 @@ impl Default for SplunkConfig {
             store_hec_token: false,
             log_namespace: None,
             keepalive: Default::default(),
+            permit_origin: None,
         }
     }
 }
@@ -170,6 +176,8 @@ impl SourceConfig for SplunkConfig {
             .or_else(finish_err);
 
         let listener = tls.bind(&self.address).await?;
+        let listener = listener
+            .with_allowlist(self.permit_origin.clone().map(Into::into));
 
         let keepalive_settings = self.keepalive.clone();
         Ok(Box::pin(async move {
@@ -1333,6 +1341,7 @@ mod tests {
                 store_hec_token,
                 log_namespace: None,
                 keepalive: Default::default(),
+                permit_origin: None,
             }
             .build(cx)
             .await
