@@ -83,28 +83,33 @@ pub struct MaybeTlsListener {
 
 impl MaybeTlsListener {
     pub async fn accept(&mut self) -> crate::tls::Result<MaybeTlsIncomingStream<TcpStream>> {
-        let listener = self
-            .listener
-            .accept()
-            .await
-            .map(|(stream, peer_addr)| {
-                MaybeTlsIncomingStream::new(stream, peer_addr, self.acceptor.clone())
-            })
-            .context(IncomingListenerSnafu)?;
-
-        if let Some(origin_filter) = &self.origin_filter {
-            if origin_filter
-                .iter()
-                .any(|net| net.contains(&listener.peer_addr().ip()))
-            {
-                Ok(listener)
-            } else {
-                Err(TlsError::Connect {
-                    source: std::io::ErrorKind::ConnectionRefused.into(),
+        loop {
+            let listener = self
+                .listener
+                .accept()
+                .await
+                .map(|(stream, peer_addr)| {
+                    MaybeTlsIncomingStream::new(stream, peer_addr, self.acceptor.clone())
                 })
+                .context(IncomingListenerSnafu)?;
+
+            if let Some(origin_filter) = &self.origin_filter {
+                if origin_filter
+                    .iter()
+                    .any(|net| net.contains(&listener.peer_addr().ip()))
+                {
+                    return Ok(listener);
+                } else {
+                    warn!(
+                        message = "Rejected connection from non-allowed origin.",
+                        peer_addr = %listener.peer_addr(),
+                    );
+                    drop(listener);
+                    continue;
+                }
+            } else {
+                return Ok(listener);
             }
-        } else {
-            Ok(listener)
         }
     }
 
