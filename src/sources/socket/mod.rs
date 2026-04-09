@@ -1791,4 +1791,154 @@ mod test {
         })
         .await;
     }
+
+    //////// PERMIT_ORIGIN / ALLOWLIST TESTS ////////
+
+    fn make_allowlist(cidrs: &[&str]) -> Option<vector_lib::ipallowlist::IpAllowlistConfig> {
+        use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
+        Some(IpAllowlistConfig(
+            cidrs
+                .iter()
+                .map(|s| IpNetConfig(s.parse().unwrap()))
+                .collect(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn tcp_permit_origin_allows_matching_ip() {
+        assert_source_compliance(&SOCKET_PUSH_SOURCE_TAGS, async {
+            let (tx, mut rx) = SourceSender::new_test();
+            let addr = next_addr();
+
+            let mut config = TcpConfig::from_address(addr.into());
+            config.permit_origin = make_allowlist(&["127.0.0.1/32"]);
+
+            let server = SocketConfig::from(config)
+                .build(SourceContext::new_test(tx, None))
+                .await
+                .unwrap();
+            tokio::spawn(server);
+
+            wait_for_tcp(addr).await;
+            send_lines(addr, vec!["allowed".to_owned()].into_iter())
+                .await
+                .unwrap();
+
+            let event = rx.next().await.unwrap();
+            assert_eq!(
+                event.as_log()[log_schema().message_key().unwrap().to_string()],
+                "allowed".into()
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn tcp_permit_origin_blocks_non_matching_ip() {
+        let (tx, mut rx) = SourceSender::new_test();
+        let addr = next_addr();
+
+        let mut config = TcpConfig::from_address(addr.into());
+        // Only allow 10.0.0.1 — localhost (127.0.0.1) should be rejected
+        config.permit_origin = make_allowlist(&["10.0.0.1/32"]);
+
+        let server = SocketConfig::from(config)
+            .build(SourceContext::new_test(tx, None))
+            .await
+            .unwrap();
+        tokio::spawn(server);
+
+        wait_for_tcp(addr).await;
+        // Connection from localhost should be accepted at TCP level but rejected by allowlist
+        let _ = send_lines(addr, vec!["blocked".to_owned()].into_iter()).await;
+
+        // No events should have been received within a reasonable window
+        let result = timeout(Duration::from_millis(200), rx.next()).await;
+        assert!(result.is_err(), "expected no events from blocked IP");
+    }
+
+    #[tokio::test]
+    async fn udp_permit_origin_allows_matching_ip() {
+        assert_source_compliance(&SOCKET_PUSH_SOURCE_TAGS, async {
+            let (tx, rx) = SourceSender::new_test();
+            let address = next_addr();
+
+            let mut config = UdpConfig::from_address(address.into());
+            config.permit_origin = make_allowlist(&["127.0.0.1/32"]);
+
+            let address = init_udp_with_config(tx, config).await;
+
+            send_lines_udp(address, vec!["allowed".to_string()]);
+            let events = collect_n(rx, 1).await;
+
+            assert_eq!(
+                events[0].as_log()[log_schema().message_key().unwrap().to_string()],
+                "allowed".into()
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn udp_permit_origin_blocks_non_matching_ip() {
+        let (tx, mut rx) = SourceSender::new_test();
+        let address = next_addr();
+
+        let mut config = UdpConfig::from_address(address.into());
+        // Only allow 10.0.0.1 — localhost (127.0.0.1) should be rejected
+        config.permit_origin = make_allowlist(&["10.0.0.1/32"]);
+
+        let address = init_udp_with_config(tx, config).await;
+
+        send_lines_udp(address, vec!["blocked".to_string()]);
+
+        // No events should have been received within a reasonable window
+        let result = timeout(Duration::from_millis(200), rx.next()).await;
+        assert!(result.is_err(), "expected no events from blocked IP");
+    }
+
+    #[tokio::test]
+    async fn udp_permit_origin_allows_cidr_range() {
+        assert_source_compliance(&SOCKET_PUSH_SOURCE_TAGS, async {
+            let (tx, rx) = SourceSender::new_test();
+            let address = next_addr();
+
+            let mut config = UdpConfig::from_address(address.into());
+            // 127.0.0.0/8 covers all of 127.x.x.x
+            config.permit_origin = make_allowlist(&["127.0.0.0/8"]);
+
+            let address = init_udp_with_config(tx, config).await;
+
+            send_lines_udp(address, vec!["cidr_allowed".to_string()]);
+            let events = collect_n(rx, 1).await;
+
+            assert_eq!(
+                events[0].as_log()[log_schema().message_key().unwrap().to_string()],
+                "cidr_allowed".into()
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn udp_no_permit_origin_allows_all() {
+        assert_source_compliance(&SOCKET_PUSH_SOURCE_TAGS, async {
+            let (tx, rx) = SourceSender::new_test();
+            let address = next_addr();
+
+            let mut config = UdpConfig::from_address(address.into());
+            config.permit_origin = None;
+
+            let address = init_udp_with_config(tx, config).await;
+
+            send_lines_udp(address, vec!["no_filter".to_string()]);
+            let events = collect_n(rx, 1).await;
+
+            assert_eq!(
+                events[0].as_log()[log_schema().message_key().unwrap().to_string()],
+                "no_filter".into()
+            );
+        })
+        .await;
+    }
 }

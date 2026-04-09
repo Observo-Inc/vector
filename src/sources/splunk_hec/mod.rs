@@ -2818,5 +2818,51 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn permit_origin_blocks_non_matching_ip() {
+        use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
+        use tokio::time::{timeout, Duration};
+        use futures::StreamExt;
+
+        let (sender, mut recv) = SourceSender::new_test_finalize(EventStatus::Delivered);
+        let address = next_addr();
+        let cx = SourceContext::new_test(sender, None);
+
+        let permit_origin = Some(IpAllowlistConfig(vec![
+            IpNetConfig("10.0.0.1/32".parse().unwrap()),
+        ]));
+
+        tokio::spawn(async move {
+            SplunkConfig {
+                address,
+                token: Some(TOKEN.to_owned().into()),
+                valid_tokens: None,
+                tls: None,
+                acknowledgements: Default::default(),
+                store_hec_token: false,
+                log_namespace: None,
+                keepalive: Default::default(),
+                permit_origin,
+            }
+            .build(cx)
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+        });
+        wait_for_tcp(address).await;
+
+        // Send from localhost — should be blocked by allowlist
+        let _ = reqwest::Client::new()
+            .post(format!("http://{}/services/collector", address))
+            .header("Authorization", format!("Splunk {}", TOKEN))
+            .body(r#"{"event":"blocked"}"#)
+            .send()
+            .await;
+
+        let result = timeout(Duration::from_millis(200), recv.next()).await;
+        assert!(result.is_err(), "expected no events from blocked IP");
+    }
+
     register_validatable_component!(SplunkConfig);
 }

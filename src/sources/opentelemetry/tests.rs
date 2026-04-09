@@ -1588,6 +1588,50 @@ fn vec_into_btmap(arr: Vec<(&'static str, Value)>) -> ObjectMap {
     )
 }
 
+#[tokio::test]
+async fn permit_origin_blocks_non_matching_ip() {
+    use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
+    use tokio::time::{timeout, Duration};
+
+    let http_addr = next_addr();
+
+    let permit_origin = Some(IpAllowlistConfig(vec![
+        IpNetConfig("10.0.0.1/32".parse().unwrap()),
+    ]));
+
+    let config = OpentelemetryConfig {
+        grpc: None,
+        http: Some(HttpConfig {
+            address: http_addr,
+            tls: Default::default(),
+            keepalive: Default::default(),
+            headers: Default::default(),
+        }),
+        acknowledgements: Default::default(),
+        log_namespace: None,
+        permit_origin,
+    };
+
+    let (sender, mut output, _) = new_source(EventStatus::Delivered, LOGS.to_string());
+    let server = config
+        .build(SourceContext::new_test(sender, None))
+        .await
+        .expect("Failed to build source");
+    tokio::spawn(server);
+    test_util::wait_for_tcp(http_addr).await;
+
+    // Send from localhost — should be blocked by allowlist
+    let _ = reqwest::Client::new()
+        .post(format!("http://{}/v1/logs", http_addr))
+        .header("Content-Type", "application/x-protobuf")
+        .body(vec![0u8; 0])
+        .send()
+        .await;
+
+    let result = timeout(Duration::from_millis(200), output.next()).await;
+    assert!(result.is_err(), "expected no events from blocked IP");
+}
+
 fn current_time_and_nanos() -> (SystemTime, u64) {
     let time = SystemTime::now();
     let nanos = time

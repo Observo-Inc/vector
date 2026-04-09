@@ -347,6 +347,45 @@ mod test {
 
         vector_lib::assert_event_data_eq!(expected, output);
     }
+
+    #[tokio::test]
+    async fn permit_origin_blocks_non_matching_ip() {
+        use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
+        use tokio::time::{timeout, Duration};
+        use futures::StreamExt;
+
+        let address = test_util::next_addr();
+        let (tx, mut rx) = SourceSender::new_test_finalize(EventStatus::Delivered);
+
+        let permit_origin = Some(IpAllowlistConfig(vec![
+            IpNetConfig("10.0.0.1/32".parse().unwrap()),
+        ]));
+
+        let source = PrometheusRemoteWriteConfig {
+            address,
+            auth: None,
+            tls: None,
+            acknowledgements: SourceAcknowledgementsConfig::default(),
+            keepalive: KeepaliveConfig::default(),
+            permit_origin,
+        };
+        let source = source
+            .build(SourceContext::new_test(tx, None))
+            .await
+            .unwrap();
+        tokio::spawn(source);
+        wait_for_tcp(address).await;
+
+        // Send from localhost — should be blocked by allowlist
+        let _ = reqwest::Client::new()
+            .post(format!("http://{}/api/v1/write", address))
+            .body("test")
+            .send()
+            .await;
+
+        let result = timeout(Duration::from_millis(200), rx.next()).await;
+        assert!(result.is_err(), "expected no events from blocked IP");
+    }
 }
 
 #[cfg(all(test, feature = "prometheus-integration-tests"))]
@@ -384,6 +423,7 @@ mod integration_tests {
             tls: None,
             acknowledgements: SourceAcknowledgementsConfig::default(),
             keepalive: KeepaliveConfig::default(),
+            permit_origin: None,
         };
 
         let events = run_and_assert_source_compliance(
