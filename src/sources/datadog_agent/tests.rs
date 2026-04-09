@@ -1578,6 +1578,7 @@ fn test_config_outputs_with_disabled_data_types() {
             parse_ddtags: false,
             log_namespace: Some(false),
             keepalive: Default::default(),
+            permit_origin: None,
         };
 
         let outputs: Vec<DataType> = config
@@ -2020,6 +2021,7 @@ fn test_config_outputs() {
             parse_ddtags: false,
             log_namespace: Some(false),
             keepalive: Default::default(),
+            permit_origin: None,
         };
 
         let mut outputs = config
@@ -2527,6 +2529,7 @@ impl ValidatableComponent for DatadogAgentConfig {
             parse_ddtags: false,
             log_namespace: Some(false),
             keepalive: Default::default(),
+            permit_origin: None,
         };
 
         let log_namespace: LogNamespace = config.log_namespace.unwrap_or_default().into();

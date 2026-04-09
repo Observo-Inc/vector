@@ -37,6 +37,7 @@ use tracing::Span;
 use vector_lib::codecs::decoding::{DeserializerConfig, FramingConfig};
 use vector_lib::config::{LegacyKey, LogNamespace};
 use vector_lib::configurable::configurable_component;
+use vector_lib::ipallowlist::IpAllowlistConfig;
 use vector_lib::event::{BatchNotifier, BatchStatus};
 use vector_lib::internal_event::{EventsReceived, Registered};
 use vector_lib::lookup::owned_value_path;
@@ -141,6 +142,9 @@ pub struct DatadogAgentConfig {
     #[configurable(derived)]
     #[serde(default)]
     keepalive: KeepaliveConfig,
+
+    #[configurable(derived)]
+    pub permit_origin: Option<IpAllowlistConfig>,
 }
 
 impl GenerateConfig for DatadogAgentConfig {
@@ -159,6 +163,7 @@ impl GenerateConfig for DatadogAgentConfig {
             parse_ddtags: false,
             log_namespace: Some(false),
             keepalive: KeepaliveConfig::default(),
+            permit_origin: None,
         })
         .unwrap()
     }
@@ -190,6 +195,8 @@ impl SourceConfig for DatadogAgentConfig {
             self.parse_ddtags,
         );
         let listener = tls.bind(&self.address).await?;
+        let listener = listener
+            .with_allowlist(self.permit_origin.clone().map(Into::into));
         let acknowledgements = cx.do_acknowledgements(self.acknowledgements);
         let filters = source.build_warp_filters(cx.out, acknowledgements, self)?;
         let shutdown = cx.shutdown;
