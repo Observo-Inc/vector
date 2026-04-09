@@ -9,6 +9,7 @@ use tracing::Span;
 use vector_lib::codecs::decoding::{DeserializerConfig, FramingConfig};
 use vector_lib::config::{LegacyKey, LogNamespace};
 use vector_lib::configurable::configurable_component;
+use vector_lib::ipallowlist::IpAllowlistConfig;
 use vector_lib::lookup::owned_value_path;
 use vector_lib::sensitive_string::SensitiveString;
 use vector_lib::tls::MaybeTlsIncomingStream;
@@ -104,6 +105,9 @@ pub struct AwsKinesisFirehoseConfig {
     #[configurable(derived)]
     #[serde(default)]
     keepalive: KeepaliveConfig,
+
+    #[configurable(derived)]
+    pub permit_origin: Option<IpAllowlistConfig>,
 }
 
 const fn access_keys_example() -> [&'static str; 2] {
@@ -181,6 +185,8 @@ impl SourceConfig for AwsKinesisFirehoseConfig {
 
         let tls = MaybeTlsSettings::from_config(self.tls.as_ref(), true)?;
         let listener = tls.bind(&self.address).await?;
+        let listener = listener
+            .with_allowlist(self.permit_origin.clone().map(Into::into));
 
         let keepalive_settings = self.keepalive.clone();
         let shutdown = cx.shutdown;
@@ -261,6 +267,7 @@ impl GenerateConfig for AwsKinesisFirehoseConfig {
             acknowledgements: Default::default(),
             log_namespace: None,
             keepalive: Default::default(),
+            permit_origin: None,
         })
         .unwrap()
     }
@@ -354,6 +361,7 @@ mod tests {
                 acknowledgements: true.into(),
                 log_namespace: Some(log_namespace),
                 keepalive: Default::default(),
+                permit_origin: None,
             }
             .build(cx)
             .await
