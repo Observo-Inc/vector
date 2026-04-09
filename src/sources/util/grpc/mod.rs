@@ -1,3 +1,5 @@
+use vector_lib::ipallowlist::IpAllowlistConfig;
+
 use crate::{
     internal_events::{GrpcServerRequestReceived, GrpcServerResponseSent},
     shutdown::{ShutdownSignal, ShutdownSignalToken},
@@ -68,10 +70,13 @@ pub async fn run_grpc_server_with_routes(
     tls_settings: MaybeTlsSettings,
     routes: Routes,
     shutdown: ShutdownSignal,
+    permit_origin: Option<IpAllowlistConfig>,
 ) -> crate::Result<()> {
     let span = Span::current();
     let (tx, rx) = tokio::sync::oneshot::channel::<ShutdownSignalToken>();
     let listener = tls_settings.bind(&address).await?;
+    let listener = listener
+        .with_allowlist(permit_origin.map(Into::into));
     let stream = listener.accept_stream();
 
     info!(%address, "Building gRPC server.");

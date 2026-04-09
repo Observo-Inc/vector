@@ -1136,6 +1136,7 @@ async fn http_headers() {
             http: http_config,
             acknowledgements: Default::default(),
             log_namespace: Default::default(),
+            permit_origin: None,
         };
         let schema_definitions = source
             .outputs(LogNamespace::Legacy)
@@ -1243,6 +1244,7 @@ async fn only_http_config() {
             http: http_config,
             acknowledgements: Default::default(),
             log_namespace: Default::default(),
+            permit_origin: None,
         };
         let schema_definitions = source
             .outputs(LogNamespace::Legacy)
@@ -1500,6 +1502,7 @@ pub async fn build_otlp_test_env(
         http: http_config,
         acknowledgements: Default::default(),
         log_namespace,
+        permit_origin: None,
     };
 
     let (sender, output, _) = new_source(EventStatus::Delivered, event_name.to_string());
@@ -1537,6 +1540,7 @@ pub async fn build_only_grpc_otlp_test_env(
         http: http_config,
         acknowledgements: Default::default(),
         log_namespace,
+        permit_origin: None,
     };
 
     let (sender, output, _) = new_source(EventStatus::Delivered, event_name.to_string());

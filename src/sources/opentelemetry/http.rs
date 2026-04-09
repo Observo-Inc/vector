@@ -28,6 +28,8 @@ use warp::{
     filters::BoxedFilter, http::HeaderMap, reject::Rejection, reply::Response, Filter, Reply,
 };
 
+use vector_lib::ipallowlist::IpAllowlistConfig;
+
 use crate::http::{KeepaliveConfig, MaxConnectionAgeLayer};
 use crate::sources::http_server::HttpConfigParamKind;
 use crate::sources::util::add_headers;
@@ -57,8 +59,11 @@ pub(crate) async fn run_http_server(
     filters: BoxedFilter<(Response,)>,
     shutdown: ShutdownSignal,
     keepalive_settings: KeepaliveConfig,
+    permit_origin: Option<IpAllowlistConfig>,
 ) -> crate::Result<()> {
     let listener = tls_settings.bind(&address).await?;
+    let listener = listener
+        .with_allowlist(permit_origin.map(Into::into));
     let routes = filters.recover(handle_rejection);
 
     info!(message = "Building HTTP server.", address = %address);
