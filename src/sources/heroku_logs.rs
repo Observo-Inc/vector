@@ -864,4 +864,48 @@ mod tests {
         let result = timeout(Duration::from_millis(200), recv.next()).await;
         assert!(result.is_err(), "expected no events from blocked IP");
     }
+
+    #[tokio::test]
+    async fn permit_origin_allows_matching_ip() {
+        use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
+
+        let (sender, _recv) = SourceSender::new_test_finalize(EventStatus::Delivered);
+        let address = next_addr();
+        let context = SourceContext::new_test(sender, None);
+
+        let permit_origin = Some(IpAllowlistConfig(vec![
+            IpNetConfig("127.0.0.1/32".parse().unwrap()),
+        ]));
+
+        tokio::spawn(async move {
+            LogplexConfig {
+                address,
+                query_parameters: vec![],
+                tls: None,
+                auth: None,
+                framing: default_framing_message_based(),
+                decoding: default_decoding(),
+                acknowledgements: false.into(),
+                log_namespace: None,
+                keepalive: Default::default(),
+                permit_origin,
+            }
+            .build(context)
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+        });
+        wait_for_tcp(address).await;
+
+        // Send from localhost — should be accepted by allowlist
+        let response = reqwest::Client::new()
+            .post(format!("http://{}/events", address))
+            .header("Logplex-Msg-Count", "1")
+            .body("test heroku allowed")
+            .send()
+            .await;
+
+        assert!(response.is_ok(), "expected connection to be accepted for allowed IP");
+    }
 }

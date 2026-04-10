@@ -2864,5 +2864,48 @@ mod tests {
         assert!(result.is_err(), "expected no events from blocked IP");
     }
 
+    #[tokio::test]
+    async fn permit_origin_allows_matching_ip() {
+        use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
+
+        let (sender, _recv) = SourceSender::new_test_finalize(EventStatus::Delivered);
+        let address = next_addr();
+        let cx = SourceContext::new_test(sender, None);
+
+        let permit_origin = Some(IpAllowlistConfig(vec![
+            IpNetConfig("127.0.0.1/32".parse().unwrap()),
+        ]));
+
+        tokio::spawn(async move {
+            SplunkConfig {
+                address,
+                token: Some(TOKEN.to_owned().into()),
+                valid_tokens: None,
+                tls: None,
+                acknowledgements: Default::default(),
+                store_hec_token: false,
+                log_namespace: None,
+                keepalive: Default::default(),
+                permit_origin,
+            }
+            .build(cx)
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+        });
+        wait_for_tcp(address).await;
+
+        // Send from localhost — should be accepted by allowlist
+        let response = reqwest::Client::new()
+            .post(format!("http://{}/services/collector", address))
+            .header("Authorization", format!("Splunk {}", TOKEN))
+            .body(r#"{"event":"allowed"}"#)
+            .send()
+            .await;
+
+        assert!(response.is_ok(), "expected connection to be accepted for allowed IP");
+    }
+
     register_validatable_component!(SplunkConfig);
 }

@@ -535,4 +535,42 @@ mod test {
         let result = timeout(Duration::from_millis(200), rx.next()).await;
         assert!(result.is_err(), "expected no events from blocked IP");
     }
+
+    #[tokio::test]
+    async fn permit_origin_allows_matching_ip() {
+        use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
+
+        let address = test_util::next_addr();
+        let (tx, _rx) = SourceSender::new_test_finalize(EventStatus::Delivered);
+
+        let permit_origin = Some(IpAllowlistConfig(vec![
+            IpNetConfig("127.0.0.1/32".parse().unwrap()),
+        ]));
+
+        let source = PrometheusPushgatewayConfig {
+            address,
+            auth: None,
+            tls: None,
+            acknowledgements: SourceAcknowledgementsConfig::default(),
+            keepalive: KeepaliveConfig::default(),
+            aggregate_metrics: true,
+            permit_origin,
+        };
+        let source = source
+            .build(SourceContext::new_test(tx, None))
+            .await
+            .unwrap();
+        tokio::spawn(source);
+        wait_for_tcp(address).await;
+
+        // Send from localhost — should be accepted by allowlist
+        let response = reqwest::Client::new()
+            .post(format!("http://{}:{}/metrics/job/test", address.ip(), address.port()))
+            .header("Content-Type", "text/plain")
+            .body("test_metric 42")
+            .send()
+            .await;
+
+        assert!(response.is_ok(), "expected connection to be accepted for allowed IP");
+    }
 }
