@@ -28,7 +28,7 @@ use super::{encoder::HecLogsEncoder, request_builder::HecLogsRequestBuilder, sin
 #[serde(deny_unknown_fields)]
 pub struct BatchHeader {
     /// The name of the header.
-    #[configurable(metadata(docs::examples = "Priority"))]
+    #[configurable(metadata(docs::examples = "X-Priority"))]
     pub name: String,
 
     /// The value of the header.
@@ -382,6 +382,82 @@ mod tests {
     #[test]
     fn generate_config() {
         crate::test_util::test_generate_config::<HecLogsSinkConfig>();
+    }
+
+    #[test]
+    fn test_config_serde() {
+        let config_toml = r#"
+            default_token = "my-token"
+            endpoint = "https://hec.example.com:8088"
+            host_key = "hostname"
+            indexed_fields = ["field1", "field2"]
+            index = "{{ index_field }}"
+            sourcetype = "{{ sourcetype_field }}"
+            source = "/var/log/app.log"
+            compression = "gzip"
+            endpoint_target = "raw"
+            auto_extract_timestamp = true
+            path = "/custom/path"
+
+            [encoding]
+            codec = "json"
+            except_fields = ["secret_field"]
+
+            [batch]
+            max_bytes = 1048576
+            max_events = 100
+            timeout_secs = 5
+
+            [[batch_headers]]
+            name = "X-Tenant"
+            value = "tenant"
+
+            [[batch_headers]]
+            name = "X-Priority"
+            value = "priority"
+
+            [request]
+            timeout_secs = 30
+            retry_attempts = 3
+
+            [request.headers]
+            X-Custom = "custom-value"
+
+            [acknowledgements]
+            indexer_acknowledgements_enabled = true
+            max_pending_acks = 1000
+
+            [timestamp_configuration]
+            timestamp_key = "ts"
+            format = "native"
+            preserve_timestamp_key = true
+        "#;
+
+        let config: HecLogsSinkConfig = toml::from_str(config_toml)
+            .expect("Failed to parse config");
+
+        assert_eq!(config.default_token.inner(), "my-token");
+        assert_eq!(config.endpoint, "https://hec.example.com:8088");
+        assert_eq!(config.endpoint_target, EndpointTarget::Raw);
+        assert_eq!(config.auto_extract_timestamp, Some(true));
+        assert_eq!(config.path, Some("/custom/path".to_string()));
+        assert_eq!(config.indexed_fields.len(), 2);
+        assert!(config.index.is_some());
+        assert!(config.sourcetype.is_some());
+        assert_eq!(config.source, Some(crate::template::Template::try_from("/var/log/app.log").unwrap()));
+        assert!(config.host_key.is_some());
+
+        let batch_headers = config.batch_headers.into_validated().expect("batch_headers should be valid");
+        assert_eq!(batch_headers.len(), 2);
+        assert_eq!(batch_headers[0].0.as_str(), "x-tenant");
+        assert_eq!(batch_headers[1].0.as_str(), "x-priority");
+
+        assert!(config.acknowledgements.indexer_acknowledgements_enabled);
+        assert_eq!(config.acknowledgements.max_pending_acks.get(), 1000);
+
+        let ts_config = config.timestamp_configuration.expect("timestamp_configuration should be set");
+        assert!(ts_config.timestamp_key.is_some());
+        assert!(ts_config.preserve_timestamp_key);
     }
 
     impl ValidatableComponent for HecLogsSinkConfig {
