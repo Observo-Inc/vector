@@ -2,11 +2,12 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use chrono::{TimeZone, Utc};
 use futures_util::StreamExt;
+use indexmap::IndexMap;
 use serde::{de, Deserialize};
 use vector_lib::codecs::{JsonSerializerConfig, TextSerializerConfig};
 use vector_lib::config::{LegacyKey, LogNamespace};
 use vector_lib::event::EventMetadata;
-use vector_lib::lookup::lookup_v2::OptionalTargetPath;
+use vector_lib::lookup::lookup_v2::{ConfigValuePath, OptionalTargetPath};
 use vector_lib::schema::{meaning, Definition};
 use vector_lib::{
     config::log_schema,
@@ -24,15 +25,16 @@ use crate::{
     sinks::{
         splunk_hec::{
             common::EndpointTarget,
-            logs::{config::HecLogsSinkConfig, encoder::HecLogsEncoder, sink::process_log},
+            logs::{config::{BatchHeader, BatchHeaders, HecLogsSinkConfig}, encoder::HecLogsEncoder, sink::process_log},
         },
-        util::{encoding::Encoder as _, test::build_test_server, Compression},
+        util::{encoding::Encoder as _, http::RequestConfig, test::build_test_server, Compression},
     },
     template::Template,
     test_util::next_addr,
 };
 use vector_lib::config::{TimePrecision, TimestampFormat};
 use crate::sinks::splunk_hec::logs::config::TimestampConfiguration;
+use crate::sinks::prelude::TowerRequestConfig;
 
 #[derive(Deserialize, Debug)]
 struct HecEventJson {
@@ -240,6 +242,7 @@ async fn splunk_passthrough_token() {
         encoding: JsonSerializerConfig::default().into(),
         compression: Compression::None,
         batch: Default::default(),
+        batch_headers: Default::default(),
         request: Default::default(),
         tls: None,
         acknowledgements: Default::default(),
@@ -704,4 +707,529 @@ fn test_timestamp_configurations() {
         assert_eq!(hec_data.host, Some("test_host".to_string()));
         assert_eq!(hec_data.fields.get("event_field1").unwrap(), "test_value1");
     }
+}
+
+// ============================================================================
+// Batch Header Tests
+// ============================================================================
+
+fn create_batch_headers(headers: Vec<(&str, &str)>) -> BatchHeaders {
+    let batch_headers: Vec<BatchHeader> = headers
+        .into_iter()
+        .map(|(name, path)| BatchHeader {
+            name: name.to_string(),
+            value: ConfigValuePath::try_from(path.to_string()).unwrap(),
+        })
+        .collect();
+    BatchHeaders::from(batch_headers)
+}
+
+fn create_event_with_fields(fields: Vec<(&str, &str)>) -> Event {
+    let message = fields
+        .iter()
+        .find(|(k, _)| *k == "event_id")
+        .map(|(_, v)| *v)
+        .unwrap_or("test message");
+    let mut event = Event::Log(LogEvent::from(message));
+    for (key, value) in fields {
+        event.as_mut_log().insert(key, value);
+    }
+    event
+}
+
+#[tokio::test]
+async fn raw_endpoint_with_metadata_and_batch_headers() {
+    let addr = next_addr();
+    let config = HecLogsSinkConfig {
+        default_token: "token".to_string().into(),
+        endpoint: format!("http://{}", addr),
+        host_key: None,
+        indexed_fields: Vec::new(),
+        index: Some(Template::try_from("{{ idx }}").unwrap()),
+        sourcetype: None,
+        source: None,
+        encoding: TextSerializerConfig::default().into(),
+        compression: Compression::None,
+        batch: Default::default(),
+        batch_headers: create_batch_headers(vec![
+            ("X-Header-A", "field_a"),
+            ("X-Header-B", "field_b"),
+        ]),
+        request: Default::default(),
+        tls: None,
+        acknowledgements: Default::default(),
+        path: None,
+        auto_extract_timestamp: None,
+        endpoint_target: EndpointTarget::Raw,
+        timestamp_configuration: None,
+    };
+    let cx = SinkContext::default();
+
+    let (sink, _) = config.build(cx).await.unwrap();
+
+    let (rx, _trigger, server) = build_test_server(addr);
+    tokio::spawn(server);
+
+    let events = vec![
+        create_event_with_fields(vec![("field_a", "val1"), ("field_b", "val2"), ("idx", "idx1"), ("event_id", "evt1")]),
+        create_event_with_fields(vec![("field_a", "val1"), ("field_b", "val2"), ("idx", "idx1"), ("event_id", "evt2")]),
+        create_event_with_fields(vec![("field_a", "val1"), ("field_b", "val3"), ("idx", "idx1"), ("event_id", "evt3")]),
+        create_event_with_fields(vec![("field_a", "val1"), ("field_b", "val2"), ("idx", "idx2"), ("event_id", "evt4")]),
+    ];
+
+    sink.run_events(events).await.unwrap();
+
+    let mut requests: Vec<_> = rx.take(3).collect().await;
+
+    requests.sort_by(|a, b| {
+        let a_header_b = a.0.headers.get("X-Header-B").map(|v| v.to_str().unwrap_or(""));
+        let b_header_b = b.0.headers.get("X-Header-B").map(|v| v.to_str().unwrap_or(""));
+        let a_query = a.0.uri.query().unwrap_or("");
+        let b_query = b.0.uri.query().unwrap_or("");
+        (a_header_b, a_query).cmp(&(b_header_b, b_query))
+    });
+
+    // Batch 1: events 1,2 (val2, idx1)
+    assert_eq!(requests[0].0.headers.get("X-Header-A").unwrap(), "val1");
+    assert_eq!(requests[0].0.headers.get("X-Header-B").unwrap(), "val2");
+    assert!(requests[0].0.uri.query().unwrap().contains("index=idx1"));
+    let body0 = String::from_utf8_lossy(&requests[0].1);
+    assert!(body0.contains("evt1"));
+    assert!(body0.contains("evt2"));
+    assert!(!body0.contains("evt3"));
+    assert!(!body0.contains("evt4"));
+
+    // Batch 2: event 4 (val2, idx2)
+    assert_eq!(requests[1].0.headers.get("X-Header-A").unwrap(), "val1");
+    assert_eq!(requests[1].0.headers.get("X-Header-B").unwrap(), "val2");
+    assert!(requests[1].0.uri.query().unwrap().contains("index=idx2"));
+    let body1 = String::from_utf8_lossy(&requests[1].1);
+    assert!(body1.contains("evt4"));
+    assert!(!body1.contains("evt1"));
+    assert!(!body1.contains("evt2"));
+    assert!(!body1.contains("evt3"));
+
+    // Batch 3: event 3 (val3, idx1)
+    assert_eq!(requests[2].0.headers.get("X-Header-A").unwrap(), "val1");
+    assert_eq!(requests[2].0.headers.get("X-Header-B").unwrap(), "val3");
+    assert!(requests[2].0.uri.query().unwrap().contains("index=idx1"));
+    let body2 = String::from_utf8_lossy(&requests[2].1);
+    assert!(body2.contains("evt3"));
+    assert!(!body2.contains("evt1"));
+    assert!(!body2.contains("evt2"));
+    assert!(!body2.contains("evt4"));
+}
+
+#[tokio::test]
+async fn raw_endpoint_with_only_batch_headers() {
+    let addr = next_addr();
+    let config = HecLogsSinkConfig {
+        default_token: "token".to_string().into(),
+        endpoint: format!("http://{}", addr),
+        host_key: None,
+        indexed_fields: Vec::new(),
+        index: None,
+        sourcetype: None,
+        source: None,
+        encoding: TextSerializerConfig::default().into(),
+        compression: Compression::None,
+        batch: Default::default(),
+        batch_headers: create_batch_headers(vec![("X-Priority", "priority")]),
+        request: Default::default(),
+        tls: None,
+        acknowledgements: Default::default(),
+        path: None,
+        auto_extract_timestamp: None,
+        endpoint_target: EndpointTarget::Raw,
+        timestamp_configuration: None,
+    };
+    let cx = SinkContext::default();
+
+    let (sink, _) = config.build(cx).await.unwrap();
+
+    let (rx, _trigger, server) = build_test_server(addr);
+    tokio::spawn(server);
+
+    let events = vec![
+        create_event_with_fields(vec![("priority", "high"), ("event_id", "high-1")]),
+        create_event_with_fields(vec![("priority", "high"), ("event_id", "high-2")]),
+        create_event_with_fields(vec![("priority", "low"), ("event_id", "low-1")]),
+    ];
+
+    sink.run_events(events).await.unwrap();
+
+    let mut requests: Vec<_> = rx.take(2).collect().await;
+
+    requests.sort_by(|a, b| {
+        let a_priority = a.0.headers.get("X-Priority").map(|v| v.to_str().unwrap_or(""));
+        let b_priority = b.0.headers.get("X-Priority").map(|v| v.to_str().unwrap_or(""));
+        a_priority.cmp(&b_priority)
+    });
+
+    assert_eq!(requests[0].0.headers.get("X-Priority").unwrap(), "high");
+    let query = requests[0].0.uri.query().unwrap_or("");
+    assert!(!query.contains("index="));
+    let high_body = String::from_utf8_lossy(&requests[0].1);
+    assert!(high_body.contains("high-1"));
+    assert!(high_body.contains("high-2"));
+    assert!(!high_body.contains("low-1"));
+
+    assert_eq!(requests[1].0.headers.get("X-Priority").unwrap(), "low");
+    let low_body = String::from_utf8_lossy(&requests[1].1);
+    assert!(low_body.contains("low-1"));
+    assert!(!low_body.contains("high-1"));
+    assert!(!low_body.contains("high-2"));
+}
+
+#[tokio::test]
+async fn raw_endpoint_without_metadata_or_headers() {
+    let addr = next_addr();
+    let config = HecLogsSinkConfig {
+        default_token: "token".to_string().into(),
+        endpoint: format!("http://{}", addr),
+        host_key: None,
+        indexed_fields: Vec::new(),
+        index: None,
+        sourcetype: None,
+        source: None,
+        encoding: TextSerializerConfig::default().into(),
+        compression: Compression::None,
+        batch: Default::default(),
+        batch_headers: Default::default(),
+        request: Default::default(),
+        tls: None,
+        acknowledgements: Default::default(),
+        path: None,
+        auto_extract_timestamp: None,
+        endpoint_target: EndpointTarget::Raw,
+        timestamp_configuration: None,
+    };
+    let cx = SinkContext::default();
+
+    let (sink, _) = config.build(cx).await.unwrap();
+
+    let (rx, _trigger, server) = build_test_server(addr);
+    tokio::spawn(server);
+
+    let events = vec![
+        create_event_with_fields(vec![("event_id", "evt1")]),
+        create_event_with_fields(vec![("event_id", "evt2")]),
+        create_event_with_fields(vec![("event_id", "evt3")]),
+    ];
+
+    sink.run_events(events).await.unwrap();
+
+    let requests: Vec<_> = rx.take(1).collect().await;
+    assert_eq!(requests.len(), 1);
+
+    assert!(requests[0].0.headers.get("X-Priority").is_none());
+    let query = requests[0].0.uri.query().unwrap_or("");
+    assert!(!query.contains("index="));
+    let body = String::from_utf8_lossy(&requests[0].1);
+    assert!(body.contains("evt1"));
+    assert!(body.contains("evt2"));
+    assert!(body.contains("evt3"));
+}
+
+#[tokio::test]
+async fn event_endpoint_with_two_batch_headers() {
+    let addr = next_addr();
+    let config = HecLogsSinkConfig {
+        default_token: "token".to_string().into(),
+        endpoint: format!("http://{}", addr),
+        host_key: None,
+        indexed_fields: Vec::new(),
+        index: None,
+        sourcetype: None,
+        source: None,
+        encoding: JsonSerializerConfig::default().into(),
+        compression: Compression::None,
+        batch: Default::default(),
+        batch_headers: create_batch_headers(vec![
+            ("X-Tenant", "tenant"),
+            ("X-Region", "region"),
+        ]),
+        request: Default::default(),
+        tls: None,
+        acknowledgements: Default::default(),
+        path: None,
+        auto_extract_timestamp: None,
+        endpoint_target: EndpointTarget::Event,
+        timestamp_configuration: None,
+    };
+    let cx = SinkContext::default();
+
+    let (sink, _) = config.build(cx).await.unwrap();
+
+    let (rx, _trigger, server) = build_test_server(addr);
+    tokio::spawn(server);
+
+    let events = vec![
+        create_event_with_fields(vec![("tenant", "acme"), ("region", "us"), ("event_id", "acme-us-1")]),
+        create_event_with_fields(vec![("tenant", "acme"), ("region", "us"), ("event_id", "acme-us-2")]),
+        create_event_with_fields(vec![("tenant", "acme"), ("region", "eu"), ("event_id", "acme-eu-1")]),
+        create_event_with_fields(vec![("tenant", "globex"), ("region", "us"), ("event_id", "globex-us-1")]),
+    ];
+
+    sink.run_events(events).await.unwrap();
+
+    let mut requests: Vec<_> = rx.take(3).collect().await;
+
+    requests.sort_by(|a, b| {
+        let a_tenant = a.0.headers.get("X-Tenant").map(|v| v.to_str().unwrap_or(""));
+        let a_region = a.0.headers.get("X-Region").map(|v| v.to_str().unwrap_or(""));
+        let b_tenant = b.0.headers.get("X-Tenant").map(|v| v.to_str().unwrap_or(""));
+        let b_region = b.0.headers.get("X-Region").map(|v| v.to_str().unwrap_or(""));
+        (a_tenant, a_region).cmp(&(b_tenant, b_region))
+    });
+
+    assert_eq!(requests[0].0.headers.get("X-Tenant").unwrap(), "acme");
+    assert_eq!(requests[0].0.headers.get("X-Region").unwrap(), "eu");
+    let body0 = String::from_utf8_lossy(&requests[0].1);
+    assert!(body0.contains("acme-eu-1"));
+    assert!(!body0.contains("acme-us-1"));
+    assert!(!body0.contains("acme-us-2"));
+    assert!(!body0.contains("globex-us-1"));
+
+    assert_eq!(requests[1].0.headers.get("X-Tenant").unwrap(), "acme");
+    assert_eq!(requests[1].0.headers.get("X-Region").unwrap(), "us");
+    let body1 = String::from_utf8_lossy(&requests[1].1);
+    assert!(body1.contains("acme-us-1"));
+    assert!(body1.contains("acme-us-2"));
+    assert!(!body1.contains("acme-eu-1"));
+    assert!(!body1.contains("globex-us-1"));
+
+    assert_eq!(requests[2].0.headers.get("X-Tenant").unwrap(), "globex");
+    assert_eq!(requests[2].0.headers.get("X-Region").unwrap(), "us");
+    let body2 = String::from_utf8_lossy(&requests[2].1);
+    assert!(body2.contains("globex-us-1"));
+    assert!(!body2.contains("acme-us-1"));
+    assert!(!body2.contains("acme-us-2"));
+    assert!(!body2.contains("acme-eu-1"));
+}
+
+#[tokio::test]
+async fn event_endpoint_with_one_batch_header() {
+    let addr = next_addr();
+    let config = HecLogsSinkConfig {
+        default_token: "token".to_string().into(),
+        endpoint: format!("http://{}", addr),
+        host_key: None,
+        indexed_fields: Vec::new(),
+        index: None,
+        sourcetype: None,
+        source: None,
+        encoding: JsonSerializerConfig::default().into(),
+        compression: Compression::None,
+        batch: Default::default(),
+        batch_headers: create_batch_headers(vec![("X-Service", "service")]),
+        request: Default::default(),
+        tls: None,
+        acknowledgements: Default::default(),
+        path: None,
+        auto_extract_timestamp: None,
+        endpoint_target: EndpointTarget::Event,
+        timestamp_configuration: None,
+    };
+    let cx = SinkContext::default();
+
+    let (sink, _) = config.build(cx).await.unwrap();
+
+    let (rx, _trigger, server) = build_test_server(addr);
+    tokio::spawn(server);
+
+    let events = vec![
+        create_event_with_fields(vec![("service", "api"), ("event_id", "api-1")]),
+        create_event_with_fields(vec![("service", "api"), ("event_id", "api-2")]),
+        create_event_with_fields(vec![("service", "web"), ("event_id", "web-1")]),
+    ];
+
+    sink.run_events(events).await.unwrap();
+
+    let mut requests: Vec<_> = rx.take(2).collect().await;
+
+    requests.sort_by(|a, b| {
+        let a_service = a.0.headers.get("X-Service").map(|v| v.to_str().unwrap_or(""));
+        let b_service = b.0.headers.get("X-Service").map(|v| v.to_str().unwrap_or(""));
+        a_service.cmp(&b_service)
+    });
+
+    assert_eq!(requests[0].0.headers.get("X-Service").unwrap(), "api");
+    let api_body = String::from_utf8_lossy(&requests[0].1);
+    assert!(api_body.contains("api-1"));
+    assert!(api_body.contains("api-2"));
+    assert!(!api_body.contains("web-1"));
+
+    assert_eq!(requests[1].0.headers.get("X-Service").unwrap(), "web");
+    let web_body = String::from_utf8_lossy(&requests[1].1);
+    assert!(web_body.contains("web-1"));
+    assert!(!web_body.contains("api-1"));
+    assert!(!web_body.contains("api-2"));
+}
+
+#[tokio::test]
+async fn event_endpoint_no_batching_on_metadata_fields() {
+    let addr = next_addr();
+    let config = HecLogsSinkConfig {
+        default_token: "token".to_string().into(),
+        endpoint: format!("http://{}", addr),
+        host_key: None,
+        indexed_fields: Vec::new(),
+        index: Some(Template::try_from("{{ event_index }}").unwrap()),
+        sourcetype: None,
+        source: None,
+        encoding: JsonSerializerConfig::default().into(),
+        compression: Compression::None,
+        batch: Default::default(),
+        batch_headers: create_batch_headers(vec![("X-Priority", "priority")]),
+        request: Default::default(),
+        tls: None,
+        acknowledgements: Default::default(),
+        path: None,
+        auto_extract_timestamp: None,
+        endpoint_target: EndpointTarget::Event,
+        timestamp_configuration: None,
+    };
+    let cx = SinkContext::default();
+
+    let (sink, _) = config.build(cx).await.unwrap();
+
+    let (rx, _trigger, server) = build_test_server(addr);
+    tokio::spawn(server);
+
+    let events = vec![
+        create_event_with_fields(vec![("event_index", "idx1"), ("priority", "high"), ("event_id", "high-idx1")]),
+        create_event_with_fields(vec![("event_index", "idx2"), ("priority", "high"), ("event_id", "high-idx2")]),
+        create_event_with_fields(vec![("event_index", "idx1"), ("priority", "low"), ("event_id", "low-idx1")]),
+    ];
+
+    sink.run_events(events).await.unwrap();
+
+    let mut requests: Vec<_> = rx.take(2).collect().await;
+
+    requests.sort_by(|a, b| {
+        let a_priority = a.0.headers.get("X-Priority").map(|v| v.to_str().unwrap_or(""));
+        let b_priority = b.0.headers.get("X-Priority").map(|v| v.to_str().unwrap_or(""));
+        a_priority.cmp(&b_priority)
+    });
+
+    assert_eq!(requests[0].0.headers.get("X-Priority").unwrap(), "high");
+    let high_body = String::from_utf8_lossy(&requests[0].1);
+    assert!(high_body.contains("high-idx1"));
+    assert!(high_body.contains("high-idx2"));
+    assert!(!high_body.contains("low-idx1"));
+
+    assert_eq!(requests[1].0.headers.get("X-Priority").unwrap(), "low");
+    let low_body = String::from_utf8_lossy(&requests[1].1);
+    assert!(low_body.contains("low-idx1"));
+    assert!(!low_body.contains("high-idx1"));
+    assert!(!low_body.contains("high-idx2"));
+}
+
+#[tokio::test]
+async fn batch_headers_missing_value_separate_batch() {
+    let addr = next_addr();
+    let config = HecLogsSinkConfig {
+        default_token: "token".to_string().into(),
+        endpoint: format!("http://{}", addr),
+        host_key: None,
+        indexed_fields: Vec::new(),
+        index: None,
+        sourcetype: None,
+        source: None,
+        encoding: JsonSerializerConfig::default().into(),
+        compression: Compression::None,
+        batch: Default::default(),
+        batch_headers: create_batch_headers(vec![("X-Tag", "tag")]),
+        request: Default::default(),
+        tls: None,
+        acknowledgements: Default::default(),
+        path: None,
+        auto_extract_timestamp: None,
+        endpoint_target: EndpointTarget::Event,
+        timestamp_configuration: None,
+    };
+    let cx = SinkContext::default();
+
+    let (sink, _) = config.build(cx).await.unwrap();
+
+    let (rx, _trigger, server) = build_test_server(addr);
+    tokio::spawn(server);
+
+    let events = vec![
+        create_event_with_fields(vec![("tag", "important"), ("event_id", "evt-tag-1")]),
+        create_event_with_fields(vec![("tag", "important"), ("event_id", "evt-tag-2")]),
+        create_event_with_fields(vec![("other_field", "value"), ("event_id", "evt-no-tag")]),
+    ];
+
+    sink.run_events(events).await.unwrap();
+
+    let mut requests: Vec<_> = rx.take(2).collect().await;
+
+    requests.sort_by(|a, b| {
+        let a_tag = a.0.headers.get("X-Tag").is_some();
+        let b_tag = b.0.headers.get("X-Tag").is_some();
+        b_tag.cmp(&a_tag)
+    });
+
+    assert_eq!(requests[0].0.headers.get("X-Tag").unwrap(), "important");
+    let tagged_body = String::from_utf8_lossy(&requests[0].1);
+    assert!(tagged_body.contains("evt-tag-1"));
+    assert!(tagged_body.contains("evt-tag-2"));
+    assert!(!tagged_body.contains("evt-no-tag"));
+
+    assert!(requests[1].0.headers.get("X-Tag").is_none());
+    let untagged_body = String::from_utf8_lossy(&requests[1].1);
+    assert!(untagged_body.contains("evt-no-tag"));
+    assert!(!untagged_body.contains("evt-tag-1"));
+    assert!(!untagged_body.contains("evt-tag-2"));
+}
+
+#[tokio::test]
+async fn batch_headers_static_headers_override() {
+    let addr = next_addr();
+    let config = HecLogsSinkConfig {
+        default_token: "token".to_string().into(),
+        endpoint: format!("http://{}", addr),
+        host_key: None,
+        indexed_fields: Vec::new(),
+        index: None,
+        sourcetype: None,
+        source: None,
+        encoding: JsonSerializerConfig::default().into(),
+        compression: Compression::None,
+        batch: Default::default(),
+        batch_headers: create_batch_headers(vec![("X-Override", "override_field")]),
+        request: RequestConfig {
+            tower: TowerRequestConfig::default(),
+            headers: IndexMap::from_iter([
+                ("X-Override".to_owned(), "static-value".to_owned()),
+            ]),
+        },
+        tls: None,
+        acknowledgements: Default::default(),
+        path: None,
+        auto_extract_timestamp: None,
+        endpoint_target: EndpointTarget::Event,
+        timestamp_configuration: None,
+    };
+    let cx = SinkContext::default();
+
+    let (sink, _) = config.build(cx).await.unwrap();
+
+    let (rx, _trigger, server) = build_test_server(addr);
+    tokio::spawn(server);
+
+    let events = vec![
+        create_event_with_fields(vec![("override_field", "dynamic-value"), ("event_id", "override-evt")]),
+    ];
+
+    sink.run_events(events).await.unwrap();
+
+    let requests: Vec<_> = rx.take(1).collect().await;
+
+    assert_eq!(requests[0].0.headers.get("X-Override").unwrap(), "static-value");
+    let body = String::from_utf8_lossy(&requests[0].1);
+    assert!(body.contains("override-evt"));
+    assert!(body.contains("dynamic-value"));
 }
