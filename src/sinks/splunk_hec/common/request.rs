@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
+use http::{HeaderName, HeaderValue};
 use vector_lib::request_metadata::{MetaDescriptive, RequestMetadata};
 use vector_lib::{
     event::{EventFinalizers, Finalizable},
@@ -19,6 +20,7 @@ pub struct HecRequest {
     pub source: Option<String>,
     pub sourcetype: Option<String>,
     pub host: Option<String>,
+    pub headers: Vec<(HeaderName, HeaderValue)>,
 }
 
 impl ByteSizeOf for HecRequest {

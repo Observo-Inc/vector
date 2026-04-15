@@ -198,6 +198,27 @@ mod sink {
             );
         }
     }
+
+    pub struct SplunkBatchHeaderValueInvalid<'a> {
+        pub header_name: &'a str,
+    }
+
+    impl InternalEvent for SplunkBatchHeaderValueInvalid<'_> {
+        fn emit(self) {
+            warn!(
+                message = "Batch header value contains invalid characters. Skipping header.",
+                header_name = %self.header_name,
+                internal_log_rate_limit = true,
+            );
+            counter!(
+                "component_errors_total",
+                "error_code" => "invalid_batch_header_value",
+                "error_type" => error_type::PARSER_FAILED,
+                "stage" => error_stage::PROCESSING,
+            )
+            .increment(1);
+        }
+    }
 }
 
 #[cfg(feature = "sources-splunk_hec")]

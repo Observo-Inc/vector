@@ -1351,6 +1351,7 @@ mod tests {
             encoding,
             compression,
             batch: BatchConfig::default(),
+            batch_headers: Default::default(),
             request: RequestConfig::default(),
             tls: None,
             acknowledgements: Default::default(),

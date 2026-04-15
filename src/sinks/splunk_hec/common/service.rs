@@ -223,6 +223,7 @@ impl HttpRequestBuilder {
         passthrough_token: Option<Arc<str>>,
         metadata_fields: MetadataFields,
         auto_extract_timestamp: bool,
+        dyn_headers: Vec<(HeaderName, HeaderValue)>,
     ) -> Result<Request<Bytes>, crate::Error> {
         let uri = match self.endpoint_target {
             EndpointTarget::Raw => {
@@ -267,6 +268,11 @@ impl HttpRequestBuilder {
                 crate::Error::from("Failed to access headers in http::Request builder")
             })?;
 
+        for (header, value) in dyn_headers {
+            headers.insert(header, value);
+        }
+
+        // Static headers from request config take precedence over dynamic headers
         for (header, value) in self.headers.iter() {
             headers.insert(header, value.clone());
         }
@@ -376,6 +382,7 @@ mod tests {
             source: None,
             sourcetype: None,
             host: None,
+            headers: vec![],
         }
     }
 
