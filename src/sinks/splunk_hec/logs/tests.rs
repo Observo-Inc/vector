@@ -35,6 +35,7 @@ use crate::{
 use vector_lib::config::{TimePrecision, TimestampFormat};
 use crate::sinks::splunk_hec::logs::config::TimestampConfiguration;
 use crate::sinks::prelude::TowerRequestConfig;
+use crate::sinks::util::test::load_sink;
 
 #[derive(Deserialize, Debug)]
 struct HecEventJson {
@@ -1232,4 +1233,85 @@ async fn batch_headers_static_headers_override() {
     let body = String::from_utf8_lossy(&requests[0].1);
     assert!(body.contains("override-evt"));
     assert!(body.contains("dynamic-value"));
+}
+
+#[tokio::test]
+async fn batch_header_field_excluded_from_body_raw_endpoint() {
+    let addr = next_addr();
+    let config_toml = format!(
+        r#"
+            default_token = "token"
+            endpoint = "http://{}"
+            endpoint_target = "raw"
+            encoding.codec = "json"
+            encoding.except_fields = ["tenant"]
+
+            [[batch_headers]]
+            name = "X-Tenant"
+            value = "tenant"
+        "#,
+        addr
+    );
+
+    let (config, cx) = load_sink::<HecLogsSinkConfig>(&config_toml).unwrap();
+    let (sink, _) = config.build(cx).await.unwrap();
+
+    let (rx, _trigger, server) = build_test_server(addr);
+    tokio::spawn(server);
+
+    let mut event = Event::Log(LogEvent::from("test message"));
+    event.as_mut_log().insert("tenant", "acme");
+    event.as_mut_log().insert("other_field", "keep-me");
+    event.as_mut_log().insert("event_id", "evt-raw-transform");
+
+    sink.run_events(vec![event]).await.unwrap();
+
+    let requests: Vec<_> = rx.take(1).collect().await;
+
+    assert_eq!(requests[0].0.headers.get("X-Tenant").unwrap(), "acme");
+    let body = String::from_utf8_lossy(&requests[0].1);
+    assert!(!body.contains("acme"), "tenant field should be excluded from body");
+    assert!(body.contains("other_field"), "other_field should be in body");
+    assert!(body.contains("keep-me"), "other_field value should be in body");
+}
+
+#[tokio::test]
+async fn batch_header_field_excluded_from_body_event_endpoint() {
+    let addr = next_addr();
+    let config_toml = format!(
+        r#"
+            default_token = "token"
+            endpoint = "http://{}"
+            endpoint_target = "event"
+            encoding.codec = "json"
+            encoding.except_fields = ["priority"]
+
+            [[batch_headers]]
+            name = "X-Priority"
+            value = "priority"
+        "#,
+        addr
+    );
+
+    let (config, cx) = load_sink::<HecLogsSinkConfig>(&config_toml).unwrap();
+    let (sink, _) = config.build(cx).await.unwrap();
+
+    let (rx, _trigger, server) = build_test_server(addr);
+    tokio::spawn(server);
+
+    let mut event = Event::Log(LogEvent::from("test message"));
+    event.as_mut_log().insert("priority", "high");
+    event.as_mut_log().insert("other_field", "keep-me");
+    event.as_mut_log().insert("event_id", "evt-event-transform");
+
+    sink.run_events(vec![event]).await.unwrap();
+
+    let requests: Vec<_> = rx.take(1).collect().await;
+
+    assert_eq!(requests[0].0.headers.get("X-Priority").unwrap(), "high");
+    let body = String::from_utf8_lossy(&requests[0].1);
+    assert!(!body.contains("high"), "priority field should be excluded from body");
+    assert!(body.contains("other_field"), "other_field should be in body");
+    assert!(body.contains("keep-me"), "other_field value should be in body");
+    assert!(body.contains("evt-event-transform"), "event_id should be in body");
 }
