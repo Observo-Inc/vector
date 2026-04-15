@@ -133,6 +133,32 @@ impl InternalEvent for HttpDecompressError<'_> {
     }
 }
 
+#[cfg(feature = "sources-utils-http")]
+pub struct HttpBadPeerConnectionError<'a> {
+    pub error: &'a dyn std::fmt::Display,
+}
+
+#[cfg(feature = "sources-utils-http")]
+impl InternalEvent for HttpBadPeerConnectionError<'_> {
+    fn emit(self) {
+        warn!(
+            message = "Rejected connection from bad peer.",
+            error = %self.error,
+            error_code = "bad_peer",
+            error_type = error_type::CONNECTION_FAILED,
+            stage = error_stage::RECEIVING,
+            internal_log_rate_limit = true,
+        );
+        counter!(
+            "component_errors_total",
+            "error_code" => "bad_peer",
+            "error_type" => error_type::CONNECTION_FAILED,
+            "stage" => error_stage::RECEIVING,
+        )
+        .increment(1);
+    }
+}
+
 pub struct HttpInternalError<'a> {
     pub message: &'a str,
 }

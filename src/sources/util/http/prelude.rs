@@ -7,7 +7,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures::{FutureExt, TryFutureExt};
+use futures::{FutureExt, StreamExt, TryFutureExt};
 use hyper::{service::make_service_fn, Server};
 use tokio::net::TcpStream;
 use tower::ServiceBuilder;
@@ -33,7 +33,7 @@ use crate::{
     config::SourceContext,
     http::{build_http_trace_layer, KeepaliveConfig, MaxConnectionAgeLayer},
     internal_events::{
-        HttpBadRequest, HttpBytesReceived, HttpEventsReceived, HttpInternalError, StreamClosedError,
+        HttpBadPeerConnectionError, HttpBadRequest, HttpBytesReceived, HttpEventsReceived, HttpInternalError, StreamClosedError,
     },
     sources::util::http::HttpMethod,
     tls::{MaybeTlsIncomingStream, MaybeTlsSettings, TlsEnableableConfig},
@@ -226,7 +226,21 @@ pub trait HttpSource: Clone + Send + Sync + 'static {
             let listener = listener
                 .with_allowlist(permit_origin.map(Into::into));
 
-            Server::builder(hyper::server::accept::from_stream(listener.accept_stream()))
+            Server::builder(hyper::server::accept::from_stream(
+                listener.accept_stream().filter_map(|result| async move {
+                    match result {
+                        Ok(stream) => Some(Ok::<_, Infallible>(stream)),
+                        Err(err) => {
+                            if err.is_fatal() {
+                                warn!(message = "Fatal error accepting connection.", error = %err);
+                            } else {
+                                emit!(HttpBadPeerConnectionError { error: &err });
+                            }
+                            None
+                        }
+                    }
+                }),
+            ))
                 .serve(make_svc)
                 .with_graceful_shutdown(cx.shutdown.map(|_| ()))
                 .await

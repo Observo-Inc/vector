@@ -115,6 +115,8 @@ pub enum TlsError {
     TcpBind { source: tokio::io::Error },
     #[snafu(display("{}", source))]
     Connect { source: tokio::io::Error },
+    #[snafu(display("Connection rejected: origin IP not in permit_origin list"))]
+    DisallowedPeer,
     #[snafu(display("Could not get peer address: {}", source))]
     PeerAddress { source: std::io::Error },
     #[snafu(display("Security Framework Error: {}", source))]
@@ -132,6 +134,12 @@ pub enum TlsError {
     NewCaStack { source: ErrorStack },
     #[snafu(display("Could not push intermediate certificate onto stack"))]
     CaStackPush { source: ErrorStack },
+}
+
+impl TlsError {
+    pub fn is_fatal(&self) -> bool {
+        !matches!(self, TlsError::DisallowedPeer)
+    }
 }
 
 impl MaybeTlsStream<TcpStream> {
