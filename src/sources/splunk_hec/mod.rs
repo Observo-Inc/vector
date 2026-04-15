@@ -1,9 +1,9 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     convert::Infallible,
     io::Read,
     net::{Ipv4Addr, SocketAddr},
-    sync::Arc,
+    sync::{Arc, RwLock},
     time::Duration,
 };
 
@@ -288,7 +288,7 @@ impl SourceConfig for SplunkConfig {
 
 /// Shared data for responding to requests.
 struct SplunkSource {
-    valid_credentials: Vec<String>,
+    valid_tokens: Arc<RwLock<BTreeSet<String>>>,
     protocol: &'static str,
     idx_ack: Option<Arc<IndexerAcknowledgement>>,
     store_hec_token: bool,
@@ -301,11 +301,13 @@ impl SplunkSource {
         let log_namespace = cx.log_namespace(config.log_namespace);
         let acknowledgements = cx.do_acknowledgements(config.acknowledgements.enabled.into());
         let shutdown = cx.shutdown;
-        let valid_tokens = config
+        let valid_tokens: BTreeSet<String> = config
             .valid_tokens
             .iter()
             .flatten()
-            .chain(config.token.iter());
+            .chain(config.token.iter())
+            .map(|t| t.clone().into())
+            .collect();
 
         let idx_ack = acknowledgements.then(|| {
             Arc::new(IndexerAcknowledgement::new(
@@ -315,15 +317,7 @@ impl SplunkSource {
         });
 
         SplunkSource {
-            valid_credentials: valid_tokens
-                .flat_map(|token| {
-                    let inner = token.inner();
-                    vec![
-                        format!("Splunk {}", inner),
-                        format!("Bearer {}", inner),
-                    ]
-                })
-                .collect(),
+            valid_tokens: Arc::new(RwLock::new(valid_tokens)),
             protocol,
             idx_ack,
             store_hec_token: config.store_hec_token,
@@ -475,20 +469,15 @@ impl SplunkSource {
                     });
 
                     async move {
-                        if idx_ack.is_some() && channel_id.is_none() {
-                            return Err(Rejection::from(ApiError::MissingChannel));
-                        }
+                        let (batch, maybe_ack_id) = match (idx_ack, channel_id.clone()) {
+                            (Some(idx_ack), Some(channel_id)) => {
+                                let (batch, receiver) = BatchNotifier::new_with_receiver();
+                                idx_ack.get_ack_id_from_channel(channel_id, receiver).await.map(|ack| (Some(batch), Some(ack)))
+                            },
+                            (Some(_), None) => Err(Rejection::from(ApiError::MissingChannel)),
+                            (None, _) => Ok((None, None)),
+                        }?;
 
-                        let (batch, receiver) =
-                            BatchNotifier::maybe_new_with_receiver(idx_ack.is_some());
-                        let maybe_ack_id = match (idx_ack, receiver) {
-                            (Some(idx_ack), Some(receiver)) => Some(
-                                idx_ack
-                                    .get_ack_id_from_channel(channel_id.clone().unwrap(), receiver)
-                                    .await?,
-                            ),
-                            _ => None,
-                        };
                         let mut event = raw_event(
                             body,
                             gzip,
@@ -576,29 +565,32 @@ impl SplunkSource {
 
     /// Authorize request
     fn authorization(&self) -> BoxedFilter<(Option<String>,)> {
-        let valid_credentials = self.valid_credentials.clone();
+        let valid_creds = Arc::clone(&self.valid_tokens);
         warp::header::optional("Authorization")
             .and_then(move |token: Option<String>| {
-                let valid_credentials = valid_credentials.clone();
+                let valid_creds = Arc::clone(&valid_creds);
                 async move {
-                    // Helper to strip either "Splunk " or "Bearer " prefix
-                    fn strip_auth_prefix(token: String) -> String {
-                        token
-                            .strip_prefix("Splunk ")
-                            .or_else(|| token.strip_prefix("Bearer "))
-                            .map(Into::into)
-                            .unwrap_or(token)
-                    }
-
-                    match (token, valid_credentials.is_empty()) {
-                        // Remove the "Splunk " or "Bearer " prefix if present as it is not
-                        // part of the token itself
-                        (token, true) => Ok(token.map(strip_auth_prefix)),
-                        (Some(token), false) if valid_credentials.contains(&token) => {
-                            Ok(Some(strip_auth_prefix(token)))
-                        }
+                    let valid_tokens = valid_creds.read().expect("poisoned lock!");
+                    let token = token
+                        .map(|t|
+                            match t.split_once(" ") {
+                                Some((scheme, value)) => {
+                                    let scheme = scheme.to_lowercase();
+                                    if scheme == "splunk" || scheme == "bearer" {
+                                        Some(value.trim_start().to_owned())
+                                    } else {
+                                        None
+                                    }
+                                },
+                                _ => None,
+                            })
+                        .flatten();
+                    match (token, valid_tokens.is_empty()) {
+                        (Some(token), true) => Ok(Some(token)),
+                        (Some(token), false) if valid_tokens.contains(&token) => Ok(Some(token)),
                         (Some(_), false) => Err(Rejection::from(ApiError::InvalidAuthorization)),
                         (None, false) => Err(Rejection::from(ApiError::MissingAuthorization)),
+                        (None, true) => Ok(None),
                     }
                 }
             })
@@ -2609,15 +2601,14 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
-    async fn authorization_bearer_prefix_event() {
+    async fn events_url_bearer_prefix_test(prefix: &str) {
         assert_source_compliance(&HTTP_PUSH_SOURCE_TAGS, async {
             let message = r#"{"event":"bearer_test"}"#;
             let (source, address) = source(None).await;
 
             let res = reqwest::Client::new()
                 .post(format!("http://{}/services/collector/event", address))
-                .header("Authorization", format!("Bearer {}", TOKEN))
+                .header("Authorization", format!("{} {}", prefix, TOKEN))
                 .body(message)
                 .send()
                 .await
@@ -2632,6 +2623,16 @@ mod tests {
             );
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn authorization_case_insensitive_bearer_prefix_event() {
+        events_url_bearer_prefix_test("bEaReR        ").await;
+    }
+
+    #[tokio::test]
+    async fn authorization_bearer_prefix_event() {
+        events_url_bearer_prefix_test("Bearer").await;
     }
 
     #[tokio::test]
