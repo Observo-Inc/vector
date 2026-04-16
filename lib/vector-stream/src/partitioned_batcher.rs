@@ -8,6 +8,7 @@ use std::{
 };
 
 use futures::stream::{Fuse, Stream, StreamExt};
+use metrics::{gauge, Gauge};
 use pin_project::pin_project;
 use tokio_util::time::{delay_queue::Key, DelayQueue};
 use twox_hash::XxHash64;
@@ -201,6 +202,10 @@ where
     #[pin]
     /// The stream this `Batcher` wraps
     stream: Fuse<St>,
+    /// Gauge tracking the number of open batches
+    m_open: Gauge,
+    /// Gauge tracking the number of closed batches waiting to be emitted
+    m_closed: Gauge,
 }
 
 impl<St, Prt, C, F, B> PartitionedBatcher<St, Prt, ExpirationQueue<Prt::Key>, C, F, B>
@@ -221,6 +226,8 @@ where
             timer: ExpirationQueue::new(timeout),
             partitioner,
             stream: stream.fuse(),
+            m_open: gauge!("open_batches"),
+            m_closed: gauge!("closed_batches"),
         }
     }
 }
@@ -243,6 +250,8 @@ where
             timer,
             partitioner,
             stream: stream.fuse(),
+            m_open: gauge!("open_batches"),
+            m_closed: gauge!("closed_batches"),
         }
     }
 }
@@ -267,6 +276,7 @@ where
         let mut this = self.project();
         loop {
             if !this.closed_batches.is_empty() {
+                this.m_closed.decrement(1.0);
                 return Poll::Ready(this.closed_batches.pop());
             }
             match this.stream.as_mut().poll_next(cx) {
@@ -280,6 +290,8 @@ where
                             .remove(&item_key)
                             .expect("batch should exist if it is set to expire");
                         this.closed_batches.push((item_key, batch.take_batch()));
+                        this.m_open.decrement(1.0);
+                        this.m_closed.increment(1.0);
                     }
                 },
                 Poll::Ready(None) => {
@@ -289,12 +301,15 @@ where
                     // continue looping so the caller can drain them all before
                     // we finish.
                     if !this.batches.is_empty() {
+                        let batch_count = this.batches.len() as f64;
                         this.timer.clear();
                         this.closed_batches.extend(
                             this.batches
                                 .drain()
                                 .map(|(key, mut batch)| (key, batch.take_batch())),
                         );
+                        this.m_open.decrement(batch_count);
+                        this.m_closed.increment(batch_count);
                         continue;
                     }
                     return Poll::Ready(None);
@@ -309,6 +324,7 @@ where
                         let batch = (this.state)();
                         this.batches.insert(item_key.clone(), batch);
                         this.timer.insert(item_key.clone());
+                        this.m_open.increment(1.0);
                         this.batches
                             .get_mut(&item_key)
                             .expect("batch has just been inserted so should exist")
@@ -321,6 +337,7 @@ where
                         // next iteration.
                         this.closed_batches
                             .push((item_key.clone(), batch.take_batch()));
+                        this.m_closed.increment(1.0);
 
                         // The batch for this partition key was set to
                         // expire, but now it's overflowed and must be
@@ -337,6 +354,8 @@ where
                             .push((item_key.clone(), batch.take_batch()));
                         this.batches.remove(&item_key);
                         this.timer.remove(&item_key);
+                        this.m_open.decrement(1.0);
+                        this.m_closed.increment(1.0);
                     }
                 }
             }
@@ -695,5 +714,82 @@ mod test {
         let mut cx = Context::from_waker(&noop_waker);
 
         f(&mut cx)
+    }
+
+    #[tokio::test]
+    async fn gauge_values_track_batch_counts() {
+        use metrics_util::debugging::DebuggingRecorder;
+
+        // Install debugging recorder to capture metrics
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        // Use with_local_recorder to avoid global state issues in tests
+        metrics::with_local_recorder(&recorder, || {
+            let noop_waker = futures::task::noop_waker();
+            let mut cx = Context::from_waker(&noop_waker);
+
+            // Create items that will form 3 partitions: keys 1, 2, 3
+            // Each partition will get 2 items, triggering batch full at item_limit=2
+            let items = vec![1u64, 2, 3, 1, 2, 3];
+            let stream = stream::iter(items);
+
+            let partitioner = TestPartitioner {
+                key_space: NonZeroU8::new(10).unwrap(),
+            };
+            let settings = BatcherSettings::new(
+                Duration::from_secs(1),
+                NonZeroUsize::new(100).unwrap(),
+                NonZeroUsize::new(2).unwrap(), // 2 items per batch triggers full
+            );
+
+            let mut batcher = PartitionedBatcher::new(stream, partitioner, move || {
+                settings.as_byte_size_config()
+            });
+            let mut batcher = Pin::new(&mut batcher);
+
+            // Process items and verify gauge interactions
+            // Items 1, 2, 3 each create a new open batch (3 open, 0 closed)
+            // Items 1, 2, 3 (second occurrence) fill batches, moving them to closed
+            // Then polling returns each closed batch
+
+            let mut batches_received = 0;
+            loop {
+                match batcher.as_mut().poll_next(&mut cx) {
+                    Poll::Pending => break,
+                    Poll::Ready(None) => break,
+                    Poll::Ready(Some(_)) => {
+                        batches_received += 1;
+                    }
+                }
+            }
+
+            // We should have received 3 batches
+            assert_eq!(batches_received, 3);
+
+            // Verify gauges were recorded by checking snapshot
+            let snapshot = snapshotter.snapshot();
+            let gauges = snapshot.into_hashmap();
+
+            // Verify gauge metrics were recorded
+            let mut found_open = false;
+            let mut found_closed = false;
+
+            for (composite_key, _) in gauges.iter() {
+                let name = composite_key.key().name();
+                if name == "open_batches" {
+                    found_open = true;
+                }
+                if name == "closed_batches" {
+                    found_closed = true;
+                }
+            }
+
+            assert!(found_open, "open_batches gauge should have been recorded");
+            assert!(
+                found_closed,
+                "closed_batches gauge should have been recorded"
+            );
+        });
     }
 }
