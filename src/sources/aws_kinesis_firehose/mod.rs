@@ -1,7 +1,7 @@
 use std::time::Duration;
 use std::{convert::Infallible, fmt, net::SocketAddr};
 
-use futures::FutureExt;
+use futures::{FutureExt, StreamExt};
 use hyper::{service::make_service_fn, Server};
 use tokio::net::TcpStream;
 use tower::ServiceBuilder;
@@ -16,6 +16,7 @@ use vector_lib::tls::MaybeTlsIncomingStream;
 use vrl::value::Kind;
 
 use crate::http::{KeepaliveConfig, MaxConnectionAgeLayer};
+use crate::internal_events::HttpBadPeerConnectionError;
 use crate::{
     codecs::DecodingConfig,
     config::{
@@ -206,7 +207,21 @@ impl SourceConfig for AwsKinesisFirehoseConfig {
                 futures_util::future::ok::<_, Infallible>(svc)
             });
 
-            Server::builder(hyper::server::accept::from_stream(listener.accept_stream()))
+            Server::builder(hyper::server::accept::from_stream(
+                listener.accept_stream().filter_map(|result| async move {
+                    match result {
+                        Ok(stream) => Some(Ok::<_, Infallible>(stream)),
+                        Err(err) => {
+                            if err.is_fatal() {
+                                warn!(message = "Fatal error accepting connection.", error = %err);
+                            } else {
+                                emit!(HttpBadPeerConnectionError { error: &err });
+                            }
+                            None
+                        }
+                    }
+                }),
+            ))
                 .serve(make_svc)
                 .with_graceful_shutdown(shutdown.map(|_| ()))
                 .await

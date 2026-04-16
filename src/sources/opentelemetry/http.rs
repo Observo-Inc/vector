@@ -2,7 +2,7 @@ use std::time::Duration;
 use std::{convert::Infallible, net::SocketAddr};
 
 use bytes::Bytes;
-use futures_util::FutureExt;
+use futures_util::{FutureExt, StreamExt};
 use http::StatusCode;
 use hyper::{service::make_service_fn, Server};
 use prost::Message;
@@ -36,7 +36,7 @@ use crate::sources::util::add_headers;
 use crate::{
     event::Event,
     http::build_http_trace_layer,
-    internal_events::{EventsReceived, StreamClosedError},
+    internal_events::{EventsReceived, HttpBadPeerConnectionError, StreamClosedError},
     shutdown::ShutdownSignal,
     sources::util::{decode, ErrorMessage},
     tls::MaybeTlsSettings,
@@ -83,7 +83,21 @@ pub(crate) async fn run_http_server(
         futures_util::future::ok::<_, Infallible>(svc)
     });
 
-    Server::builder(hyper::server::accept::from_stream(listener.accept_stream()))
+    Server::builder(hyper::server::accept::from_stream(
+        listener.accept_stream().filter_map(|result| async move {
+            match result {
+                Ok(stream) => Some(Ok::<_, Infallible>(stream)),
+                Err(err) => {
+                    if err.is_fatal() {
+                        warn!(message = "Fatal error accepting connection.", error = %err);
+                    } else {
+                        emit!(HttpBadPeerConnectionError { error: &err });
+                    }
+                    None
+                }
+            }
+        }),
+    ))
         .serve(make_svc)
         .with_graceful_shutdown(shutdown.map(|_| ()))
         .await?;

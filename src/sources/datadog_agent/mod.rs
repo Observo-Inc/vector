@@ -24,7 +24,7 @@ use std::{fmt::Debug, io::Read, net::SocketAddr, sync::Arc};
 use bytes::{Buf, Bytes};
 use chrono::{serde::ts_milliseconds, DateTime, Utc};
 use flate2::read::{MultiGzDecoder, ZlibDecoder};
-use futures::FutureExt;
+use futures::{FutureExt, StreamExt};
 use http::StatusCode;
 use hyper::service::make_service_fn;
 use hyper::Server;
@@ -56,7 +56,7 @@ use crate::{
         SourceContext, SourceOutput,
     },
     event::Event,
-    internal_events::{HttpBytesReceived, HttpDecompressError, StreamClosedError},
+    internal_events::{HttpBadPeerConnectionError, HttpBytesReceived, HttpDecompressError, StreamClosedError},
     schema,
     serde::{bool_or_struct, default_decoding, default_framing_message_based},
     sources::{self, util::ErrorMessage},
@@ -230,7 +230,21 @@ impl SourceConfig for DatadogAgentConfig {
                 futures_util::future::ok::<_, Infallible>(svc)
             });
 
-            Server::builder(hyper::server::accept::from_stream(listener.accept_stream()))
+            Server::builder(hyper::server::accept::from_stream(
+                listener.accept_stream().filter_map(|result| async move {
+                    match result {
+                        Ok(stream) => Some(Ok::<_, Infallible>(stream)),
+                        Err(err) => {
+                            if err.is_fatal() {
+                                warn!(message = "Fatal error accepting connection.", error = %err);
+                            } else {
+                                emit!(HttpBadPeerConnectionError { error: &err });
+                            }
+                            None
+                        }
+                    }
+                }),
+            ))
                 .serve(make_svc)
                 .with_graceful_shutdown(shutdown.map(|_| ()))
                 .await
