@@ -10,7 +10,7 @@ use std::{
 use bytes::{Buf, Bytes};
 use chrono::{DateTime, TimeZone, Utc};
 use flate2::read::MultiGzDecoder;
-use futures::FutureExt;
+use futures::{FutureExt, StreamExt};
 use http::StatusCode;
 use hyper::{service::make_service_fn, Server};
 use serde::Serialize;
@@ -51,7 +51,7 @@ use crate::{
     event::{Event, LogEvent, Value},
     http::{build_http_trace_layer, KeepaliveConfig, MaxConnectionAgeLayer},
     internal_events::{
-        EventsReceived, HttpBytesReceived, SplunkHecRequestBodyInvalidError, SplunkHecRequestError,
+        EventsReceived, HttpBadPeerConnectionError, HttpBytesReceived, SplunkHecRequestBodyInvalidError, SplunkHecRequestError,
     },
     serde::bool_or_struct,
     source_sender::ClosedError,
@@ -196,7 +196,21 @@ impl SourceConfig for SplunkConfig {
                 futures_util::future::ok::<_, Infallible>(svc)
             });
 
-            Server::builder(hyper::server::accept::from_stream(listener.accept_stream()))
+            Server::builder(hyper::server::accept::from_stream(
+                listener.accept_stream().filter_map(|result| async move {
+                    match result {
+                        Ok(stream) => Some(Ok::<_, Infallible>(stream)),
+                        Err(err) => {
+                            if err.is_fatal() {
+                                warn!(message = "Fatal error accepting connection.", error = %err);
+                            } else {
+                                emit!(HttpBadPeerConnectionError { error: &err });
+                            }
+                            None
+                        }
+                    }
+                }),
+            ))
                 .serve(make_svc)
                 .with_graceful_shutdown(shutdown.map(|_| ()))
                 .await
