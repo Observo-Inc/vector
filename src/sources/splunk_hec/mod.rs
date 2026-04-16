@@ -3,7 +3,7 @@ use std::{
     convert::Infallible,
     io::Read,
     net::{Ipv4Addr, SocketAddr},
-    sync::{Arc, RwLock},
+    sync::Arc,
     time::Duration,
 };
 
@@ -288,7 +288,7 @@ impl SourceConfig for SplunkConfig {
 
 /// Shared data for responding to requests.
 struct SplunkSource {
-    valid_tokens: Arc<RwLock<BTreeSet<String>>>,
+    valid_tokens: Arc<BTreeSet<String>>,
     protocol: &'static str,
     idx_ack: Option<Arc<IndexerAcknowledgement>>,
     store_hec_token: bool,
@@ -317,7 +317,7 @@ impl SplunkSource {
         });
 
         SplunkSource {
-            valid_tokens: Arc::new(RwLock::new(valid_tokens)),
+            valid_tokens: Arc::new(valid_tokens),
             protocol,
             idx_ack,
             store_hec_token: config.store_hec_token,
@@ -568,9 +568,8 @@ impl SplunkSource {
         let valid_creds = Arc::clone(&self.valid_tokens);
         warp::header::optional("Authorization")
             .and_then(move |token: Option<String>| {
-                let valid_creds = Arc::clone(&valid_creds);
+                let valid_tokens = Arc::clone(&valid_creds);
                 async move {
-                    let valid_tokens = valid_creds.read().expect("poisoned lock!");
                     let token = token
                         .map(|t|
                             match t.split_once(" ") {
