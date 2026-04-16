@@ -1,5 +1,7 @@
 use std::{fmt::{self, Display}, sync::Arc};
 
+use http::{HeaderName, HeaderValue};
+
 use super::request_builder::HecLogsRequestBuilder;
 use crate::{
     internal_events::SplunkEventTimestampInvalidType,
@@ -17,7 +19,7 @@ use futures::future::Either;
 use stream_cancel::Tripwire;
 use vector_lib::{
     config::{log_schema, LogNamespace, TimestampFormat, TimestampResolutionError},
-    lookup::{event_path, lookup_v2::OptionalTargetPath, OwnedValuePath, PathPrefix},
+    lookup::{event_path, lookup_v2::{ConfigValuePath, OptionalTargetPath}, OwnedValuePath, PathPrefix},
     schema::meaning,
 };
 use vrl::path::OwnedTargetPath;
@@ -38,6 +40,7 @@ pub struct HecLogsSink<S> {
     pub endpoint_target: EndpointTarget,
     pub auto_extract_timestamp: bool,
     pub timestamp_configuration: Option<TimestampConfiguration>,
+    pub batch_headers: Vec<(HeaderName, ConfigValuePath)>,
     pub shutdown: Tripwire,
 }
 
@@ -72,6 +75,7 @@ where
         };
         let batch_settings = self.batch_settings;
 
+        let batch_headers = self.batch_headers.clone();
         let run = input
             .map(move |event| process_log(event, &data))
             .batched_partitioned(
@@ -83,9 +87,10 @@ where
                         self.source.clone(),
                         self.index.clone(),
                         self.host_key.clone(),
+                        batch_headers,
                     )
                 } else {
-                    EventPartitioner::new(None, None, None, None)
+                    EventPartitioner::new(None, None, None, None, batch_headers)
                 },
                 move || batch_settings.as_byte_size_config(),
             )
@@ -139,6 +144,7 @@ pub(super) struct Partitioned {
     pub(super) sourcetype: Option<String>,
     pub(super) index: Option<String>,
     pub(super) host: Option<String>,
+    pub(super) headers: Vec<(HeaderName, Option<HeaderValue>)>,
 }
 
 #[derive(Default)]
@@ -147,20 +153,23 @@ struct EventPartitioner {
     pub source: Option<Template>,
     pub index: Option<Template>,
     pub host_key: Option<OptionalTargetPath>,
+    pub headers: Vec<(HeaderName, ConfigValuePath)>,
 }
 
 impl EventPartitioner {
-    const fn new(
+    fn new(
         sourcetype: Option<Template>,
         source: Option<Template>,
         index: Option<Template>,
         host_key: Option<OptionalTargetPath>,
+        headers: Vec<(HeaderName, ConfigValuePath)>,
     ) -> Self {
         Self {
             sourcetype,
             source,
             index,
             host_key,
+            headers,
         }
     }
 }
@@ -208,12 +217,28 @@ impl Partitioner for EventPartitioner {
         .and_then(|path| item.event.get(&path))
         .and_then(|value| value.as_str().map(|s| s.to_string()));
 
+        let headers = self.headers.iter().map(|(name, path)| {
+            let value = item.event.get((PathPrefix::Event, &path.0))
+                .and_then(|v| v.as_str())
+                .and_then(|s| {
+                    HeaderValue::from_str(s.as_ref())
+                        .map_err(|_| {
+                            emit!(crate::internal_events::SplunkBatchHeaderValueInvalid {
+                                header_name: name.as_str(),
+                            });
+                        })
+                        .ok()
+                });
+            (name.clone(), value)
+        }).collect();
+
         Some(Partitioned {
             token: item.event.metadata().splunk_hec_token(),
             source,
             sourcetype,
             index,
             host,
+            headers,
         })
     }
 }
@@ -379,5 +404,130 @@ impl EventCount for HecProcessedEvent {
     fn event_count(&self) -> usize {
         // A HecProcessedEvent is mapped one-to-one with an event.
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use http::{HeaderName, HeaderValue};
+    use vector_lib::{event::LogEvent, lookup::lookup_v2::ConfigValuePath};
+    use crate::sinks::prelude::Partitioner;
+
+    use super::*;
+
+    fn create_processed_event(fields: Vec<(&str, &str)>) -> HecProcessedEvent {
+        let mut log = LogEvent::from("test message");
+        for (key, value) in fields {
+            log.insert(key, value);
+        }
+        ProcessedEvent {
+            event: log,
+            metadata: HecLogsProcessedEventMetadata::default(),
+        }
+    }
+
+    #[test]
+    fn test_event_partitioner_with_headers_same_values() {
+        let headers = vec![
+            (
+                HeaderName::from_static("x-tenant"),
+                ConfigValuePath::try_from("tenant".to_string()).unwrap(),
+            ),
+            (
+                HeaderName::from_static("x-region"),
+                ConfigValuePath::try_from("region".to_string()).unwrap(),
+            ),
+        ];
+
+        let partitioner = EventPartitioner::new(None, None, None, None, headers);
+
+        let event1 = create_processed_event(vec![("tenant", "acme"), ("region", "us")]);
+        let event2 = create_processed_event(vec![("tenant", "acme"), ("region", "us")]);
+
+        let partition1 = partitioner.partition(&event1);
+        let partition2 = partitioner.partition(&event2);
+
+        // Same header values should produce the same partition key
+        assert_eq!(partition1, partition2);
+
+        // Check that headers are correctly extracted
+        let p = partition1.unwrap();
+        assert_eq!(p.headers.len(), 2);
+        assert_eq!(
+            p.headers[0],
+            (HeaderName::from_static("x-tenant"), Some(HeaderValue::from_static("acme")))
+        );
+        assert_eq!(
+            p.headers[1],
+            (HeaderName::from_static("x-region"), Some(HeaderValue::from_static("us")))
+        );
+    }
+
+    #[test]
+    fn test_event_partitioner_with_headers_different_values() {
+        let headers = vec![(
+            HeaderName::from_static("x-tenant"),
+            ConfigValuePath::try_from("tenant".to_string()).unwrap(),
+        )];
+
+        let partitioner = EventPartitioner::new(None, None, None, None, headers);
+
+        let event1 = create_processed_event(vec![("tenant", "acme")]);
+        let event2 = create_processed_event(vec![("tenant", "globex")]);
+
+        let partition1 = partitioner.partition(&event1);
+        let partition2 = partitioner.partition(&event2);
+
+        // Different header values should produce different partition keys
+        assert_ne!(partition1, partition2);
+    }
+
+    #[test]
+    fn test_event_partitioner_with_missing_header_value() {
+        let headers = vec![(
+            HeaderName::from_static("x-tag"),
+            ConfigValuePath::try_from("tag".to_string()).unwrap(),
+        )];
+
+        let partitioner = EventPartitioner::new(None, None, None, None, headers);
+
+        let event_with_tag = create_processed_event(vec![("tag", "important")]);
+        let event_without_tag = create_processed_event(vec![("other_field", "value")]);
+
+        let partition1 = partitioner.partition(&event_with_tag);
+        let partition2 = partitioner.partition(&event_without_tag);
+
+        // Events with and without header values should be in different partitions
+        assert_ne!(partition1, partition2);
+
+        // Check that the missing value is represented as None
+        let p_with = partition1.unwrap();
+        assert_eq!(
+            p_with.headers[0],
+            (HeaderName::from_static("x-tag"), Some(HeaderValue::from_static("important")))
+        );
+
+        let p_without = partition2.unwrap();
+        assert_eq!(
+            p_without.headers[0],
+            (HeaderName::from_static("x-tag"), None)
+        );
+    }
+
+    #[test]
+    fn test_event_partitioner_without_headers() {
+        let partitioner = EventPartitioner::new(None, None, None, None, vec![]);
+
+        let event1 = create_processed_event(vec![("field1", "value1")]);
+        let event2 = create_processed_event(vec![("field2", "value2")]);
+
+        let partition1 = partitioner.partition(&event1);
+        let partition2 = partitioner.partition(&event2);
+
+        // Without headers, events should have the same partition
+        assert_eq!(partition1, partition2);
+
+        let p = partition1.unwrap();
+        assert!(p.headers.is_empty());
     }
 }

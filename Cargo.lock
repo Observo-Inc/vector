@@ -12983,6 +12983,8 @@ dependencies = [
  "async-stream",
  "futures 0.3.31",
  "futures-util",
+ "metrics",
+ "metrics-util 0.18.0",
  "pin-project",
  "proptest",
  "rand 0.8.5",
