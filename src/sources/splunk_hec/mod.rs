@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     convert::Infallible,
     io::Read,
     net::{Ipv4Addr, SocketAddr},
@@ -288,7 +288,7 @@ impl SourceConfig for SplunkConfig {
 
 /// Shared data for responding to requests.
 struct SplunkSource {
-    valid_credentials: Vec<String>,
+    valid_tokens: Arc<BTreeSet<String>>,
     protocol: &'static str,
     idx_ack: Option<Arc<IndexerAcknowledgement>>,
     store_hec_token: bool,
@@ -301,11 +301,13 @@ impl SplunkSource {
         let log_namespace = cx.log_namespace(config.log_namespace);
         let acknowledgements = cx.do_acknowledgements(config.acknowledgements.enabled.into());
         let shutdown = cx.shutdown;
-        let valid_tokens = config
+        let valid_tokens: BTreeSet<String> = config
             .valid_tokens
             .iter()
             .flatten()
-            .chain(config.token.iter());
+            .chain(config.token.iter())
+            .map(|t| t.clone().into())
+            .collect();
 
         let idx_ack = acknowledgements.then(|| {
             Arc::new(IndexerAcknowledgement::new(
@@ -315,9 +317,7 @@ impl SplunkSource {
         });
 
         SplunkSource {
-            valid_credentials: valid_tokens
-                .map(|token| format!("Splunk {}", token.inner()))
-                .collect(),
+            valid_tokens: Arc::new(valid_tokens),
             protocol,
             idx_ack,
             store_hec_token: config.store_hec_token,
@@ -327,14 +327,6 @@ impl SplunkSource {
     }
 
     fn event_service(&self, out: SourceSender) -> BoxedFilter<(Response,)> {
-        let splunk_channel_query_param = warp::query::<HashMap<String, String>>()
-            .map(|qs: HashMap<String, String>| qs.get("channel").map(|v| v.to_owned()));
-        let splunk_channel_header = warp::header::optional::<String>(X_SPLUNK_REQUEST_CHANNEL);
-
-        let splunk_channel = splunk_channel_header
-            .and(splunk_channel_query_param)
-            .map(|header: Option<String>, query_param| header.or(query_param));
-
         let protocol = self.protocol;
         let idx_ack = self.idx_ack.clone();
         let store_hec_token = self.store_hec_token;
@@ -348,7 +340,7 @@ impl SplunkSource {
                     .or(warp::path::end()),
             )
             .and(self.authorization())
-            .and(splunk_channel)
+            .and(SplunkSource::optional_channel())
             .and(warp::addr::remote())
             .and(warp::header::optional::<String>("X-Forwarded-For"))
             .and(self.gzip())
@@ -452,7 +444,7 @@ impl SplunkSource {
         warp::post()
             .and(path!("raw" / "1.0").or(path!("raw")))
             .and(self.authorization())
-            .and(SplunkSource::required_channel())
+            .and(SplunkSource::optional_channel())
             .and(warp::addr::remote())
             .and(warp::header::optional::<String>("X-Forwarded-For"))
             .and(self.gzip())
@@ -461,7 +453,7 @@ impl SplunkSource {
             .and_then(
                 move |_,
                       token: Option<String>,
-                      channel_id: String,
+                      channel_id: Option<String>,
                       remote: Option<SocketAddr>,
                       xff: Option<String>,
                       gzip: bool,
@@ -477,16 +469,15 @@ impl SplunkSource {
                     });
 
                     async move {
-                        let (batch, receiver) =
-                            BatchNotifier::maybe_new_with_receiver(idx_ack.is_some());
-                        let maybe_ack_id = match (idx_ack, receiver) {
-                            (Some(idx_ack), Some(receiver)) => Some(
-                                idx_ack
-                                    .get_ack_id_from_channel(channel_id.clone(), receiver)
-                                    .await?,
-                            ),
-                            _ => None,
-                        };
+                        let (batch, maybe_ack_id) = match (idx_ack, channel_id.clone()) {
+                            (Some(idx_ack), Some(channel_id)) => {
+                                let (batch, receiver) = BatchNotifier::new_with_receiver();
+                                idx_ack.get_ack_id_from_channel(channel_id, receiver).await.map(|ack| (Some(batch), Some(ack)))
+                            },
+                            (Some(_), None) => Err(Rejection::from(ApiError::MissingChannel)),
+                            (None, _) => Ok((None, None)),
+                        }?;
+
                         let mut event = raw_event(
                             body,
                             gzip,
@@ -574,26 +565,31 @@ impl SplunkSource {
 
     /// Authorize request
     fn authorization(&self) -> BoxedFilter<(Option<String>,)> {
-        let valid_credentials = self.valid_credentials.clone();
+        let valid_creds = Arc::clone(&self.valid_tokens);
         warp::header::optional("Authorization")
             .and_then(move |token: Option<String>| {
-                let valid_credentials = valid_credentials.clone();
+                let valid_tokens = Arc::clone(&valid_creds);
                 async move {
-                    match (token, valid_credentials.is_empty()) {
-                        // Remove the "Splunk " prefix if present as it is not
-                        // part of the token itself
-                        (token, true) => {
-                            Ok(token
-                                .map(|t| t.strip_prefix("Splunk ").map(Into::into).unwrap_or(t)))
-                        }
-                        (Some(token), false) if valid_credentials.contains(&token) => Ok(Some(
-                            token
-                                .strip_prefix("Splunk ")
-                                .map(Into::into)
-                                .unwrap_or(token),
-                        )),
+                    let token = token
+                        .map(|t|
+                            match t.split_once(" ") {
+                                Some((scheme, value)) => {
+                                    let scheme = scheme.to_lowercase();
+                                    if scheme == "splunk" || scheme == "bearer" {
+                                        Some(value.trim_start().to_owned())
+                                    } else {
+                                        None
+                                    }
+                                },
+                                _ => None,
+                            })
+                        .flatten();
+                    match (token, valid_tokens.is_empty()) {
+                        (Some(token), true) => Ok(Some(token)),
+                        (Some(token), false) if valid_tokens.contains(&token) => Ok(Some(token)),
                         (Some(_), false) => Err(Rejection::from(ApiError::InvalidAuthorization)),
                         (None, false) => Err(Rejection::from(ApiError::MissingAuthorization)),
+                        (None, true) => Ok(None),
                     }
                 }
             })
@@ -625,6 +621,17 @@ impl SplunkSource {
                     .or(query_param)
                     .ok_or_else(|| Rejection::from(ApiError::MissingChannel))
             })
+            .boxed()
+    }
+
+    fn optional_channel() -> BoxedFilter<(Option<String>,)> {
+        let splunk_channel_query_param = warp::query::<HashMap<String, String>>()
+            .map(|qs: HashMap<String, String>| qs.get("channel").map(|v| v.to_owned()));
+        let splunk_channel_header = warp::header::optional::<String>(X_SPLUNK_REQUEST_CHANNEL);
+
+        splunk_channel_header
+            .and(splunk_channel_query_param)
+            .map(|header: Option<String>, query_param| header.or(query_param))
             .boxed()
     }
 }
@@ -1018,7 +1025,7 @@ enum Time {
 fn raw_event(
     bytes: Bytes,
     gzip: bool,
-    channel: String,
+    channel: Option<String>,
     remote: Option<SocketAddr>,
     xff: Option<String>,
     batch: Option<BatchNotifier>,
@@ -1052,14 +1059,16 @@ fn raw_event(
     // We need to calculate the estimated json size of the event BEFORE enrichment.
     events_received.emit(CountByteSize(1, log.estimated_json_encoded_size_of()));
 
-    // Add channel
-    log_namespace.insert_source_metadata(
-        SplunkConfig::NAME,
-        &mut log,
-        Some(LegacyKey::Overwrite(&owned_value_path!(CHANNEL))),
-        lookup::path!(CHANNEL),
-        channel,
-    );
+    // Add channel only if provided
+    if let Some(channel) = channel {
+        log_namespace.insert_source_metadata(
+            SplunkConfig::NAME,
+            &mut log,
+            Some(LegacyKey::Overwrite(&owned_value_path!(CHANNEL))),
+            lookup::path!(CHANNEL),
+            channel,
+        );
+    }
 
     // host-field priority for raw endpoint:
     // - x-forwarded-for is set to `host` field first, if present. If not present:
@@ -2520,6 +2529,153 @@ mod tests {
             400,
             send_with(address, "services/collector/ack", message, TOKEN, &opts).await
         );
+    }
+
+    #[tokio::test]
+    async fn raw_no_channel_acks_disabled() {
+        assert_source_compliance(&HTTP_PUSH_SOURCE_TAGS, async {
+            let message = "raw_no_channel";
+            let (source, address) = source(None).await;
+
+            let opts = SendWithOpts {
+                channel: None,
+                forwarded_for: None,
+            };
+
+            assert_eq!(
+                200,
+                send_with(address, "services/collector/raw", message, TOKEN, &opts).await
+            );
+
+            let event = collect_n(source, 1).await.remove(0);
+            assert_eq!(
+                event.as_log()[log_schema().message_key().unwrap().to_string()],
+                message.into()
+            );
+            // Verify channel key is NOT present when not provided
+            assert!(event.as_log().get(super::CHANNEL).is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn raw_no_channel_acks_enabled() {
+        let message = "raw_no_channel_acks_enabled";
+        let ack_config = HecAcknowledgementsConfig {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        let (_, address) = source(Some(ack_config)).await;
+
+        let opts = SendWithOpts {
+            channel: None,
+            forwarded_for: None,
+        };
+
+        assert_eq!(
+            400,
+            send_with(address, "services/collector/raw", message, TOKEN, &opts).await
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_with_channel_in_event() {
+        assert_source_compliance(&HTTP_PUSH_SOURCE_TAGS, async {
+            let message = "raw_with_channel";
+            let (source, address) = source(None).await;
+
+            let opts = SendWithOpts {
+                channel: Some(Channel::Header("my-channel-id")),
+                forwarded_for: None,
+            };
+
+            assert_eq!(
+                200,
+                send_with(address, "services/collector/raw", message, TOKEN, &opts).await
+            );
+
+            let event = collect_n(source, 1).await.remove(0);
+            assert_eq!(event.as_log()[&super::CHANNEL], "my-channel-id".into());
+        })
+        .await;
+    }
+
+    async fn events_url_bearer_prefix_test(prefix: &str) {
+        assert_source_compliance(&HTTP_PUSH_SOURCE_TAGS, async {
+            let message = r#"{"event":"bearer_test"}"#;
+            let (source, address) = source(None).await;
+
+            let res = reqwest::Client::new()
+                .post(format!("http://{}/services/collector/event", address))
+                .header("Authorization", format!("{} {}", prefix, TOKEN))
+                .body(message)
+                .send()
+                .await
+                .unwrap();
+
+            assert_eq!(200, res.status().as_u16());
+
+            let event = collect_n(source, 1).await.remove(0);
+            assert_eq!(
+                event.as_log()[log_schema().message_key().unwrap().to_string()],
+                "bearer_test".into()
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn authorization_case_insensitive_bearer_prefix_event() {
+        events_url_bearer_prefix_test("bEaReR        ").await;
+    }
+
+    #[tokio::test]
+    async fn authorization_bearer_prefix_event() {
+        events_url_bearer_prefix_test("Bearer").await;
+    }
+
+    #[tokio::test]
+    async fn authorization_bearer_prefix_raw() {
+        assert_source_compliance(&HTTP_PUSH_SOURCE_TAGS, async {
+            let message = "bearer_raw_test";
+            let (source, address) = source(None).await;
+
+            let res = reqwest::Client::new()
+                .post(format!("http://{}/services/collector/raw", address))
+                .header("Authorization", format!("Bearer {}", TOKEN))
+                .body(message)
+                .send()
+                .await
+                .unwrap();
+
+            assert_eq!(200, res.status().as_u16());
+
+            let event = collect_n(source, 1).await.remove(0);
+            assert_eq!(
+                event.as_log()[log_schema().message_key().unwrap().to_string()],
+                message.into()
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn authorization_invalid_prefix() {
+        assert_source_error(&COMPONENT_ERROR_TAGS, async {
+            let message = r#"{"event":"test"}"#;
+            let (_source, address) = source(None).await;
+
+            let res = reqwest::Client::new()
+                .post(format!("http://{}/services/collector/event", address))
+                .header("Authorization", format!("Basic {}", TOKEN))
+                .body(message)
+                .send()
+                .await
+                .unwrap();
+
+            assert_eq!(401, res.status().as_u16());
+        })
+        .await;
     }
 
     #[test]
