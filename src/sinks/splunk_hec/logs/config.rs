@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
+use http::HeaderName;
 use vector_lib::{
     codecs::TextSerializerConfig, config::TimestampFormat, lookup::lookup_v2::{ConfigValuePath, OptionalTargetPath}, sensitive_string::SensitiveString
 };
-
+use serde_with::serde_as;
 use crate::{
     http::HttpClient,
     sinks::{
@@ -19,6 +20,49 @@ use crate::{
 };
 use crate::sinks::util::http::{validate_headers, RequestConfig};
 use super::{encoder::HecLogsEncoder, request_builder::HecLogsRequestBuilder, sink::HecLogsSink};
+
+/// A batch http-header to be sent to Splunk HEC.
+#[serde_as]
+#[configurable_component]
+#[derive(Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct BatchHeader {
+    /// The name of the header.
+    #[configurable(metadata(docs::examples = "X-Priority"))]
+    pub name: String,
+
+    /// The value of the header.
+    #[configurable(metadata(docs::examples = "pri"))]
+    pub value: ConfigValuePath,
+}
+
+/// A batch header to be sent to Splunk HEC, represented as a key-value pair.
+#[serde_as]
+#[configurable_component]
+#[derive(Clone, Debug, Default)]
+#[serde(deny_unknown_fields)]
+pub struct BatchHeaders(Vec<BatchHeader>);
+
+impl From<Vec<BatchHeader>> for BatchHeaders {
+    fn from(headers: Vec<BatchHeader>) -> Self {
+        BatchHeaders(headers)
+    }
+}
+
+impl BatchHeaders {
+    /// Validates header names and converts to a vector of (HeaderName, ConfigValuePath) pairs.
+    /// Returns an error if any header name is invalid.
+    pub fn into_validated(self) -> Result<Vec<(HeaderName, ConfigValuePath)>, crate::Error> {
+        self.0
+            .into_iter()
+            .map(|header| {
+                HeaderName::try_from(header.name.as_str())
+                    .map(|name| (name, header.value))
+                    .map_err(|e| format!("Invalid batch header name '{}': {}", header.name, e).into())
+            })
+            .collect()
+    }
+}
 
 /// Configuration for the `splunk_hec_logs` sink.
 #[configurable_component(sink(
@@ -104,6 +148,12 @@ pub struct HecLogsSinkConfig {
     #[configurable(derived)]
     #[serde(default)]
     pub batch: BatchConfig<SplunkHecDefaultBatchSettings>,
+
+    /// Headers to be included in each batch request to Splunk HEC.
+    /// Headers in request-config take precedence over these batch headers if there are any conflicts.
+    #[configurable(derived)]
+    #[serde(default)]
+    pub batch_headers: BatchHeaders,
 
     #[configurable(derived)]
     #[serde(default)]
@@ -202,6 +252,7 @@ impl GenerateConfig for HecLogsSinkConfig {
             encoding: TextSerializerConfig::default().into(),
             compression: Compression::default(),
             batch: BatchConfig::default(),
+            batch_headers: BatchHeaders::default(),
             request: RequestConfig::default(),
             tls: None,
             acknowledgements: Default::default(),
@@ -266,6 +317,7 @@ impl HecLogsSinkConfig {
 
         let request_settings = self.request.tower.into_settings();
         let headers = validate_headers(&self.request.headers)?;
+        let batch_headers = self.batch_headers.clone().into_validated()?;
 
         let http_request_builder = Arc::new(HttpRequestBuilder::new(
             self.endpoint.clone(),
@@ -309,6 +361,7 @@ impl HecLogsSinkConfig {
             endpoint_target: self.endpoint_target,
             auto_extract_timestamp: self.auto_extract_timestamp.unwrap_or_default(),
             timestamp_configuration: self.timestamp_configuration.clone(),
+            batch_headers,
             shutdown: cx.shutdown.clone(),
         };
 
@@ -329,6 +382,82 @@ mod tests {
     #[test]
     fn generate_config() {
         crate::test_util::test_generate_config::<HecLogsSinkConfig>();
+    }
+
+    #[test]
+    fn test_config_serde() {
+        let config_toml = r#"
+            default_token = "my-token"
+            endpoint = "https://hec.example.com:8088"
+            host_key = "hostname"
+            indexed_fields = ["field1", "field2"]
+            index = "{{ index_field }}"
+            sourcetype = "{{ sourcetype_field }}"
+            source = "/var/log/app.log"
+            compression = "gzip"
+            endpoint_target = "raw"
+            auto_extract_timestamp = true
+            path = "/custom/path"
+
+            [encoding]
+            codec = "json"
+            except_fields = ["secret_field"]
+
+            [batch]
+            max_bytes = 1048576
+            max_events = 100
+            timeout_secs = 5
+
+            [[batch_headers]]
+            name = "X-Tenant"
+            value = "tenant"
+
+            [[batch_headers]]
+            name = "X-Priority"
+            value = "priority"
+
+            [request]
+            timeout_secs = 30
+            retry_attempts = 3
+
+            [request.headers]
+            X-Custom = "custom-value"
+
+            [acknowledgements]
+            indexer_acknowledgements_enabled = true
+            max_pending_acks = 1000
+
+            [timestamp_configuration]
+            timestamp_key = "ts"
+            format = "native"
+            preserve_timestamp_key = true
+        "#;
+
+        let config: HecLogsSinkConfig = toml::from_str(config_toml)
+            .expect("Failed to parse config");
+
+        assert_eq!(config.default_token.inner(), "my-token");
+        assert_eq!(config.endpoint, "https://hec.example.com:8088");
+        assert_eq!(config.endpoint_target, EndpointTarget::Raw);
+        assert_eq!(config.auto_extract_timestamp, Some(true));
+        assert_eq!(config.path, Some("/custom/path".to_string()));
+        assert_eq!(config.indexed_fields.len(), 2);
+        assert!(config.index.is_some());
+        assert!(config.sourcetype.is_some());
+        assert_eq!(config.source, Some(crate::template::Template::try_from("/var/log/app.log").unwrap()));
+        assert!(config.host_key.is_some());
+
+        let batch_headers = config.batch_headers.into_validated().expect("batch_headers should be valid");
+        assert_eq!(batch_headers.len(), 2);
+        assert_eq!(batch_headers[0].0.as_str(), "x-tenant");
+        assert_eq!(batch_headers[1].0.as_str(), "x-priority");
+
+        assert!(config.acknowledgements.indexer_acknowledgements_enabled);
+        assert_eq!(config.acknowledgements.max_pending_acks.get(), 1000);
+
+        let ts_config = config.timestamp_configuration.expect("timestamp_configuration should be set");
+        assert!(ts_config.timestamp_key.is_some());
+        assert!(ts_config.preserve_timestamp_key);
     }
 
     impl ValidatableComponent for HecLogsSinkConfig {
@@ -372,6 +501,7 @@ mod tests {
                     indexer_acknowledgements_enabled: false,
                     ..Default::default()
                 },
+                batch_headers: BatchHeaders::default(),
                 path: None,
                 auto_extract_timestamp: None,
                 endpoint_target: EndpointTarget::Raw,

@@ -225,6 +225,7 @@ impl HecAckClient {
                 None,
                 MetadataFields::default(),
                 false,
+                vec![],
             )
             .map_err(|_| HecAckApiError::ClientBuildRequest)?;
 

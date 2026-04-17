@@ -77,6 +77,7 @@ pub fn build_http_batch_service(
                         host: req.host,
                     },
                     auto_extract_timestamp,
+                    req.headers,
                 )
             });
         future
@@ -296,6 +297,7 @@ mod tests {
                 None,
                 MetadataFields::default(),
                 false,
+                vec![],
             )
             .unwrap();
 
@@ -340,6 +342,7 @@ mod tests {
                 None,
                 MetadataFields::default(),
                 false,
+                vec![],
             )
             .unwrap();
 
@@ -387,6 +390,7 @@ mod tests {
                 None,
                 MetadataFields::default(),
                 false,
+                vec![],
             )
             .unwrap_err();
         assert_eq!(err.to_string(), "URI parse error: invalid format")
@@ -441,6 +445,107 @@ mod tests {
                 endpoint_target, path
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_build_request_with_batch_headers() {
+        use http::HeaderName;
+
+        let endpoint = "http://localhost:8888";
+        let token = "token";
+        let compression = Compression::None;
+        let events = Bytes::from("events");
+        let http_request_builder = HttpRequestBuilder::new(
+            String::from(endpoint),
+            EndpointTarget::default(),
+            String::from(token),
+            compression,
+            IndexMap::default()
+        );
+
+        // Create batch headers
+        let batch_headers = vec![
+            (HeaderName::from_static("x-tenant"), HeaderValue::from_static("acme")),
+            (HeaderName::from_static("x-region"), HeaderValue::from_static("us-east")),
+        ];
+
+        let request = http_request_builder
+            .build_request(
+                events.clone(),
+                "/services/collector/event",
+                None,
+                MetadataFields::default(),
+                false,
+                batch_headers,
+            )
+            .unwrap();
+
+        // Verify batch headers are present
+        assert_eq!(
+            request.headers().get("X-Tenant"),
+            Some(&HeaderValue::from_static("acme"))
+        );
+        assert_eq!(
+            request.headers().get("X-Region"),
+            Some(&HeaderValue::from_static("us-east"))
+        );
+
+        // Standard headers should still be present
+        assert_eq!(
+            request.headers().get("Content-Type"),
+            Some(&HeaderValue::from_static("application/json"))
+        );
+        assert_eq!(
+            request.headers().get("Authorization"),
+            Some(&HeaderValue::from_static("Splunk token"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_request_static_headers_override_batch_headers() {
+        use http::HeaderName;
+
+        let endpoint = "http://localhost:8888";
+        let token = "token";
+        let compression = Compression::None;
+        let events = Bytes::from("events");
+
+        // Create static headers that will override batch headers
+        let mut static_headers = IndexMap::new();
+        static_headers.insert(
+            HeaderName::from_static("x-override"),
+            HeaderValue::from_static("static-value"),
+        );
+
+        let http_request_builder = HttpRequestBuilder::new(
+            String::from(endpoint),
+            EndpointTarget::default(),
+            String::from(token),
+            compression,
+            static_headers,
+        );
+
+        // Batch header with same name should be overridden
+        let batch_headers = vec![
+            (HeaderName::from_static("x-override"), HeaderValue::from_static("dynamic-value")),
+        ];
+
+        let request = http_request_builder
+            .build_request(
+                events.clone(),
+                "/services/collector/event",
+                None,
+                MetadataFields::default(),
+                false,
+                batch_headers,
+            )
+            .unwrap();
+
+        // Static header should override the batch header
+        assert_eq!(
+            request.headers().get("X-Override"),
+            Some(&HeaderValue::from_static("static-value"))
+        );
     }
 }
 
