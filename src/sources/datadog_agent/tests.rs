@@ -2651,4 +2651,63 @@ async fn permit_origin_allows_matching_ip() {
     assert!(response.is_ok(), "expected connection to be accepted for allowed IP");
 }
 
+#[tokio::test]
+async fn permit_origin_blocks_non_fatal_emits_bad_peer_metric() {
+    use crate::metrics::{self, Controller};
+    use tokio::time::{sleep, Duration};
+    use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
+
+    metrics::init_test();
+
+    let (sender, _recv) = SourceSender::new_test_finalize(EventStatus::Delivered);
+    let address = next_addr();
+
+    let permit_origin = Some(IpAllowlistConfig(vec![
+        IpNetConfig("10.0.0.1/32".parse().unwrap()),
+    ]));
+
+    let config = toml::from_str::<DatadogAgentConfig>(&format!(
+        indoc! { r#"
+            address = "{}"
+            compression = "none"
+            store_api_key = false
+        "#},
+        address
+    ))
+    .unwrap();
+
+    let config = DatadogAgentConfig {
+        permit_origin,
+        ..config
+    };
+
+    let context = SourceContext::new_test(sender, None);
+    tokio::spawn(async move {
+        config.build(context).await.unwrap().await.unwrap();
+    });
+    wait_for_tcp(address).await;
+
+    // Send from localhost — should be blocked by allowlist
+    let _ = reqwest::Client::new()
+        .post(format!("http://{}/v1/input/", address))
+        .body(r#"[{"message":"blocked"}]"#)
+        .send()
+        .await;
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Verify the server is still alive — rejection must be non-fatal
+    tokio::net::TcpStream::connect(address)
+        .await
+        .expect("server should still be running after non-fatal bad peer rejection");
+
+    // Verify the bad_peer error metric was emitted
+    let controller = Controller::get().expect("metrics controller not initialized");
+    let has_bad_peer_error = controller
+        .capture_metrics()
+        .into_iter()
+        .any(|m| m.name() == "component_errors_total" && m.tag_matches("error_code", "bad_peer"));
+    assert!(has_bad_peer_error, "expected component_errors_total with error_code=bad_peer");
+}
+
 register_validatable_component!(DatadogAgentConfig);

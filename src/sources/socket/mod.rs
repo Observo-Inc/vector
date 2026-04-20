@@ -1795,11 +1795,11 @@ mod test {
     //////// PERMIT_ORIGIN / ALLOWLIST TESTS ////////
 
     fn make_allowlist(cidrs: &[&str]) -> Option<vector_lib::ipallowlist::IpAllowlistConfig> {
-        use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
+        use vector_lib::ipallowlist::{IpAllowlistConfig};
         Some(IpAllowlistConfig(
             cidrs
                 .iter()
-                .map(|s| IpNetConfig(s.parse().unwrap()))
+                .map(|s| s.parse().unwrap())
                 .collect(),
         ))
     }
@@ -1864,7 +1864,7 @@ mod test {
             let address = next_addr();
 
             let mut config = UdpConfig::from_address(address.into());
-            config.permit_origin = make_allowlist(&["127.0.0.1/32"]);
+            config.permit_origin = make_allowlist(&["127.0.0.1"]);
 
             let address = init_udp_with_config(tx, config).await;
 
@@ -1886,7 +1886,7 @@ mod test {
 
         let mut config = UdpConfig::from_address(address.into());
         // Only allow 10.0.0.1 — localhost (127.0.0.1) should be rejected
-        config.permit_origin = make_allowlist(&["10.0.0.1/32"]);
+        config.permit_origin = make_allowlist(&["10.0.0.1"]);
 
         let address = init_udp_with_config(tx, config).await;
 

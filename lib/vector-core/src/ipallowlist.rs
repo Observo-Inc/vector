@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
+use std::str::FromStr;
 use std::cell::RefCell;
 use vector_config::GenerateError;
 
@@ -6,7 +8,7 @@ use ipnet::IpNet;
 use vector_config::{configurable_component, Configurable, Metadata, ToValue};
 use vector_config_common::schema::{InstanceType, SchemaGenerator, SchemaObject};
 
-/// List of allowed origin IP networks. IP addresses must be in CIDR notation.
+/// List of allowed origin IP networks. Entries may be in CIDR notation (e.g. `192.168.0.0/16`) or bare IP addresses (e.g. `127.0.0.1`, treated as `/32` or `/128`).
 #[configurable_component]
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields, transparent)]
@@ -24,9 +26,34 @@ const fn ip_allow_list_example() -> [&'static str; 4] {
 }
 
 /// IP network
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, transparent)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
 pub struct IpNetConfig(pub IpNet);
+
+impl FromStr for IpNetConfig {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Try CIDR notation first (e.g. "10.0.0.1/32")
+        if let Ok(net) = s.parse::<IpNet>() {
+            return Ok(IpNetConfig(net));
+        }
+        // Fall back to bare IP address — treat as a host network (/32 or /128)
+        s.parse::<IpAddr>()
+            .map(|addr| IpNetConfig(IpNet::from(addr)))
+            .map_err(|_| format!("invalid IP address or network: {s}"))
+    }
+}
+
+impl<'de> Deserialize<'de> for IpNetConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
 
 impl ToValue for IpNetConfig {
     fn to_value(&self) -> serde_json::Value {

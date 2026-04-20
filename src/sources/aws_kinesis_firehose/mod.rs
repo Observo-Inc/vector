@@ -961,20 +961,16 @@ mod tests {
             .is_none());
     }
 
-    #[tokio::test]
-    async fn permit_origin_blocks_non_matching_ip() {
-        use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
-        use tokio::time::{timeout, Duration};
-        use futures::StreamExt;
-
-        let (sender, mut recv) = SourceSender::new_test_finalize(EventStatus::Delivered);
+    async fn spawn_with_permit_origin(
+        cidrs: &[&str],
+    ) -> (impl Stream<Item = Event> + Unpin, SocketAddr) {
+        use vector_lib::ipallowlist::IpAllowlistConfig;
+        let permit_origin = Some(IpAllowlistConfig(
+            cidrs.iter().map(|s| s.parse().unwrap()).collect(),
+        ));
+        let (sender, recv) = SourceSender::new_test_finalize(EventStatus::Delivered);
         let address = next_addr();
         let cx = SourceContext::new_test(sender, None);
-
-        let permit_origin = Some(IpAllowlistConfig(vec![
-            IpNetConfig("10.0.0.1/32".parse().unwrap()),
-        ]));
-
         tokio::spawn(async move {
             AwsKinesisFirehoseConfig {
                 address,
@@ -997,9 +993,11 @@ mod tests {
             .unwrap()
         });
         wait_for_tcp(address).await;
+        (recv, address)
+    }
 
-        // Send from localhost — should be blocked by allowlist
-        let _ = reqwest::Client::new()
+    async fn send_firehose_request(address: SocketAddr) -> reqwest::Result<reqwest::Response> {
+        reqwest::Client::new()
             .post(format!("http://{}", address))
             .header("x-amz-firehose-protocol-version", "1.0")
             .header("x-amz-firehose-request-id", REQUEST_ID)
@@ -1007,59 +1005,48 @@ mod tests {
             .header("content-type", "application/json")
             .body(r#"{"requestId":"test","timestamp":1234567890,"records":[{"data":"dGVzdA=="}]}"#)
             .send()
-            .await;
-
-        let result = timeout(Duration::from_millis(200), recv.next()).await;
-        assert!(result.is_err(), "expected no events from blocked IP");
+            .await
     }
 
-#[tokio::test]
-async fn permit_origin_allows_matching_ip() {
-    use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
+    #[tokio::test]
+    async fn permit_origin_allows_matching_ip() {
+        use crate::test_util::collect_n;
+        let (recv, address) = spawn_with_permit_origin(&["127.0.0.1"]).await;
+        // Run concurrently: the server waits for event ack before sending the HTTP
+        // response, so collecting must happen in parallel with the request.
+        let (response, events) = tokio::join!(send_firehose_request(address), collect_n(recv, 1));
+        assert!(response.is_ok(), "expected connection to be accepted for allowed IP");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].as_log()["message"],
+            "test".into()
+        );
+        assert_eq!(
+            events[0].as_log()["request_id"],
+            REQUEST_ID.into()
+        );
+    }
 
-    let (sender, _recv) = SourceSender::new_test_finalize(EventStatus::Delivered);
-    let address = next_addr();
-    let cx = SourceContext::new_test(sender, None);
+    #[tokio::test]
+    async fn permit_origin_blocks_non_fatal_emits_bad_peer_metric() {
+        use crate::metrics::{self, Controller};
 
-    let permit_origin = Some(IpAllowlistConfig(vec![
-        IpNetConfig("127.0.0.1/32".parse().unwrap()),
-    ]));
+        metrics::init_test();
+        let (_, address) = spawn_with_permit_origin(&["10.0.0.1/32"]).await;
+        let _ = send_firehose_request(address).await;
 
-    tokio::spawn(async move {
-        AwsKinesisFirehoseConfig {
-            address,
-            tls: None,
-            access_key: None,
-            access_keys: None,
-            store_access_key: false,
-            record_compression: Compression::None,
-            framing: default_framing_message_based(),
-            decoding: default_decoding(),
-            acknowledgements: true.into(),
-            log_namespace: None,
-            keepalive: Default::default(),
-            permit_origin,
-        }
-        .build(cx)
-        .await
-        .unwrap()
-        .await
-        .unwrap()
-    });
-    wait_for_tcp(address).await;
+        // Verify the server is still alive — rejection must be non-fatal
+        tokio::net::TcpStream::connect(address)
+            .await
+            .expect("server should still be running after non-fatal bad peer rejection");
 
-    // Send from localhost — should be accepted by allowlist
-    let response = reqwest::Client::new()
-        .post(format!("http://{}", address))
-        .header("x-amz-firehose-protocol-version", "1.0")
-        .header("x-amz-firehose-request-id", REQUEST_ID)
-        .header("x-amz-firehose-source-arn", SOURCE_ARN)
-        .header("content-type", "application/json")
-        .body(r#"{"requestId":"test","timestamp":1234567890,"records":[{"data":"dGVzdA=="}]}"#)
-        .send()
-        .await;
-
-    assert!(response.is_ok(), "expected connection to be accepted for allowed IP");
-}
+        // Verify the bad_peer error metric was emitted
+        let controller = Controller::get().expect("metrics controller not initialized");
+        let has_bad_peer_error = controller
+            .capture_metrics()
+            .into_iter()
+            .any(|m| m.name() == "component_errors_total" && m.tag_matches("error_code", "bad_peer"));
+        assert!(has_bad_peer_error, "expected component_errors_total with error_code=bad_peer");
+    }
 
 }
