@@ -2563,19 +2563,15 @@ impl ValidatableComponent for DatadogAgentConfig {
     }
 }
 
-#[tokio::test]
-async fn permit_origin_blocks_non_matching_ip() {
-    use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
-    use tokio::time::{timeout, Duration};
-
+async fn spawn_datadog_with_permit_origin(
+    cidrs: &[&str],
+) -> (impl Stream<Item = Event> + Unpin, SocketAddr) {
+    use vector_lib::ipallowlist::IpAllowlistConfig;
+    let permit_origin = Some(IpAllowlistConfig(
+        cidrs.iter().map(|s| s.parse().unwrap()).collect(),
+    ));
     let (sender, recv) = SourceSender::new_test_finalize(EventStatus::Delivered);
-    let mut recv = recv;
     let address = next_addr();
-
-    let permit_origin = Some(IpAllowlistConfig(vec![
-        IpNetConfig("10.0.0.1/32".parse().unwrap()),
-    ]));
-
     let config = toml::from_str::<DatadogAgentConfig>(&format!(
         indoc! { r#"
             address = "{}"
@@ -2585,116 +2581,44 @@ async fn permit_origin_blocks_non_matching_ip() {
         address
     ))
     .unwrap();
-
-    // Override permit_origin since toml deserialization defaults to None
-    let config = DatadogAgentConfig {
-        permit_origin,
-        ..config
-    };
-
-    let context = SourceContext::new_test(sender, None);
+    let config = DatadogAgentConfig { permit_origin, ..config };
+    let mut schema_defs = HashMap::new();
+    schema_defs.insert(Some(LOGS.to_owned()), test_logs_schema_definition());
+    let context = SourceContext::new_test(sender, Some(schema_defs));
     tokio::spawn(async move {
         config.build(context).await.unwrap().await.unwrap();
     });
     wait_for_tcp(address).await;
+    (recv, address)
+}
 
-    // Send from localhost — should be blocked by allowlist
-    let _ = reqwest::Client::new()
+async fn send_datadog_request(address: SocketAddr) -> reqwest::Result<reqwest::Response> {
+    reqwest::Client::new()
         .post(format!("http://{}/v1/input/", address))
-        .body(r#"[{"message":"blocked"}]"#)
+        .body(r#"[{"message":"test","status":"info","timestamp":0,"hostname":"host","service":"svc","ddsource":"src","ddtags":""}]"#)
         .send()
-        .await;
-
-    let result = timeout(Duration::from_millis(200), recv.next()).await;
-    assert!(result.is_err(), "expected no events from blocked IP");
+        .await
 }
 
 #[tokio::test]
 async fn permit_origin_allows_matching_ip() {
-    use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
-
-    let (sender, _recv) = SourceSender::new_test_finalize(EventStatus::Delivered);
-    let address = next_addr();
-
-    let permit_origin = Some(IpAllowlistConfig(vec![
-        IpNetConfig("127.0.0.1/32".parse().unwrap()),
-    ]));
-
-    let config = toml::from_str::<DatadogAgentConfig>(&format!(
-        indoc! { r#"
-            address = "{}"
-            compression = "none"
-            store_api_key = false
-        "#},
-        address
-    ))
-    .unwrap();
-
-    let config = DatadogAgentConfig {
-        permit_origin,
-        ..config
-    };
-
-    let context = SourceContext::new_test(sender, None);
-    tokio::spawn(async move {
-        config.build(context).await.unwrap().await.unwrap();
-    });
-    wait_for_tcp(address).await;
-
-    // Send from localhost — should be accepted by allowlist
-    let response = reqwest::Client::new()
-        .post(format!("http://{}/v1/input/", address))
-        .body(r#"[{"message":"allowed"}]"#)
-        .send()
-        .await;
-
+    use crate::test_util::collect_n;
+    let (recv, address) = spawn_datadog_with_permit_origin(&["127.0.0.1"]).await;
+    let response = send_datadog_request(address).await;
     assert!(response.is_ok(), "expected connection to be accepted for allowed IP");
+    assert_eq!(response.unwrap().status(), 200);
+    let events = collect_n(recv, 1).await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].as_log()["message"], Value::Bytes(Bytes::from("test")));
 }
 
 #[tokio::test]
 async fn permit_origin_blocks_non_fatal_emits_bad_peer_metric() {
     use crate::metrics::{self, Controller};
-    use tokio::time::{sleep, Duration};
-    use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
 
     metrics::init_test();
-
-    let (sender, _recv) = SourceSender::new_test_finalize(EventStatus::Delivered);
-    let address = next_addr();
-
-    let permit_origin = Some(IpAllowlistConfig(vec![
-        IpNetConfig("10.0.0.1/32".parse().unwrap()),
-    ]));
-
-    let config = toml::from_str::<DatadogAgentConfig>(&format!(
-        indoc! { r#"
-            address = "{}"
-            compression = "none"
-            store_api_key = false
-        "#},
-        address
-    ))
-    .unwrap();
-
-    let config = DatadogAgentConfig {
-        permit_origin,
-        ..config
-    };
-
-    let context = SourceContext::new_test(sender, None);
-    tokio::spawn(async move {
-        config.build(context).await.unwrap().await.unwrap();
-    });
-    wait_for_tcp(address).await;
-
-    // Send from localhost — should be blocked by allowlist
-    let _ = reqwest::Client::new()
-        .post(format!("http://{}/v1/input/", address))
-        .body(r#"[{"message":"blocked"}]"#)
-        .send()
-        .await;
-
-    sleep(Duration::from_millis(100)).await;
+    let (_, address) = spawn_datadog_with_permit_origin(&["10.0.0.1/32"]).await;
+    let _ = send_datadog_request(address).await;
 
     // Verify the server is still alive — rejection must be non-fatal
     tokio::net::TcpStream::connect(address)
