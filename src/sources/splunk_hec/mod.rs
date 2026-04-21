@@ -51,9 +51,10 @@ use crate::{
     event::{Event, LogEvent, Value},
     http::{build_http_trace_layer, KeepaliveConfig, MaxConnectionAgeLayer},
     internal_events::{
-        EventsReceived, IpAllowlistDeniedError, HttpBytesReceived, SplunkHecRequestBodyInvalidError, SplunkHecRequestError,
+        EventsReceived, HttpBytesReceived, SplunkHecRequestBodyInvalidError, SplunkHecRequestError,
     },
     serde::bool_or_struct,
+    sources::util::handle_accept_error,
     source_sender::ClosedError,
     tls::{MaybeTlsSettings, TlsEnableableConfig},
     SourceSender,
@@ -197,19 +198,7 @@ impl SourceConfig for SplunkConfig {
             });
 
             Server::builder(hyper::server::accept::from_stream(
-                listener.accept_stream().filter_map(|result| async move {
-                    match result {
-                        Ok(stream) => Some(Ok::<_, Infallible>(stream)),
-                        Err(err) => {
-                            if err.is_fatal() {
-                                warn!(message = "Fatal error accepting connection.", error = %err);
-                            } else {
-                                emit!(IpAllowlistDeniedError { peer: &err });
-                            }
-                            None
-                        }
-                    }
-                }),
+                listener.accept_stream().filter_map(handle_accept_error),
             ))
                 .serve(make_svc)
                 .with_graceful_shutdown(shutdown.map(|_| ()))

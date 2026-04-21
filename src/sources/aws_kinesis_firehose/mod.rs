@@ -212,10 +212,10 @@ impl SourceConfig for AwsKinesisFirehoseConfig {
                     match result {
                         Ok(stream) => Some(Ok::<_, Infallible>(stream)),
                         Err(err) => {
-                            if err.is_fatal() {
-                                warn!(message = "Fatal error accepting connection.", error = %err);
-                            } else {
+                            if err == TlsError::DisallowedPeer {
                                 emit!(IpAllowlistDeniedError { peer: &err });
+                            } else {
+                                warn!(message = "Accept failed", error = %err);
                             }
                             None
                         }

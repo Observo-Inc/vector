@@ -33,9 +33,11 @@ use crate::{
     config::SourceContext,
     http::{build_http_trace_layer, KeepaliveConfig, MaxConnectionAgeLayer},
     internal_events::{
-        IpAllowlistDeniedError, HttpBadRequest, HttpBytesReceived, HttpEventsReceived, HttpInternalError, StreamClosedError,
+        HttpBadRequest, HttpBytesReceived, HttpEventsReceived, HttpInternalError, StreamClosedError,
     },
     sources::util::http::HttpMethod,
+    sources::util::handle_accept_error,
+
     tls::{MaybeTlsIncomingStream, MaybeTlsSettings, TlsEnableableConfig},
     SourceSender,
 };
@@ -227,19 +229,7 @@ pub trait HttpSource: Clone + Send + Sync + 'static {
                 .with_allowlist(permit_origin.map(Into::into));
 
             Server::builder(hyper::server::accept::from_stream(
-                listener.accept_stream().filter_map(|result| async move {
-                    match result {
-                        Ok(stream) => Some(Ok::<_, Infallible>(stream)),
-                        Err(err) => {
-                            if err.is_fatal() {
-                                warn!(message = "Fatal error accepting connection.", error = %err);
-                            } else {
-                                emit!(IpAllowlistDeniedError { peer: &err });
-                            }
-                            None
-                        }
-                    }
-                }),
+                listener.accept_stream().filter_map(handle_accept_error),
             ))
                 .serve(make_svc)
                 .with_graceful_shutdown(cx.shutdown.map(|_| ()))

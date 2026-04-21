@@ -49,6 +49,7 @@ use vrl::value::Kind;
 use warp::{filters::BoxedFilter, reject::Rejection, reply::Response, Filter, Reply};
 
 use crate::http::{build_http_trace_layer, KeepaliveConfig, MaxConnectionAgeLayer};
+use crate::sources::util::handle_accept_error;
 use crate::{
     codecs::{Decoder, DecodingConfig},
     config::{
@@ -56,7 +57,7 @@ use crate::{
         SourceContext, SourceOutput,
     },
     event::Event,
-    internal_events::{IpAllowlistDeniedError, HttpBytesReceived, HttpDecompressError, StreamClosedError},
+    internal_events::{HttpBytesReceived, HttpDecompressError, StreamClosedError},
     schema,
     serde::{bool_or_struct, default_decoding, default_framing_message_based},
     sources::{self, util::ErrorMessage},
@@ -231,19 +232,7 @@ impl SourceConfig for DatadogAgentConfig {
             });
 
             Server::builder(hyper::server::accept::from_stream(
-                listener.accept_stream().filter_map(|result| async move {
-                    match result {
-                        Ok(stream) => Some(Ok::<_, Infallible>(stream)),
-                        Err(err) => {
-                            if err.is_fatal() {
-                                warn!(message = "Fatal error accepting connection.", error = %err);
-                            } else {
-                                emit!(IpAllowlistDeniedError { peer: &err });
-                            }
-                            None
-                        }
-                    }
-                }),
+                listener.accept_stream().filter_map(handle_accept_error),
             ))
                 .serve(make_svc)
                 .with_graceful_shutdown(shutdown.map(|_| ()))

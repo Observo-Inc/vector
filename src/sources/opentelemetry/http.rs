@@ -33,10 +33,11 @@ use vector_lib::ipallowlist::IpAllowlistConfig;
 use crate::http::{KeepaliveConfig, MaxConnectionAgeLayer};
 use crate::sources::http_server::HttpConfigParamKind;
 use crate::sources::util::add_headers;
+use crate::sources::util::handle_accept_error;
 use crate::{
     event::Event,
     http::build_http_trace_layer,
-    internal_events::{EventsReceived, IpAllowlistDeniedError, StreamClosedError},
+    internal_events::{EventsReceived, StreamClosedError},
     shutdown::ShutdownSignal,
     sources::util::{decode, ErrorMessage},
     tls::MaybeTlsSettings,
@@ -84,19 +85,7 @@ pub(crate) async fn run_http_server(
     });
 
     Server::builder(hyper::server::accept::from_stream(
-        listener.accept_stream().filter_map(|result| async move {
-            match result {
-                Ok(stream) => Some(Ok::<_, Infallible>(stream)),
-                Err(err) => {
-                    if err.is_fatal() {
-                        warn!(message = "Fatal error accepting connection.", error = %err);
-                    } else {
-                        emit!(IpAllowlistDeniedError { peer: &err });
-                    }
-                    None
-                }
-            }
-        }),
+        listener.accept_stream().filter_map(handle_accept_error),
     ))
         .serve(make_svc)
         .with_graceful_shutdown(shutdown.map(|_| ()))

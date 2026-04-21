@@ -564,6 +564,7 @@ mod tests {
     };
 
     use super::{remove_duplicates, SimpleHttpConfig};
+    use vector_lib::ipallowlist::IpAllowlistConfig;
 
     #[test]
     fn generate_config() {
@@ -684,6 +685,26 @@ mod tests {
         });
         wait_for_tcp(address).await;
         (recv, address)
+    }
+
+    async fn spawn_simple_http_source(
+        address: SocketAddr,
+        permit_origin: Option<IpAllowlistConfig>,
+        context: SourceContext,
+    ) {
+        tokio::spawn(async move {
+            SimpleHttpConfig {
+                address,
+                permit_origin,
+                ..Default::default()
+            }
+            .build(context)
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+        });
+        wait_for_tcp(address).await;
     }
 
     async fn send(address: SocketAddr, body: &str) -> u16 {
@@ -1796,7 +1817,7 @@ mod tests {
 
     #[tokio::test]
     async fn permit_origin_blocks_non_matching_ip() {
-        use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
+        use vector_lib::ipallowlist::IpNetConfig;
         use tokio::time::{timeout, Duration};
         use futures::StreamExt;
 
@@ -1808,34 +1829,7 @@ mod tests {
             IpNetConfig("10.0.0.1/32".parse().unwrap()),
         ]));
 
-        tokio::spawn(async move {
-            SimpleHttpConfig {
-                address,
-                headers: vec![],
-                encoding: None,
-                query_parameters: vec![],
-                response_code: StatusCode::OK,
-                tls: None,
-                auth: None,
-                strict_path: true,
-                path_key: OptionalValuePath::from(owned_value_path!("path")),
-                host_key: OptionalValuePath::from(owned_value_path!("host")),
-                path: "/".to_owned(),
-                method: HttpMethod::Post,
-                framing: None,
-                decoding: None,
-                acknowledgements: false.into(),
-                log_namespace: None,
-                keepalive: Default::default(),
-                permit_origin,
-            }
-            .build(context)
-            .await
-            .unwrap()
-            .await
-            .unwrap();
-        });
-        wait_for_tcp(address).await;
+        spawn_simple_http_source(address, permit_origin, context).await;
 
         // Send from localhost — should be blocked by allowlist
         let _ = reqwest::Client::new()
@@ -1850,7 +1844,7 @@ mod tests {
 
     #[tokio::test]
     async fn permit_origin_allows_matching_ip() {
-        use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
+        use vector_lib::ipallowlist::IpNetConfig;
 
         let (sender, _recv) = SourceSender::new_test_finalize(EventStatus::Delivered);
         let address = next_addr();
@@ -1860,34 +1854,7 @@ mod tests {
             IpNetConfig("127.0.0.1/32".parse().unwrap()),
         ]));
 
-        tokio::spawn(async move {
-            SimpleHttpConfig {
-                address,
-                headers: vec![],
-                encoding: None,
-                query_parameters: vec![],
-                response_code: StatusCode::OK,
-                tls: None,
-                auth: None,
-                strict_path: true,
-                path_key: OptionalValuePath::from(owned_value_path!("path")),
-                host_key: OptionalValuePath::from(owned_value_path!("host")),
-                path: "/".to_owned(),
-                method: HttpMethod::Post,
-                framing: None,
-                decoding: None,
-                acknowledgements: false.into(),
-                log_namespace: None,
-                keepalive: Default::default(),
-                permit_origin,
-            }
-            .build(context)
-            .await
-            .unwrap()
-            .await
-            .unwrap();
-        });
-        wait_for_tcp(address).await;
+        spawn_simple_http_source(address, permit_origin, context).await;
 
         // Send from localhost — should be accepted by allowlist
         let response = reqwest::Client::new()
@@ -1897,6 +1864,11 @@ mod tests {
             .await;
 
         assert!(response.is_ok(), "expected connection to be accepted for allowed IP");
+        let res = response.unwrap();
+        assert_eq!(res.status(), 200);
+        let body = res.text().await.unwrap();
+        assert!(body.is_empty(), "expected empty response body, got: {}", body);
+
     }
 
     register_validatable_component!(SimpleHttpConfig);
