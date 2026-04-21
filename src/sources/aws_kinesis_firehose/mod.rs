@@ -16,7 +16,7 @@ use vector_lib::tls::MaybeTlsIncomingStream;
 use vrl::value::Kind;
 
 use crate::http::{KeepaliveConfig, MaxConnectionAgeLayer};
-use crate::internal_events::IpAllowlistDeniedError;
+use crate::sources::util::handle_accept_error;
 use crate::{
     codecs::DecodingConfig,
     config::{
@@ -208,19 +208,7 @@ impl SourceConfig for AwsKinesisFirehoseConfig {
             });
 
             Server::builder(hyper::server::accept::from_stream(
-                listener.accept_stream().filter_map(|result| async move {
-                    match result {
-                        Ok(stream) => Some(Ok::<_, Infallible>(stream)),
-                        Err(err) => {
-                            if err == TlsError::DisallowedPeer {
-                                emit!(IpAllowlistDeniedError { peer: &err });
-                            } else {
-                                warn!(message = "Accept failed", error = %err);
-                            }
-                            None
-                        }
-                    }
-                }),
+                listener.accept_stream().filter_map(handle_accept_error),
             ))
                 .serve(make_svc)
                 .with_graceful_shutdown(shutdown.map(|_| ()))
