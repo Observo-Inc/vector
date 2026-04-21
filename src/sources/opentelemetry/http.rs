@@ -36,7 +36,7 @@ use crate::sources::util::add_headers;
 use crate::{
     event::Event,
     http::build_http_trace_layer,
-    internal_events::{EventsReceived, HttpBadPeerConnectionError, StreamClosedError},
+    internal_events::{EventsReceived, IpAllowlistDeniedError, StreamClosedError},
     shutdown::ShutdownSignal,
     sources::util::{decode, ErrorMessage},
     tls::MaybeTlsSettings,
@@ -91,7 +91,7 @@ pub(crate) async fn run_http_server(
                     if err.is_fatal() {
                         warn!(message = "Fatal error accepting connection.", error = %err);
                     } else {
-                        emit!(HttpBadPeerConnectionError { error: &err });
+                        emit!(IpAllowlistDeniedError { peer: &err });
                     }
                     None
                 }

@@ -51,7 +51,7 @@ use crate::{
     event::{Event, LogEvent, Value},
     http::{build_http_trace_layer, KeepaliveConfig, MaxConnectionAgeLayer},
     internal_events::{
-        EventsReceived, HttpBadPeerConnectionError, HttpBytesReceived, SplunkHecRequestBodyInvalidError, SplunkHecRequestError,
+        EventsReceived, IpAllowlistDeniedError, HttpBytesReceived, SplunkHecRequestBodyInvalidError, SplunkHecRequestError,
     },
     serde::bool_or_struct,
     source_sender::ClosedError,
@@ -204,7 +204,7 @@ impl SourceConfig for SplunkConfig {
                             if err.is_fatal() {
                                 warn!(message = "Fatal error accepting connection.", error = %err);
                             } else {
-                                emit!(HttpBadPeerConnectionError { error: &err });
+                                emit!(IpAllowlistDeniedError { peer: &err });
                             }
                             None
                         }

@@ -195,3 +195,35 @@ impl<E: std::fmt::Display> InternalEvent for SocketSendError<E> {
         emit!(ComponentEventsDropped::<UNINTENTIONAL> { count: 1, reason });
     }
 }
+
+pub struct IpAllowlistDeniedError<'a> {
+    pub peer: &'a dyn std::fmt::Display,
+}
+
+impl<'a> std::fmt::Debug for IpAllowlistDeniedError<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IpAllowlistDeniedError")
+            .field("peer", &format_args!("{}", self.peer))
+            .finish()
+    }
+}
+
+impl InternalEvent for IpAllowlistDeniedError<'_> {
+    fn emit(self) {
+        warn!(
+            message = "Rejected connection from non-permitted IP.",
+            peer = %self.peer,
+            error_code = "bad_peer",
+            error_type = error_type::CONNECTION_FAILED,
+            stage = error_stage::RECEIVING,
+            internal_log_rate_limit = true,
+        );
+        counter!(
+            "component_errors_total",
+            "error_code" => "bad_peer",
+            "error_type" => error_type::CONNECTION_FAILED,
+            "stage" => error_stage::RECEIVING,
+        )
+        .increment(1);
+    }
+}

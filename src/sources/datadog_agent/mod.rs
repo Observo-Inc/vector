@@ -56,7 +56,7 @@ use crate::{
         SourceContext, SourceOutput,
     },
     event::Event,
-    internal_events::{HttpBadPeerConnectionError, HttpBytesReceived, HttpDecompressError, StreamClosedError},
+    internal_events::{IpAllowlistDeniedError, HttpBytesReceived, HttpDecompressError, StreamClosedError},
     schema,
     serde::{bool_or_struct, default_decoding, default_framing_message_based},
     sources::{self, util::ErrorMessage},
@@ -238,7 +238,7 @@ impl SourceConfig for DatadogAgentConfig {
                             if err.is_fatal() {
                                 warn!(message = "Fatal error accepting connection.", error = %err);
                             } else {
-                                emit!(HttpBadPeerConnectionError { error: &err });
+                                emit!(IpAllowlistDeniedError { peer: &err });
                             }
                             None
                         }

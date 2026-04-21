@@ -33,7 +33,7 @@ use crate::{
     config::SourceContext,
     http::{build_http_trace_layer, KeepaliveConfig, MaxConnectionAgeLayer},
     internal_events::{
-        HttpBadPeerConnectionError, HttpBadRequest, HttpBytesReceived, HttpEventsReceived, HttpInternalError, StreamClosedError,
+        IpAllowlistDeniedError, HttpBadRequest, HttpBytesReceived, HttpEventsReceived, HttpInternalError, StreamClosedError,
     },
     sources::util::http::HttpMethod,
     tls::{MaybeTlsIncomingStream, MaybeTlsSettings, TlsEnableableConfig},
@@ -234,7 +234,7 @@ pub trait HttpSource: Clone + Send + Sync + 'static {
                             if err.is_fatal() {
                                 warn!(message = "Fatal error accepting connection.", error = %err);
                             } else {
-                                emit!(HttpBadPeerConnectionError { error: &err });
+                                emit!(IpAllowlistDeniedError { peer: &err });
                             }
                             None
                         }

@@ -16,7 +16,7 @@ use vector_lib::tls::MaybeTlsIncomingStream;
 use vrl::value::Kind;
 
 use crate::http::{KeepaliveConfig, MaxConnectionAgeLayer};
-use crate::internal_events::HttpBadPeerConnectionError;
+use crate::internal_events::IpAllowlistDeniedError;
 use crate::{
     codecs::DecodingConfig,
     config::{
@@ -215,7 +215,7 @@ impl SourceConfig for AwsKinesisFirehoseConfig {
                             if err.is_fatal() {
                                 warn!(message = "Fatal error accepting connection.", error = %err);
                             } else {
-                                emit!(HttpBadPeerConnectionError { error: &err });
+                                emit!(IpAllowlistDeniedError { peer: &err });
                             }
                             None
                         }

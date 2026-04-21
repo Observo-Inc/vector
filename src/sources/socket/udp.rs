@@ -22,7 +22,7 @@ use crate::{
     codecs::Decoder,
     event::Event,
     internal_events::{
-        SocketBindError, SocketEventsReceived, SocketMode, SocketReceiveError, StreamClosedError,
+        IpAllowlistDeniedError, SocketBindError, SocketEventsReceived, SocketMode, SocketReceiveError, StreamClosedError,
     },
     net,
     serde::default_decoding,
@@ -206,6 +206,12 @@ pub(super) fn udp(
 
                     if let Some(ref allowlist) = origin_allowlist {
                         if !allowlist.iter().any(|net| net.contains(&address.ip())) {
+                            warn!(
+                                message = "Received UDP packet from non-permitted origin, dropping.",
+                                origin = %address.ip(),
+                                internal_log_rate_limit = true
+                            );
+                            emit!(IpAllowlistDeniedError { peer: &address.ip() });
                             continue;
                         }
                     }
