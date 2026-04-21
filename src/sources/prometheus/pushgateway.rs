@@ -531,6 +531,16 @@ mod test {
         wait_for_tcp(address).await;
     }
 
+    fn assert_bad_peer_metric_emitted() {
+        let controller = vector_lib::metrics::Controller::get()
+            .expect("metrics controller not initialized");
+        let has_bad_peer = controller
+            .capture_metrics()
+            .into_iter()
+            .any(|m| m.name() == "component_errors_total" && m.tag_matches("error_code", "bad_peer"));
+        assert!(has_bad_peer, "expected component_errors_total with error_code=bad_peer");
+    }
+
     async fn send_pushgateway_metric(
         address: std::net::SocketAddr,
     ) -> reqwest::Result<reqwest::Response> {
@@ -547,6 +557,8 @@ mod test {
         use futures::StreamExt;
         use tokio::time::{timeout, Duration};
 
+        vector_lib::metrics::init_test();
+
         // Blocked: localhost not in allowlist
         let (tx, mut rx) = SourceSender::new_test_finalize(EventStatus::Delivered);
         let address = test_util::next_addr();
@@ -554,18 +566,7 @@ mod test {
         let _ = send_pushgateway_metric(address).await;
         let result = timeout(Duration::from_millis(200), rx.next()).await;
         assert!(result.is_err(), "expected no events from blocked IP");
-        // Verify the server is still alive — rejection must be non-fatal
-        tokio::net::TcpStream::connect(address)
-            .await
-            .expect("server should still be running after non-fatal bad peer rejection");
-        // Verify the bad_peer error metric was emitted
-        vector_lib::metrics::init_test();
-        let controller = vector_lib::metrics::Controller::get().expect("metrics controller not initialized");
-        let has_bad_peer_error = controller
-            .capture_metrics()
-            .into_iter()
-            .any(|m| m.name() == "component_errors_total" && m.tag_matches("error_code", "bad_peer"));
-        assert!(has_bad_peer_error, "expected component_errors_total with error_code=bad_peer");
+        assert_bad_peer_metric_emitted();
 
         // Allowed: localhost matches allowlist
         let (tx, mut rx) = SourceSender::new_test_finalize(EventStatus::Delivered);

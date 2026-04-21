@@ -68,7 +68,6 @@ impl Default for PrometheusRemoteWriteConfig {
     }
 }
 
-
 impl PrometheusRemoteWriteConfig {
     #[cfg(test)]
     pub fn from_address(address: SocketAddr) -> Self {
@@ -447,12 +446,9 @@ mod test {
         build_and_spawn_remote_write_source(address, make_remote_write_config(address, "127.0.0.1/32"), tx).await;
         let response = send_remote_write_request(address).await;
         assert!(response.is_ok(), "expected connection to be accepted for allowed IP");
-        let res = response.unwrap();
-        assert_eq!(res.status(), 200);
+        assert_eq!(response.unwrap().status(), 200);
         let event = timeout(Duration::from_millis(500), rx.next()).await;
-        assert!(event.is_ok(), "expected to receive events from allowed IP");
-        let event = event.unwrap().unwrap();
-        assert_eq!(event.as_metric().name(), "test_metric");
+        assert_eq!(event.unwrap().unwrap().as_metric().name(), "test_metric");
     }
 }
 

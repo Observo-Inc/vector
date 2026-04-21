@@ -1815,60 +1815,76 @@ mod tests {
         assert_eq!(events.len(), 1);
     }
 
+    fn assert_bad_peer_metric_emitted() {
+        let controller = vector_lib::metrics::Controller::get()
+            .expect("metrics controller not initialized");
+        let has_bad_peer = controller
+            .capture_metrics()
+            .into_iter()
+            .any(|m| m.name() == "component_errors_total" && m.tag_matches("error_code", "bad_peer"));
+        assert!(has_bad_peer, "expected component_errors_total with error_code=bad_peer");
+    }
+
+    async fn build_and_spawn_http_source(
+        address: std::net::SocketAddr,
+        cidr: &str,
+        sender: SourceSender,
+    ) {
+        use vector_lib::ipallowlist::IpNetConfig;
+        let permit_origin = Some(IpAllowlistConfig(vec![
+            IpNetConfig(cidr.parse().unwrap()),
+        ]));
+        let context = SourceContext::new_test(sender, None);
+        spawn_simple_http_source(address, permit_origin, context).await;
+    }
+
+    async fn send_http_event(
+        address: std::net::SocketAddr,
+        body: &'static str,
+    ) -> reqwest::Result<reqwest::Response> {
+        reqwest::Client::new()
+            .post(format!("http://{}/", address))
+            .body(body)
+            .send()
+            .await
+    }
+
     #[tokio::test]
     async fn permit_origin_blocks_non_matching_ip() {
-        use vector_lib::ipallowlist::IpNetConfig;
+        use tokio::time::{timeout, Duration};
+        use futures::StreamExt;
+
+        vector_lib::metrics::init_test();
+
+        let (sender, mut recv) = SourceSender::new_test_finalize(EventStatus::Delivered);
+        let address = next_addr();
+        build_and_spawn_http_source(address, "10.0.0.1/32", sender).await;
+
+        let _ = send_http_event(address, "blocked").await;
+        let result = timeout(Duration::from_millis(200), recv.next()).await;
+        assert!(result.is_err(), "expected no events from blocked IP");
+        assert_bad_peer_metric_emitted();
+    }
+
+    #[tokio::test]
+    async fn permit_origin_allows_matching_ip() {
         use tokio::time::{timeout, Duration};
         use futures::StreamExt;
 
         let (sender, mut recv) = SourceSender::new_test_finalize(EventStatus::Delivered);
         let address = next_addr();
-        let context = SourceContext::new_test(sender, None);
+        build_and_spawn_http_source(address, "127.0.0.1/32", sender).await;
 
-        let permit_origin = Some(IpAllowlistConfig(vec![
-            IpNetConfig("10.0.0.1/32".parse().unwrap()),
-        ]));
-
-        spawn_simple_http_source(address, permit_origin, context).await;
-
-        // Send from localhost — should be blocked by allowlist
-        let _ = reqwest::Client::new()
-            .post(format!("http://{}/", address))
-            .body("blocked")
-            .send()
-            .await;
-
-        let result = timeout(Duration::from_millis(200), recv.next()).await;
-        assert!(result.is_err(), "expected no events from blocked IP");
-    }
-
-    #[tokio::test]
-    async fn permit_origin_allows_matching_ip() {
-        use vector_lib::ipallowlist::IpNetConfig;
-
-        let (sender, _recv) = SourceSender::new_test_finalize(EventStatus::Delivered);
-        let address = next_addr();
-        let context = SourceContext::new_test(sender, None);
-
-        let permit_origin = Some(IpAllowlistConfig(vec![
-            IpNetConfig("127.0.0.1/32".parse().unwrap()),
-        ]));
-
-        spawn_simple_http_source(address, permit_origin, context).await;
-
-        // Send from localhost — should be accepted by allowlist
-        let response = reqwest::Client::new()
-            .post(format!("http://{}/", address))
-            .body("allowed")
-            .send()
-            .await;
-
+        let response = send_http_event(address, "allowed").await;
         assert!(response.is_ok(), "expected connection to be accepted for allowed IP");
-        let res = response.unwrap();
-        assert_eq!(res.status(), 200);
-        let body = res.text().await.unwrap();
-        assert!(body.is_empty(), "expected empty response body, got: {}", body);
-
+        assert_eq!(response.unwrap().status(), 200);
+        let event = timeout(Duration::from_millis(500), recv.next()).await;
+        assert!(event.is_ok(), "expected to receive event from allowed IP");
+        let log = event.unwrap().unwrap().into_log();
+        assert_eq!(
+            log.get(event_path!("message")).and_then(|v| v.as_str()).as_deref(),
+            Some("allowed"),
+        );
     }
 
     register_validatable_component!(SimpleHttpConfig);
