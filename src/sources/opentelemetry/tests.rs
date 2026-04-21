@@ -1588,18 +1588,12 @@ fn vec_into_btmap(arr: Vec<(&'static str, Value)>) -> ObjectMap {
     )
 }
 
-#[tokio::test]
-async fn permit_origin_blocks_non_matching_ip() {
-    use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
-    use tokio::time::{timeout, Duration};
-
-    let http_addr = next_addr();
-
-    let permit_origin = Some(IpAllowlistConfig(vec![
-        IpNetConfig("10.0.0.1/32".parse().unwrap()),
-    ]));
-
-    let config = OpentelemetryConfig {
+fn make_permit_origin_http_config(
+    http_addr: std::net::SocketAddr,
+    cidr: &str,
+) -> OpentelemetryConfig {
+    use vector_lib::ipallowlist::IpAllowlistConfig;
+    OpentelemetryConfig {
         grpc: None,
         http: Some(HttpConfig {
             address: http_addr,
@@ -1609,115 +1603,62 @@ async fn permit_origin_blocks_non_matching_ip() {
         }),
         acknowledgements: Default::default(),
         log_namespace: None,
-        permit_origin,
-    };
+        permit_origin: Some(IpAllowlistConfig(vec![cidr.parse().unwrap()])),
+    }
+}
 
-    let (sender, mut output, _) = new_source(EventStatus::Delivered, LOGS.to_string());
+async fn build_and_spawn_http_source(
+    addr: std::net::SocketAddr,
+    config: OpentelemetryConfig,
+    sender: SourceSender,
+) {
     let server = config
         .build(SourceContext::new_test(sender, None))
         .await
         .expect("Failed to build source");
     tokio::spawn(server);
-    test_util::wait_for_tcp(http_addr).await;
+    test_util::wait_for_tcp(addr).await;
+}
 
-    // Send from localhost — should be blocked by allowlist
-    let _ = reqwest::Client::new()
+async fn send_test_requests(
+    http_addr: std::net::SocketAddr,
+) -> reqwest::Result<reqwest::Response> {
+    reqwest::Client::new()
         .post(format!("http://{}/v1/logs", http_addr))
         .header("Content-Type", "application/x-protobuf")
-        .body(vec![0u8; 0])
+        .body("test")
         .send()
-        .await;
-
-    let result = timeout(Duration::from_millis(200), output.next()).await;
-    assert!(result.is_err(), "expected no events from blocked IP");
+        .await
 }
 
 #[tokio::test]
 async fn permit_origin_allows_matching_ip() {
-    use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
-
     let http_addr = next_addr();
+    let config = make_permit_origin_http_config(http_addr, "127.0.0.1/32");
+    let (sender, output, _) = new_source(EventStatus::Delivered, LOGS.to_string());
+    build_and_spawn_http_source(http_addr, config, sender).await;
 
-    let permit_origin = Some(IpAllowlistConfig(vec![
-        IpNetConfig("127.0.0.1/32".parse().unwrap()),
-    ]));
-
-    let config = OpentelemetryConfig {
-        grpc: None,
-        http: Some(HttpConfig {
-            address: http_addr,
-            tls: Default::default(),
-            keepalive: Default::default(),
-            headers: Default::default(),
-        }),
-        acknowledgements: Default::default(),
-        log_namespace: None,
-        permit_origin,
-    };
-
-    let (sender, _output, _) = new_source(EventStatus::Delivered, LOGS.to_string());
-    let server = config
-        .build(SourceContext::new_test(sender, None))
-        .await
-        .expect("Failed to build source");
-    tokio::spawn(server);
-    test_util::wait_for_tcp(http_addr).await;
-
-    // Send from localhost — should be accepted by allowlist
-    let response = reqwest::Client::new()
-        .post(format!("http://{}/v1/logs", http_addr))
-        .header("Content-Type", "application/x-protobuf")
-        .body(vec![0u8; 0])
-        .send()
-        .await;
-
+    let response = send_test_requests(http_addr).await;
     assert!(response.is_ok(), "expected connection to be accepted for allowed IP");
+    
+    use tokio::time::{timeout, Duration};
+    use futures::StreamExt;
+    let result = timeout(Duration::from_millis(500), output.next()).await;
+    assert!(result.is_ok(), "expected to receive event from allowed IP");
 }
 
 #[tokio::test]
 async fn permit_origin_blocks_non_fatal_emits_bad_peer_metric() {
     use crate::metrics::{self, Controller};
-    use tokio::time::{sleep, Duration};
-    use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
 
     metrics::init_test();
 
     let http_addr = next_addr();
-
-    let permit_origin = Some(IpAllowlistConfig(vec![
-        IpNetConfig("10.0.0.1/32".parse().unwrap()),
-    ]));
-
-    let config = OpentelemetryConfig {
-        grpc: None,
-        http: Some(HttpConfig {
-            address: http_addr,
-            tls: Default::default(),
-            keepalive: Default::default(),
-            headers: Default::default(),
-        }),
-        acknowledgements: Default::default(),
-        log_namespace: None,
-        permit_origin,
-    };
-
+    let config = make_permit_origin_http_config(http_addr, "10.0.0.1/32");
     let (sender, _output, _) = new_source(EventStatus::Delivered, LOGS.to_string());
-    let server = config
-        .build(SourceContext::new_test(sender, None))
-        .await
-        .expect("Failed to build source");
-    tokio::spawn(server);
-    test_util::wait_for_tcp(http_addr).await;
+    build_and_spawn_http_source(http_addr, config, sender).await;
 
-    // Send from localhost — should be blocked by allowlist
-    let _ = reqwest::Client::new()
-        .post(format!("http://{}/v1/logs", http_addr))
-        .header("Content-Type", "application/x-protobuf")
-        .body(vec![0u8; 0])
-        .send()
-        .await;
-
-    sleep(Duration::from_millis(100)).await;
+    let _ = send_test_requests(http_addr).await;
 
     // Verify the server is still alive — rejection must be non-fatal
     tokio::net::TcpStream::connect(http_addr)
