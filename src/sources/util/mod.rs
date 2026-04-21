@@ -112,7 +112,7 @@ pub async fn handle_accept_error<S>(
     match result {
         Ok(stream) => Some(Ok(stream)),
         Err(err) => {
-            if err == TlsError::DisallowedPeer {
+            if matches!(err, TlsError::DisallowedPeer) {
                 emit!(IpAllowlistDeniedError { peer: &err });
             } else {
                 warn!(message = "Accept failed", error = %err);

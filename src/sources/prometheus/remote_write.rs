@@ -55,6 +55,19 @@ pub struct PrometheusRemoteWriteConfig {
     #[configurable(derived)]
     pub permit_origin: Option<IpAllowlistConfig>,
 }
+impl Default for PrometheusRemoteWriteConfig {
+    fn default() -> Self {
+        Self {
+            address: "0.0.0.0:9090".parse().unwrap(),
+            tls: None,
+            auth: None,
+            acknowledgements: SourceAcknowledgementsConfig::default(),
+            keepalive: KeepaliveConfig::default(),
+            permit_origin: None,
+        }
+    }
+}
+
 
 impl PrometheusRemoteWriteConfig {
     #[cfg(test)]
@@ -348,79 +361,98 @@ mod test {
         vector_lib::assert_event_data_eq!(expected, output);
     }
 
-    #[tokio::test]
-    async fn permit_origin_blocks_non_matching_ip() {
+    fn make_remote_write_config(
+        address: std::net::SocketAddr,
+        cidr: &str,
+    ) -> PrometheusRemoteWriteConfig {
         use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
-        use tokio::time::{timeout, Duration};
-        use futures::StreamExt;
-
-        let address = test_util::next_addr();
-        let (tx, mut rx) = SourceSender::new_test_finalize(EventStatus::Delivered);
-
-        let permit_origin = Some(IpAllowlistConfig(vec![
-            IpNetConfig("10.0.0.1/32".parse().unwrap()),
-        ]));
-
-        let source = PrometheusRemoteWriteConfig {
+        PrometheusRemoteWriteConfig {
             address,
-            auth: None,
-            tls: None,
-            acknowledgements: SourceAcknowledgementsConfig::default(),
-            keepalive: KeepaliveConfig::default(),
-            permit_origin,
-        };
-        let source = source
-            .build(SourceContext::new_test(tx, None))
-            .await
-            .unwrap();
+            permit_origin: Some(IpAllowlistConfig(vec![IpNetConfig(cidr.parse().unwrap())])),
+            ..Default::default()
+        }
+    }
+
+    async fn build_and_spawn_remote_write_source(
+        address: std::net::SocketAddr,
+        config: PrometheusRemoteWriteConfig,
+        tx: SourceSender,
+    ) {
+        let source = config.build(SourceContext::new_test(tx, None)).await.unwrap();
         tokio::spawn(source);
         wait_for_tcp(address).await;
+    }
 
-        // Send from localhost — should be blocked by allowlist
-        let _ = reqwest::Client::new()
-            .post(format!("http://{}/api/v1/write", address))
-            .body("test")
+    async fn send_remote_write_request(
+        address: std::net::SocketAddr,
+    ) -> reqwest::Result<reqwest::Response> {
+        use prost::Message;
+        let write_request = proto::WriteRequest {
+            timeseries: vec![proto::TimeSeries {
+                labels: vec![proto::Label {
+                    name: "__name__".to_string(),
+                    value: "test_metric".to_string(),
+                }],
+                samples: vec![proto::Sample {
+                    value: 42.0,
+                    timestamp: 1000,
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let proto_bytes = write_request.encode_to_vec();
+        let body = snap::raw::Encoder::new().compress_vec(&proto_bytes).unwrap();
+        reqwest::Client::new()
+            .post(format!("http://{}/", address))
+            .header("Content-Type", "application/x-protobuf")
+            .body(body)
             .send()
-            .await;
+            .await
+    }
 
+    fn assert_bad_peer_metric_emitted() {
+        let controller = vector_lib::metrics::Controller::get()
+            .expect("metrics controller not initialized");
+        let has_bad_peer = controller
+            .capture_metrics()
+            .into_iter()
+            .any(|m| m.name() == "component_errors_total" && m.tag_matches("error_code", "bad_peer"));
+        assert!(has_bad_peer, "expected component_errors_total with error_code=bad_peer");
+    }
+
+    #[tokio::test]
+    async fn permit_origin_blocks_non_matching_ip() {
+        use futures::StreamExt;
+        use tokio::time::{timeout, Duration};
+
+        vector_lib::metrics::init_test();
+
+        let (tx, mut rx) = SourceSender::new_test_finalize(EventStatus::Delivered);
+        let address = test_util::next_addr();
+        build_and_spawn_remote_write_source(address, make_remote_write_config(address, "10.0.0.1/32"), tx).await;
+        let _ = send_remote_write_request(address).await;
         let result = timeout(Duration::from_millis(200), rx.next()).await;
         assert!(result.is_err(), "expected no events from blocked IP");
+        assert_bad_peer_metric_emitted();
     }
 
     #[tokio::test]
     async fn permit_origin_allows_matching_ip() {
-        use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
+        use futures::StreamExt;
+        use tokio::time::{timeout, Duration};
 
+        let (tx, mut rx) = SourceSender::new_test_finalize(EventStatus::Delivered);
         let address = test_util::next_addr();
-        let (tx, _rx) = SourceSender::new_test_finalize(EventStatus::Delivered);
-
-        let permit_origin = Some(IpAllowlistConfig(vec![
-            IpNetConfig("127.0.0.1/32".parse().unwrap()),
-        ]));
-
-        let source = PrometheusRemoteWriteConfig {
-            address,
-            auth: None,
-            tls: None,
-            acknowledgements: SourceAcknowledgementsConfig::default(),
-            keepalive: KeepaliveConfig::default(),
-            permit_origin,
-        };
-        let source = source
-            .build(SourceContext::new_test(tx, None))
-            .await
-            .unwrap();
-        tokio::spawn(source);
-        wait_for_tcp(address).await;
-
-        // Send from localhost — should be accepted by allowlist
-        let response = reqwest::Client::new()
-            .post(format!("http://{}/api/v1/write", address))
-            .body("test")
-            .send()
-            .await;
-
+        build_and_spawn_remote_write_source(address, make_remote_write_config(address, "127.0.0.1/32"), tx).await;
+        let response = send_remote_write_request(address).await;
         assert!(response.is_ok(), "expected connection to be accepted for allowed IP");
+        let res = response.unwrap();
+        assert_eq!(res.status(), 200);
+        let event = timeout(Duration::from_millis(500), rx.next()).await;
+        assert!(event.is_ok(), "expected to receive events from allowed IP");
+        let event = event.unwrap().unwrap();
+        assert_eq!(event.as_metric().name(), "test_metric");
     }
 }
 
