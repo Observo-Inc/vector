@@ -18,11 +18,10 @@ apt-get update --yes
 apt-get install --yes \
   software-properties-common \
   apt-utils \
-  apt-transport-https
+  apt-transport-https \
+  awscli
 
 apt upgrade --yes
-
-snap install aws-cli --classic
 
 # Deps
 apt-get install --yes --no-install-recommends \
