@@ -1858,6 +1858,36 @@ mod test {
     }
 
     #[tokio::test]
+    async fn tcp_no_permit_origin_allows_all() {
+        assert_source_compliance(&SOCKET_PUSH_SOURCE_TAGS, async {
+            let (tx, mut rx) = SourceSender::new_test();
+            let addr = next_addr();
+
+            let mut config = TcpConfig::from_address(addr.into());
+            config.permit_origin = None;
+
+            let server = SocketConfig::from(config)
+                .build(SourceContext::new_test(tx, None))
+                .await
+                .unwrap();
+            tokio::spawn(server);
+
+            wait_for_tcp(addr).await;
+            send_lines(addr, vec!["no_filter".to_owned()].into_iter())
+                .await
+                .unwrap();
+
+            let event = rx.next().await.unwrap();
+            assert_eq!(
+                event.as_log()[log_schema().message_key().unwrap().to_string()],
+                "no_filter".into()
+            );
+        })
+        .await;
+    }
+
+
+    #[tokio::test]
     async fn udp_permit_origin_allows_matching_ip() {
         assert_source_compliance(&SOCKET_PUSH_SOURCE_TAGS, async {
             let (tx, rx) = SourceSender::new_test();

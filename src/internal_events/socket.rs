@@ -211,7 +211,7 @@ impl<'a> std::fmt::Debug for IpAllowlistDeniedError<'a> {
 impl InternalEvent for IpAllowlistDeniedError<'_> {
     fn emit(self) {
         warn!(
-            message = "Rejected connection from non-permitted IP.",
+            message = "Rejected connection from non-whitelisted IP.",
             peer = %self.peer,
             error_code = "bad_peer",
             error_type = error_type::CONNECTION_FAILED,

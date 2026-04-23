@@ -34,13 +34,9 @@ impl FromStr for IpNetConfig {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // Try CIDR notation first (e.g. "10.0.0.1/32")
-        if let Ok(net) = s.parse::<IpNet>() {
-            return Ok(IpNetConfig(net));
-        }
-        // Fall back to bare IP address — treat as a host network (/32 or /128)
-        s.parse::<IpAddr>()
-            .map(|addr| IpNetConfig(IpNet::from(addr)))
+        return s.parse::<IpNet>()
+            .or_else(|_| s.parse::<IpAddr>().map(|a| a.into()))
+            .map(IpNetConfig)
             .map_err(|_| format!("invalid IP address or network: {s}"))
     }
 }
