@@ -207,7 +207,7 @@ pub(super) fn udp(
                     if let Some(ref allowlist) = origin_allowlist {
                         if !allowlist.iter().any(|net| net.contains(&address.ip())) {
                             warn!(
-                                message = "Received UDP packet from non-permitted origin, dropping.",
+                                message = "Received UDP packet from non-whitelisted origin, dropping.",
                                 origin = %address.ip(),
                                 internal_log_rate_limit = true
                             );
