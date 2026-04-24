@@ -20,7 +20,7 @@ use futures_util::StreamExt;
 use prost::Message;
 use similar_asserts::assert_eq;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use tonic::Request;
 use vector_lib::config::LogNamespace;
 use vector_lib::lookup::path;
@@ -1136,6 +1136,7 @@ async fn http_headers() {
             http: http_config,
             acknowledgements: Default::default(),
             log_namespace: Default::default(),
+            permit_origin: None,
         };
         let schema_definitions = source
             .outputs(LogNamespace::Legacy)
@@ -1243,6 +1244,7 @@ async fn only_http_config() {
             http: http_config,
             acknowledgements: Default::default(),
             log_namespace: Default::default(),
+            permit_origin: None,
         };
         let schema_definitions = source
             .outputs(LogNamespace::Legacy)
@@ -1500,6 +1502,7 @@ pub async fn build_otlp_test_env(
         http: http_config,
         acknowledgements: Default::default(),
         log_namespace,
+        permit_origin: None,
     };
 
     let (sender, output, _) = new_source(EventStatus::Delivered, event_name.to_string());
@@ -1537,6 +1540,7 @@ pub async fn build_only_grpc_otlp_test_env(
         http: http_config,
         acknowledgements: Default::default(),
         log_namespace,
+        permit_origin: None,
     };
 
     let (sender, output, _) = new_source(EventStatus::Delivered, event_name.to_string());
@@ -1582,6 +1586,125 @@ fn vec_into_btmap(arr: Vec<(&'static str, Value)>) -> ObjectMap {
             .map(|(k, v)| (k.into(), v))
             .collect::<Vec<(_, _)>>(),
     )
+}
+
+fn make_permit_origin_http_config(
+    http_addr: std::net::SocketAddr,
+    cidr: &str,
+) -> OpentelemetryConfig {
+    use vector_lib::ipallowlist::IpAllowlistConfig;
+    OpentelemetryConfig {
+        grpc: None,
+        http: Some(HttpConfig {
+            address: http_addr,
+            tls: Default::default(),
+            keepalive: Default::default(),
+            headers: Default::default(),
+        }),
+        acknowledgements: Default::default(),
+        log_namespace: None,
+        permit_origin: Some(IpAllowlistConfig(vec![cidr.parse().unwrap()])),
+    }
+}
+
+async fn build_and_spawn_http_source(
+    addr: std::net::SocketAddr,
+    config: OpentelemetryConfig,
+    sender: SourceSender,
+) {
+    let server = config
+        .build(SourceContext::new_test(sender, None))
+        .await
+        .expect("Failed to build source");
+    tokio::spawn(server);
+    test_util::wait_for_tcp(addr).await;
+}
+
+async fn send_test_requests(
+    http_addr: std::net::SocketAddr,
+) -> reqwest::Result<reqwest::Response> {
+    let req = ExportLogsServiceRequest {
+        resource_logs: vec![ResourceLogs {
+            resource: None,
+            scope_logs: vec![ScopeLogs {
+                scope: None,
+                log_records: vec![LogRecord {
+                    time_unix_nano: 1,
+                    observed_time_unix_nano: 2,
+                    severity_number: 9,
+                    severity_text: "info".into(),
+                    body: Some(AnyValue {
+                        value: Some(any_value::Value::StringValue("permit origin test".into())),
+                    }),
+                    attributes: vec![],
+                    dropped_attributes_count: 0,
+                    flags: 0,
+                    trace_id: vec![],
+                    span_id: vec![],
+                }],
+                schema_url: String::new(),
+            }],
+            schema_url: String::new(),
+        }],
+    };
+    reqwest::Client::new()
+        .post(format!("http://{}/v1/logs", http_addr))
+        .header("Content-Type", "application/x-protobuf")
+        .body(req.encode_to_vec())
+        .send()
+        .await
+}
+
+#[tokio::test]
+async fn permit_origin_allows_matching_ip() {
+    let http_addr = next_addr();
+    let config = make_permit_origin_http_config(http_addr, "127.0.0.1/32");
+    let (sender, output, _) = new_source(EventStatus::Delivered, LOGS.to_string());
+    build_and_spawn_http_source(http_addr, config, sender).await;
+
+    let response = send_test_requests(http_addr).await;
+    assert!(response.is_ok(), "expected connection to be accepted for allowed IP");
+    let res = response.unwrap();
+    assert!(res.status().is_success(), "expected 200 OK for allowed IP with valid protobuf");
+
+    let events = test_util::collect_ready(output).await;
+    assert_eq!(events.len(), 1, "expected one event from the accepted and parsed log request");
+    let log = events[0].as_log();
+    assert_eq!(
+        log.get("message").unwrap(),
+        &Value::from("permit origin test")
+    );
+}
+
+#[tokio::test]
+async fn permit_origin_blocks_non_fatal_emits_bad_peer_metric() {
+    use crate::metrics::{self, Controller};
+
+    metrics::init_test();
+
+    let http_addr = next_addr();
+    let config = make_permit_origin_http_config(http_addr, "10.0.0.1/32");
+    let (sender, mut output, _) = new_source(EventStatus::Delivered, LOGS.to_string());
+    build_and_spawn_http_source(http_addr, config, sender).await;
+
+    let _ = send_test_requests(http_addr).await;
+
+    // Verify the server is still alive — rejection must be non-fatal
+    tokio::net::TcpStream::connect(http_addr)
+        .await
+        .expect("server should still be running after non-fatal bad peer rejection");
+
+    // Verify the bad_peer error metric was emitted
+    let controller = Controller::get().expect("metrics controller not initialized");
+    let has_bad_peer_error = controller
+        .capture_metrics()
+        .into_iter()
+        .any(|m| m.name() == "component_errors_total" && m.tag_matches("error_code", "bad_peer"));
+    assert!(has_bad_peer_error, "expected component_errors_total with error_code=bad_peer");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), output.next()).await.is_err(),
+        "expected no events for blocked IP"
+    );
 }
 
 fn current_time_and_nanos() -> (SystemTime, u64) {

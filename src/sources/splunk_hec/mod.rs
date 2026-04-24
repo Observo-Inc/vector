@@ -10,7 +10,7 @@ use std::{
 use bytes::{Buf, Bytes};
 use chrono::{DateTime, TimeZone, Utc};
 use flate2::read::MultiGzDecoder;
-use futures::FutureExt;
+use futures::{FutureExt, StreamExt};
 use http::StatusCode;
 use hyper::{service::make_service_fn, Server};
 use serde::Serialize;
@@ -33,6 +33,8 @@ use vector_lib::{
     EstimatedJsonEncodedSizeOf,
 };
 use vector_lib::{configurable::configurable_component, tls::MaybeTlsIncomingStream};
+use vector_lib::ipallowlist::IpAllowlistConfig;
+
 use vrl::path::OwnedTargetPath;
 use vrl::value::{kind::Collection, Kind};
 use warp::{filters::BoxedFilter, path, reject::Rejection, reply::Response, Filter, Reply};
@@ -52,6 +54,7 @@ use crate::{
         EventsReceived, HttpBytesReceived, SplunkHecRequestBodyInvalidError, SplunkHecRequestError,
     },
     serde::bool_or_struct,
+    sources::util::handle_accept_error,
     source_sender::ClosedError,
     tls::{MaybeTlsSettings, TlsEnableableConfig},
     SourceSender,
@@ -117,6 +120,9 @@ pub struct SplunkConfig {
     #[configurable(derived)]
     #[serde(default)]
     keepalive: KeepaliveConfig,
+
+    #[configurable(derived)]
+    pub permit_origin: Option<IpAllowlistConfig>,
 }
 
 impl_generate_config_from_default!(SplunkConfig);
@@ -132,6 +138,7 @@ impl Default for SplunkConfig {
             store_hec_token: false,
             log_namespace: None,
             keepalive: Default::default(),
+            permit_origin: None,
         }
     }
 }
@@ -170,6 +177,8 @@ impl SourceConfig for SplunkConfig {
             .or_else(finish_err);
 
         let listener = tls.bind(&self.address).await?;
+        let listener = listener
+            .with_allowlist(self.permit_origin.clone().map(Into::into));
 
         let keepalive_settings = self.keepalive.clone();
         Ok(Box::pin(async move {
@@ -188,7 +197,9 @@ impl SourceConfig for SplunkConfig {
                 futures_util::future::ok::<_, Infallible>(svc)
             });
 
-            Server::builder(hyper::server::accept::from_stream(listener.accept_stream()))
+            Server::builder(hyper::server::accept::from_stream(
+                listener.accept_stream().filter_map(handle_accept_error),
+            ))
                 .serve(make_svc)
                 .with_graceful_shutdown(shutdown.map(|_| ()))
                 .await
@@ -1333,6 +1344,7 @@ mod tests {
                 store_hec_token,
                 log_namespace: None,
                 keepalive: Default::default(),
+                permit_origin: None,
             }
             .build(cx)
             .await
@@ -2807,6 +2819,97 @@ mod tests {
                 )],
             )
         }
+    }
+
+    fn assert_bad_peer_metric_emitted() {
+        let controller = vector_lib::metrics::Controller::get()
+            .expect("metrics controller not initialized");
+        let has_bad_peer = controller
+            .capture_metrics()
+            .into_iter()
+            .any(|m| m.name() == "component_errors_total" && m.tag_matches("error_code", "bad_peer"));
+        assert!(has_bad_peer, "expected component_errors_total with error_code=bad_peer");
+    }
+
+    async fn build_and_spawn_splunk_source(
+        address: std::net::SocketAddr,
+        cidr: &str,
+        sender: SourceSender,
+    ) {
+        use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
+        let permit_origin = Some(IpAllowlistConfig(vec![
+            IpNetConfig(cidr.parse().unwrap()),
+        ]));
+        let cx = SourceContext::new_test(sender, None);
+        tokio::spawn(async move {
+            SplunkConfig {
+                address,
+                token: Some(TOKEN.to_owned().into()),
+                valid_tokens: None,
+                tls: None,
+                acknowledgements: Default::default(),
+                store_hec_token: false,
+                log_namespace: None,
+                keepalive: Default::default(),
+                permit_origin,
+            }
+            .build(cx)
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+        });
+        wait_for_tcp(address).await;
+    }
+
+    async fn send_splunk_event(
+        address: std::net::SocketAddr,
+        body: &'static str,
+    ) -> reqwest::Result<reqwest::Response> {
+        reqwest::Client::new()
+            .post(format!("http://{}/services/collector", address))
+            .header("Authorization", format!("Splunk {}", TOKEN))
+            .body(body)
+            .send()
+            .await
+    }
+
+    #[tokio::test]
+    async fn permit_origin_blocks_non_matching_ip() {
+        use tokio::time::{timeout, Duration};
+        use futures::StreamExt;
+
+        vector_lib::metrics::init_test();
+
+        let (sender, mut recv) = SourceSender::new_test_finalize(EventStatus::Delivered);
+        let address = next_addr();
+        build_and_spawn_splunk_source(address, "10.0.0.1/32", sender).await;
+
+        let _ = send_splunk_event(address, r#"{"event":"blocked"}"#).await;
+        let result = timeout(Duration::from_millis(200), recv.next()).await;
+        assert!(result.is_err(), "expected no events from blocked IP");
+        assert_bad_peer_metric_emitted();
+    }
+
+    #[tokio::test]
+    async fn permit_origin_allows_matching_ip() {
+        use tokio::time::{timeout, Duration};
+        use futures::StreamExt;
+
+        let (sender, mut recv) = SourceSender::new_test_finalize(EventStatus::Delivered);
+        let address = next_addr();
+        build_and_spawn_splunk_source(address, "127.0.0.1/32", sender).await;
+
+        let response = send_splunk_event(address, r#"{"event":"allowed"}"#).await;
+        assert!(response.is_ok(), "expected connection to be accepted for allowed IP");
+        assert_eq!(response.unwrap().status(), 200);
+        let event = timeout(Duration::from_millis(500), recv.next()).await;
+        assert!(event.is_ok(), "expected to receive event from allowed IP");
+        let log_event = event.unwrap().unwrap();
+        assert_eq!(
+            log_event.as_log()[log_schema().message_key().unwrap().to_string()],
+            "allowed".into()
+        );
     }
 
     register_validatable_component!(SplunkConfig);

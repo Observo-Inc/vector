@@ -20,6 +20,7 @@ use vector_lib::opentelemetry::logs::{
 
 use tonic::transport::server::RoutesBuilder;
 use vector_lib::configurable::configurable_component;
+use vector_lib::ipallowlist::IpAllowlistConfig;
 use vector_lib::internal_event::{BytesReceived, EventsReceived, Protocol};
 use vector_lib::opentelemetry::proto::collector::{
     logs::v1::logs_service_server::LogsServiceServer,
@@ -72,6 +73,9 @@ pub struct OpentelemetryConfig {
     #[configurable(metadata(docs::hidden))]
     #[serde(default)]
     log_namespace: Option<bool>,
+
+    #[configurable(derived)]
+    pub permit_origin: Option<IpAllowlistConfig>,
 }
 
 /// Configuration for the `opentelemetry` gRPC server.
@@ -149,6 +153,7 @@ impl GenerateConfig for OpentelemetryConfig {
             http: Option::from(example_http_config()),
             acknowledgements: Default::default(),
             log_namespace: None,
+            permit_origin: None,
         })
         .unwrap()
     }
@@ -211,6 +216,7 @@ impl SourceConfig for OpentelemetryConfig {
                 grpc_tls_settings,
                 builder.routes(),
                 cx.shutdown.clone(),
+                self.permit_origin.clone(),
             )
             .map_err(|error| {
                 error!(message = "Source future failed.", %error);
@@ -239,6 +245,7 @@ impl SourceConfig for OpentelemetryConfig {
                 filters,
                 cx.shutdown,
                 http_config.keepalive.clone(),
+                self.permit_origin.clone(),
             ))
         } else {
             None

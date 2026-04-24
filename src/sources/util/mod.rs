@@ -98,3 +98,25 @@ pub fn extract_tag_key_and_value<S: AsRef<str>>(
         None => (tag_chunk.to_string(), TagValue::Bare),
     }
 }
+
+use crate::internal_events::IpAllowlistDeniedError;
+use crate::tls::TlsError;
+
+/// Helper function to handle accept errors in TLS streams.
+/// Returns `Some(Ok(stream))` on success, `None` for non-fatal peer rejections,
+/// and `Some(Err(...))` for fatal TLS errors.
+pub async fn handle_accept_error<S>(
+    result: Result<S, TlsError>,
+) -> Option<Result<S, TlsError>> {
+    match result {
+        Ok(stream) => Some(Ok(stream)),
+        Err(err) => {
+            if matches!(err, TlsError::DisallowedPeer) {
+                emit!(IpAllowlistDeniedError { peer: &err });
+                None
+            } else {
+                Some(Err(err))
+            }
+        }
+    }
+}

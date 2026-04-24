@@ -4,6 +4,7 @@ use bytes::Bytes;
 use prost::Message;
 use vector_lib::config::LogNamespace;
 use vector_lib::configurable::configurable_component;
+use vector_lib::ipallowlist::IpAllowlistConfig;
 use vector_lib::prometheus::parser::proto;
 use warp::http::{HeaderMap, StatusCode};
 
@@ -50,6 +51,21 @@ pub struct PrometheusRemoteWriteConfig {
     #[configurable(derived)]
     #[serde(default)]
     keepalive: KeepaliveConfig,
+
+    #[configurable(derived)]
+    pub permit_origin: Option<IpAllowlistConfig>,
+}
+impl Default for PrometheusRemoteWriteConfig {
+    fn default() -> Self {
+        Self {
+            address: "0.0.0.0:9090".parse().unwrap(),
+            tls: None,
+            auth: None,
+            acknowledgements: SourceAcknowledgementsConfig::default(),
+            keepalive: KeepaliveConfig::default(),
+            permit_origin: None,
+        }
+    }
 }
 
 impl PrometheusRemoteWriteConfig {
@@ -61,6 +77,7 @@ impl PrometheusRemoteWriteConfig {
             auth: None,
             acknowledgements: false.into(),
             keepalive: KeepaliveConfig::default(),
+            permit_origin: None,
         }
     }
 }
@@ -73,6 +90,7 @@ impl GenerateConfig for PrometheusRemoteWriteConfig {
             auth: None,
             acknowledgements: SourceAcknowledgementsConfig::default(),
             keepalive: KeepaliveConfig::default(),
+            permit_origin: None,
         })
         .unwrap()
     }
@@ -94,6 +112,7 @@ impl SourceConfig for PrometheusRemoteWriteConfig {
             cx,
             self.acknowledgements,
             self.keepalive.clone(),
+            self.permit_origin.clone(),
         )
     }
 
@@ -192,6 +211,7 @@ mod test {
             tls: tls.clone(),
             acknowledgements: SourceAcknowledgementsConfig::default(),
             keepalive: KeepaliveConfig::default(),
+            permit_origin: None,
         };
         let source = source
             .build(SourceContext::new_test(tx, None))
@@ -285,6 +305,7 @@ mod test {
             tls: None,
             acknowledgements: SourceAcknowledgementsConfig::default(),
             keepalive: KeepaliveConfig::default(),
+            permit_origin: None,
         };
         let source = source
             .build(SourceContext::new_test(tx, None))
@@ -338,6 +359,97 @@ mod test {
 
         vector_lib::assert_event_data_eq!(expected, output);
     }
+
+    fn make_remote_write_config(
+        address: std::net::SocketAddr,
+        cidr: &str,
+    ) -> PrometheusRemoteWriteConfig {
+        use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
+        PrometheusRemoteWriteConfig {
+            address,
+            permit_origin: Some(IpAllowlistConfig(vec![IpNetConfig(cidr.parse().unwrap())])),
+            ..Default::default()
+        }
+    }
+
+    async fn build_and_spawn_remote_write_source(
+        address: std::net::SocketAddr,
+        config: PrometheusRemoteWriteConfig,
+        tx: SourceSender,
+    ) {
+        let source = config.build(SourceContext::new_test(tx, None)).await.unwrap();
+        tokio::spawn(source);
+        wait_for_tcp(address).await;
+    }
+
+    async fn send_remote_write_request(
+        address: std::net::SocketAddr,
+    ) -> reqwest::Result<reqwest::Response> {
+        use prost::Message;
+        let write_request = proto::WriteRequest {
+            timeseries: vec![proto::TimeSeries {
+                labels: vec![proto::Label {
+                    name: "__name__".to_string(),
+                    value: "test_metric".to_string(),
+                }],
+                samples: vec![proto::Sample {
+                    value: 42.0,
+                    timestamp: 1000,
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let proto_bytes = write_request.encode_to_vec();
+        let body = snap::raw::Encoder::new().compress_vec(&proto_bytes).unwrap();
+        reqwest::Client::new()
+            .post(format!("http://{}/", address))
+            .header("Content-Type", "application/x-protobuf")
+            .body(body)
+            .send()
+            .await
+    }
+
+    fn assert_bad_peer_metric_emitted() {
+        let controller = vector_lib::metrics::Controller::get()
+            .expect("metrics controller not initialized");
+        let has_bad_peer = controller
+            .capture_metrics()
+            .into_iter()
+            .any(|m| m.name() == "component_errors_total" && m.tag_matches("error_code", "bad_peer"));
+        assert!(has_bad_peer, "expected component_errors_total with error_code=bad_peer");
+    }
+
+    #[tokio::test]
+    async fn permit_origin_blocks_non_matching_ip() {
+        use futures::StreamExt;
+        use tokio::time::{timeout, Duration};
+
+        vector_lib::metrics::init_test();
+
+        let (tx, mut rx) = SourceSender::new_test_finalize(EventStatus::Delivered);
+        let address = test_util::next_addr();
+        build_and_spawn_remote_write_source(address, make_remote_write_config(address, "10.0.0.1/32"), tx).await;
+        let _ = send_remote_write_request(address).await;
+        let result = timeout(Duration::from_millis(200), rx.next()).await;
+        assert!(result.is_err(), "expected no events from blocked IP");
+        assert_bad_peer_metric_emitted();
+    }
+
+    #[tokio::test]
+    async fn permit_origin_allows_matching_ip() {
+        use futures::StreamExt;
+        use tokio::time::{timeout, Duration};
+
+        let (tx, mut rx) = SourceSender::new_test_finalize(EventStatus::Delivered);
+        let address = test_util::next_addr();
+        build_and_spawn_remote_write_source(address, make_remote_write_config(address, "127.0.0.1/32"), tx).await;
+        let response = send_remote_write_request(address).await;
+        assert!(response.is_ok(), "expected connection to be accepted for allowed IP");
+        assert_eq!(response.unwrap().status(), 200);
+        let event = timeout(Duration::from_millis(500), rx.next()).await;
+        assert_eq!(event.unwrap().unwrap().as_metric().name(), "test_metric");
+    }
 }
 
 #[cfg(all(test, feature = "prometheus-integration-tests"))]
@@ -375,6 +487,7 @@ mod integration_tests {
             tls: None,
             acknowledgements: SourceAcknowledgementsConfig::default(),
             keepalive: KeepaliveConfig::default(),
+            permit_origin: None,
         };
 
         let events = run_and_assert_source_compliance(

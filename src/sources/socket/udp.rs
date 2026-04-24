@@ -2,6 +2,7 @@ use super::default_host_key;
 use bytes::BytesMut;
 use chrono::Utc;
 use futures::StreamExt;
+use ipnet::IpNet;
 use listenfd::ListenFd;
 use tokio_util::codec::FramedRead;
 use vector_lib::codecs::{
@@ -9,6 +10,7 @@ use vector_lib::codecs::{
     StreamDecodingError,
 };
 use vector_lib::configurable::configurable_component;
+use vector_lib::ipallowlist::IpAllowlistConfig;
 use vector_lib::internal_event::{ByteSize, BytesReceived, InternalEventHandle as _, Protocol};
 use vector_lib::lookup::{lookup_v2::OptionalValuePath, owned_value_path, path};
 use vector_lib::{
@@ -20,7 +22,7 @@ use crate::{
     codecs::Decoder,
     event::Event,
     internal_events::{
-        SocketBindError, SocketEventsReceived, SocketMode, SocketReceiveError, StreamClosedError,
+        IpAllowlistDeniedError, SocketBindError, SocketEventsReceived, SocketMode, SocketReceiveError, StreamClosedError,
     },
     net,
     serde::default_decoding,
@@ -84,6 +86,9 @@ pub struct UdpConfig {
     #[serde(default)]
     #[configurable(metadata(docs::hidden))]
     pub log_namespace: Option<bool>,
+
+    #[configurable(derived)]
+    pub permit_origin: Option<IpAllowlistConfig>,
 }
 
 fn default_port_key() -> OptionalValuePath {
@@ -125,6 +130,7 @@ impl UdpConfig {
             framing: None,
             decoding: default_decoding(),
             log_namespace: None,
+            permit_origin: None,
         }
     }
 
@@ -164,6 +170,8 @@ pub(super) fn udp(
             max_length = std::cmp::min(max_length, receive_buffer_bytes);
         }
 
+        let origin_allowlist: Option<Vec<IpNet>> = config.permit_origin.clone().map(Into::into);
+
         let bytes_received = register!(BytesReceived::from(Protocol::UDP));
 
         info!(message = "Listening.", address = %config.address);
@@ -195,6 +203,18 @@ pub(super) fn udp(
                             }));
                        }
                     };
+
+                    if let Some(ref allowlist) = origin_allowlist {
+                        if !allowlist.iter().any(|net| net.contains(&address.ip())) {
+                            warn!(
+                                message = "Received UDP packet from non-whitelisted origin, dropping.",
+                                origin = %address.ip(),
+                                internal_log_rate_limit = true
+                            );
+                            emit!(IpAllowlistDeniedError { peer: &address.ip() });
+                            continue;
+                        }
+                    }
 
                     bytes_received.emit(ByteSize(byte_size));
                     let payload = buf.split_to(byte_size);

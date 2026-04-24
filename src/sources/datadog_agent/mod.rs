@@ -24,7 +24,7 @@ use std::{fmt::Debug, io::Read, net::SocketAddr, sync::Arc};
 use bytes::{Buf, Bytes};
 use chrono::{serde::ts_milliseconds, DateTime, Utc};
 use flate2::read::{MultiGzDecoder, ZlibDecoder};
-use futures::FutureExt;
+use futures::{FutureExt, StreamExt};
 use http::StatusCode;
 use hyper::service::make_service_fn;
 use hyper::Server;
@@ -37,6 +37,7 @@ use tracing::Span;
 use vector_lib::codecs::decoding::{DeserializerConfig, FramingConfig};
 use vector_lib::config::{LegacyKey, LogNamespace};
 use vector_lib::configurable::configurable_component;
+use vector_lib::ipallowlist::IpAllowlistConfig;
 use vector_lib::event::{BatchNotifier, BatchStatus};
 use vector_lib::internal_event::{EventsReceived, Registered};
 use vector_lib::lookup::owned_value_path;
@@ -48,6 +49,7 @@ use vrl::value::Kind;
 use warp::{filters::BoxedFilter, reject::Rejection, reply::Response, Filter, Reply};
 
 use crate::http::{build_http_trace_layer, KeepaliveConfig, MaxConnectionAgeLayer};
+use crate::sources::util::handle_accept_error;
 use crate::{
     codecs::{Decoder, DecodingConfig},
     config::{
@@ -141,6 +143,9 @@ pub struct DatadogAgentConfig {
     #[configurable(derived)]
     #[serde(default)]
     keepalive: KeepaliveConfig,
+
+    #[configurable(derived)]
+    pub permit_origin: Option<IpAllowlistConfig>,
 }
 
 impl GenerateConfig for DatadogAgentConfig {
@@ -159,6 +164,7 @@ impl GenerateConfig for DatadogAgentConfig {
             parse_ddtags: false,
             log_namespace: Some(false),
             keepalive: KeepaliveConfig::default(),
+            permit_origin: None,
         })
         .unwrap()
     }
@@ -190,6 +196,8 @@ impl SourceConfig for DatadogAgentConfig {
             self.parse_ddtags,
         );
         let listener = tls.bind(&self.address).await?;
+        let listener = listener
+            .with_allowlist(self.permit_origin.clone().map(Into::into));
         let acknowledgements = cx.do_acknowledgements(self.acknowledgements);
         let filters = source.build_warp_filters(cx.out, acknowledgements, self)?;
         let shutdown = cx.shutdown;
@@ -223,7 +231,9 @@ impl SourceConfig for DatadogAgentConfig {
                 futures_util::future::ok::<_, Infallible>(svc)
             });
 
-            Server::builder(hyper::server::accept::from_stream(listener.accept_stream()))
+            Server::builder(hyper::server::accept::from_stream(
+                listener.accept_stream().filter_map(handle_accept_error),
+            ))
                 .serve(make_svc)
                 .with_graceful_shutdown(shutdown.map(|_| ()))
                 .await

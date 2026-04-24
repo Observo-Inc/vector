@@ -1578,6 +1578,7 @@ fn test_config_outputs_with_disabled_data_types() {
             parse_ddtags: false,
             log_namespace: Some(false),
             keepalive: Default::default(),
+            permit_origin: None,
         };
 
         let outputs: Vec<DataType> = config
@@ -2020,6 +2021,7 @@ fn test_config_outputs() {
             parse_ddtags: false,
             log_namespace: Some(false),
             keepalive: Default::default(),
+            permit_origin: None,
         };
 
         let mut outputs = config
@@ -2527,6 +2529,7 @@ impl ValidatableComponent for DatadogAgentConfig {
             parse_ddtags: false,
             log_namespace: Some(false),
             keepalive: Default::default(),
+            permit_origin: None,
         };
 
         let log_namespace: LogNamespace = config.log_namespace.unwrap_or_default().into();
@@ -2558,6 +2561,77 @@ impl ValidatableComponent for DatadogAgentConfig {
             )],
         )
     }
+}
+
+async fn spawn_datadog_with_permit_origin(
+    cidrs: &[&str],
+) -> (impl Stream<Item = Event> + Unpin, SocketAddr) {
+    use vector_lib::ipallowlist::IpAllowlistConfig;
+    let permit_origin = Some(IpAllowlistConfig(
+        cidrs.iter().map(|s| s.parse().unwrap()).collect(),
+    ));
+    let (sender, recv) = SourceSender::new_test_finalize(EventStatus::Delivered);
+    let address = next_addr();
+    let config = toml::from_str::<DatadogAgentConfig>(&format!(
+        indoc! { r#"
+            address = "{}"
+            compression = "none"
+            store_api_key = false
+        "#},
+        address
+    ))
+    .unwrap();
+    let config = DatadogAgentConfig { permit_origin, ..config };
+    let mut schema_defs = HashMap::new();
+    schema_defs.insert(Some(LOGS.to_owned()), test_logs_schema_definition());
+    let context = SourceContext::new_test(sender, Some(schema_defs));
+    tokio::spawn(async move {
+        config.build(context).await.unwrap().await.unwrap();
+    });
+    wait_for_tcp(address).await;
+    (recv, address)
+}
+
+async fn send_datadog_request(address: SocketAddr) -> reqwest::Result<reqwest::Response> {
+    reqwest::Client::new()
+        .post(format!("http://{}/v1/input/", address))
+        .body(r#"[{"message":"test","status":"info","timestamp":0,"hostname":"host","service":"svc","ddsource":"src","ddtags":""}]"#)
+        .send()
+        .await
+}
+
+#[tokio::test]
+async fn permit_origin_allows_matching_ip() {
+    use crate::test_util::collect_n;
+    let (recv, address) = spawn_datadog_with_permit_origin(&["127.0.0.1"]).await;
+    let response = send_datadog_request(address).await;
+    assert!(response.is_ok(), "expected connection to be accepted for allowed IP");
+    assert_eq!(response.unwrap().status(), 200);
+    let events = collect_n(recv, 1).await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].as_log()["message"], Value::Bytes(Bytes::from("test")));
+}
+
+#[tokio::test]
+async fn permit_origin_blocks_non_fatal_emits_bad_peer_metric() {
+    use crate::metrics::{self, Controller};
+
+    metrics::init_test();
+    let (_, address) = spawn_datadog_with_permit_origin(&["10.0.0.1/32"]).await;
+    let _ = send_datadog_request(address).await;
+
+    // Verify the server is still alive — rejection must be non-fatal
+    tokio::net::TcpStream::connect(address)
+        .await
+        .expect("server should still be running after non-fatal bad peer rejection");
+
+    // Verify the bad_peer error metric was emitted
+    let controller = Controller::get().expect("metrics controller not initialized");
+    let has_bad_peer_error = controller
+        .capture_metrics()
+        .into_iter()
+        .any(|m| m.name() == "component_errors_total" && m.tag_matches("error_code", "bad_peer"));
+    assert!(has_bad_peer_error, "expected component_errors_total with error_code=bad_peer");
 }
 
 register_validatable_component!(DatadogAgentConfig);

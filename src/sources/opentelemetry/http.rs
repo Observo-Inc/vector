@@ -2,7 +2,7 @@ use std::time::Duration;
 use std::{convert::Infallible, net::SocketAddr};
 
 use bytes::Bytes;
-use futures_util::FutureExt;
+use futures_util::{FutureExt, StreamExt};
 use http::StatusCode;
 use hyper::{service::make_service_fn, Server};
 use prost::Message;
@@ -28,9 +28,12 @@ use warp::{
     filters::BoxedFilter, http::HeaderMap, reject::Rejection, reply::Response, Filter, Reply,
 };
 
+use vector_lib::ipallowlist::IpAllowlistConfig;
+
 use crate::http::{KeepaliveConfig, MaxConnectionAgeLayer};
 use crate::sources::http_server::HttpConfigParamKind;
 use crate::sources::util::add_headers;
+use crate::sources::util::handle_accept_error;
 use crate::{
     event::Event,
     http::build_http_trace_layer,
@@ -57,8 +60,11 @@ pub(crate) async fn run_http_server(
     filters: BoxedFilter<(Response,)>,
     shutdown: ShutdownSignal,
     keepalive_settings: KeepaliveConfig,
+    permit_origin: Option<IpAllowlistConfig>,
 ) -> crate::Result<()> {
     let listener = tls_settings.bind(&address).await?;
+    let listener = listener
+        .with_allowlist(permit_origin.map(Into::into));
     let routes = filters.recover(handle_rejection);
 
     info!(message = "Building HTTP server.", address = %address);
@@ -78,7 +84,9 @@ pub(crate) async fn run_http_server(
         futures_util::future::ok::<_, Infallible>(svc)
     });
 
-    Server::builder(hyper::server::accept::from_stream(listener.accept_stream()))
+    Server::builder(hyper::server::accept::from_stream(
+        listener.accept_stream().filter_map(handle_accept_error),
+    ))
         .serve(make_svc)
         .with_graceful_shutdown(shutdown.map(|_| ()))
         .await?;

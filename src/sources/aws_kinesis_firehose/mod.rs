@@ -1,7 +1,7 @@
 use std::time::Duration;
 use std::{convert::Infallible, fmt, net::SocketAddr};
 
-use futures::FutureExt;
+use futures::{FutureExt, StreamExt};
 use hyper::{service::make_service_fn, Server};
 use tokio::net::TcpStream;
 use tower::ServiceBuilder;
@@ -9,12 +9,14 @@ use tracing::Span;
 use vector_lib::codecs::decoding::{DeserializerConfig, FramingConfig};
 use vector_lib::config::{LegacyKey, LogNamespace};
 use vector_lib::configurable::configurable_component;
+use vector_lib::ipallowlist::IpAllowlistConfig;
 use vector_lib::lookup::owned_value_path;
 use vector_lib::sensitive_string::SensitiveString;
 use vector_lib::tls::MaybeTlsIncomingStream;
 use vrl::value::Kind;
 
 use crate::http::{KeepaliveConfig, MaxConnectionAgeLayer};
+use crate::sources::util::handle_accept_error;
 use crate::{
     codecs::DecodingConfig,
     config::{
@@ -104,6 +106,9 @@ pub struct AwsKinesisFirehoseConfig {
     #[configurable(derived)]
     #[serde(default)]
     keepalive: KeepaliveConfig,
+
+    #[configurable(derived)]
+    pub permit_origin: Option<IpAllowlistConfig>,
 }
 
 const fn access_keys_example() -> [&'static str; 2] {
@@ -181,6 +186,8 @@ impl SourceConfig for AwsKinesisFirehoseConfig {
 
         let tls = MaybeTlsSettings::from_config(self.tls.as_ref(), true)?;
         let listener = tls.bind(&self.address).await?;
+        let listener = listener
+            .with_allowlist(self.permit_origin.clone().map(Into::into));
 
         let keepalive_settings = self.keepalive.clone();
         let shutdown = cx.shutdown;
@@ -200,7 +207,9 @@ impl SourceConfig for AwsKinesisFirehoseConfig {
                 futures_util::future::ok::<_, Infallible>(svc)
             });
 
-            Server::builder(hyper::server::accept::from_stream(listener.accept_stream()))
+            Server::builder(hyper::server::accept::from_stream(
+                listener.accept_stream().filter_map(handle_accept_error),
+            ))
                 .serve(make_svc)
                 .with_graceful_shutdown(shutdown.map(|_| ()))
                 .await
@@ -261,6 +270,7 @@ impl GenerateConfig for AwsKinesisFirehoseConfig {
             acknowledgements: Default::default(),
             log_namespace: None,
             keepalive: Default::default(),
+            permit_origin: None,
         })
         .unwrap()
     }
@@ -354,6 +364,7 @@ mod tests {
                 acknowledgements: true.into(),
                 log_namespace: Some(log_namespace),
                 keepalive: Default::default(),
+                permit_origin: None,
             }
             .build(cx)
             .await
@@ -937,4 +948,93 @@ mod tests {
             .get("aws_kinesis_firehose_access_key")
             .is_none());
     }
+
+    async fn spawn_with_permit_origin(
+        cidrs: &[&str],
+    ) -> (impl Stream<Item = Event> + Unpin, SocketAddr) {
+        use vector_lib::ipallowlist::IpAllowlistConfig;
+        let permit_origin = Some(IpAllowlistConfig(
+            cidrs.iter().map(|s| s.parse().unwrap()).collect(),
+        ));
+        let (sender, recv) = SourceSender::new_test_finalize(EventStatus::Delivered);
+        let address = next_addr();
+        let cx = SourceContext::new_test(sender, None);
+        tokio::spawn(async move {
+            AwsKinesisFirehoseConfig {
+                address,
+                tls: None,
+                access_key: None,
+                access_keys: None,
+                store_access_key: false,
+                record_compression: Compression::None,
+                framing: default_framing_message_based(),
+                decoding: default_decoding(),
+                acknowledgements: true.into(),
+                log_namespace: None,
+                keepalive: Default::default(),
+                permit_origin,
+            }
+            .build(cx)
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+        });
+        wait_for_tcp(address).await;
+        (recv, address)
+    }
+
+    async fn send_firehose_request(address: SocketAddr) -> reqwest::Result<reqwest::Response> {
+        reqwest::Client::new()
+            .post(format!("http://{}", address))
+            .header("x-amz-firehose-protocol-version", "1.0")
+            .header("x-amz-firehose-request-id", REQUEST_ID)
+            .header("x-amz-firehose-source-arn", SOURCE_ARN)
+            .header("content-type", "application/json")
+            .body(r#"{"requestId":"test","timestamp":1234567890,"records":[{"data":"dGVzdA=="}]}"#)
+            .send()
+            .await
+    }
+
+    #[tokio::test]
+    async fn permit_origin_allows_matching_ip() {
+        use crate::test_util::collect_n;
+        let (recv, address) = spawn_with_permit_origin(&["127.0.0.1"]).await;
+        // Run concurrently: the server waits for event ack before sending the HTTP
+        // response, so collecting must happen in parallel with the request.
+        let (response, events) = tokio::join!(send_firehose_request(address), collect_n(recv, 1));
+        assert!(response.is_ok(), "expected connection to be accepted for allowed IP");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].as_log()["message"],
+            "test".into()
+        );
+        assert_eq!(
+            events[0].as_log()["request_id"],
+            REQUEST_ID.into()
+        );
+    }
+
+    #[tokio::test]
+    async fn permit_origin_blocks_non_fatal_emits_bad_peer_metric() {
+        use crate::metrics::{self, Controller};
+
+        metrics::init_test();
+        let (_, address) = spawn_with_permit_origin(&["10.0.0.1/32"]).await;
+        let _ = send_firehose_request(address).await;
+
+        // Verify the server is still alive — rejection must be non-fatal
+        tokio::net::TcpStream::connect(address)
+            .await
+            .expect("server should still be running after non-fatal bad peer rejection");
+
+        // Verify the bad_peer error metric was emitted
+        let controller = Controller::get().expect("metrics controller not initialized");
+        let has_bad_peer_error = controller
+            .capture_metrics()
+            .into_iter()
+            .any(|m| m.name() == "component_errors_total" && m.tag_matches("error_code", "bad_peer"));
+        assert!(has_bad_peer_error, "expected component_errors_total with error_code=bad_peer");
+    }
+
 }

@@ -19,6 +19,7 @@ use bytes::Bytes;
 use itertools::Itertools;
 use vector_lib::config::LogNamespace;
 use vector_lib::configurable::configurable_component;
+use vector_lib::ipallowlist::IpAllowlistConfig;
 use warp::http::HeaderMap;
 
 use super::parser;
@@ -70,6 +71,23 @@ pub struct PrometheusPushgatewayConfig {
     /// meaningfully aggregated.
     #[serde(default = "crate::serde::default_false")]
     aggregate_metrics: bool,
+
+    #[configurable(derived)]
+    pub permit_origin: Option<IpAllowlistConfig>,
+}
+
+impl Default for PrometheusPushgatewayConfig {
+    fn default() -> Self {
+        Self {
+            address: "0.0.0.0:9091".parse().unwrap(),
+            tls: None,
+            auth: None,
+            acknowledgements: SourceAcknowledgementsConfig::default(),
+            keepalive: KeepaliveConfig::default(),
+            aggregate_metrics: false,
+            permit_origin: None,
+        }
+    }
 }
 
 impl GenerateConfig for PrometheusPushgatewayConfig {
@@ -81,6 +99,7 @@ impl GenerateConfig for PrometheusPushgatewayConfig {
             acknowledgements: SourceAcknowledgementsConfig::default(),
             aggregate_metrics: false,
             keepalive: KeepaliveConfig::default(),
+            permit_origin: None,
         })
         .unwrap()
     }
@@ -104,6 +123,7 @@ impl SourceConfig for PrometheusPushgatewayConfig {
             cx,
             self.acknowledgements,
             self.keepalive.clone(),
+            self.permit_origin.clone(),
         )
     }
 
@@ -374,6 +394,7 @@ mod test {
                 acknowledgements: SourceAcknowledgementsConfig::default(),
                 keepalive: KeepaliveConfig::default(),
                 aggregate_metrics: true,
+                permit_origin: None,
             };
             let source = source
                 .build(SourceContext::new_test(tx, None))
@@ -486,5 +507,79 @@ mod test {
             vector_lib::assert_event_data_eq!(expected, events_to_metrics(output));
         })
         .await;
+    }
+
+    fn make_pushgateway_config(
+        address: std::net::SocketAddr,
+        cidr: &str,
+    ) -> PrometheusPushgatewayConfig {
+        use vector_lib::ipallowlist::IpAllowlistConfig;
+        PrometheusPushgatewayConfig {
+            address,
+            permit_origin: Some(IpAllowlistConfig(vec![cidr.parse().unwrap()])),
+            ..Default::default()
+        }
+    }
+
+    async fn build_and_spawn_pushgateway_source(
+        address: std::net::SocketAddr,
+        config: PrometheusPushgatewayConfig,
+        tx: SourceSender,
+    ) {
+        let source = config.build(SourceContext::new_test(tx, None)).await.unwrap();
+        tokio::spawn(source);
+        wait_for_tcp(address).await;
+    }
+
+    fn assert_bad_peer_metric_emitted() {
+        let controller = vector_lib::metrics::Controller::get()
+            .expect("metrics controller not initialized");
+        let has_bad_peer = controller
+            .capture_metrics()
+            .into_iter()
+            .any(|m| m.name() == "component_errors_total" && m.tag_matches("error_code", "bad_peer"));
+        assert!(has_bad_peer, "expected component_errors_total with error_code=bad_peer");
+    }
+
+    async fn send_pushgateway_metric(
+        address: std::net::SocketAddr,
+    ) -> reqwest::Result<reqwest::Response> {
+        reqwest::Client::new()
+            .post(format!("http://{}:{}/metrics/job/test", address.ip(), address.port()))
+            .header("Content-Type", "text/plain")
+            .body("test_metric 42")
+            .send()
+            .await
+    }
+
+    #[tokio::test]
+    async fn permit_origin_allowlist() {
+        use futures::StreamExt;
+        use tokio::time::{timeout, Duration};
+
+        vector_lib::metrics::init_test();
+
+        // Blocked: localhost not in allowlist
+        let (tx, mut rx) = SourceSender::new_test_finalize(EventStatus::Delivered);
+        let address = test_util::next_addr();
+        build_and_spawn_pushgateway_source(address, make_pushgateway_config(address, "10.0.0.1/32"), tx).await;
+        let _ = send_pushgateway_metric(address).await;
+        let result = timeout(Duration::from_millis(200), rx.next()).await;
+        assert!(result.is_err(), "expected no events from blocked IP");
+        assert_bad_peer_metric_emitted();
+
+        // Allowed: localhost matches allowlist
+        let (tx, mut rx) = SourceSender::new_test_finalize(EventStatus::Delivered);
+        let address = test_util::next_addr();
+        build_and_spawn_pushgateway_source(address, make_pushgateway_config(address, "127.0.0.1/32"), tx).await;
+        let response = send_pushgateway_metric(address).await;
+        assert!(response.is_ok(), "expected connection to be accepted for allowed IP");
+        let res = response.unwrap();
+        assert_eq!(res.status(), 200);
+        let event = timeout(Duration::from_millis(500), rx.next()).await;
+        assert!(event.is_ok(), "expected to receive events");
+        let metric = event.unwrap().unwrap().as_metric().clone();
+        assert_eq!(metric.name(), "test_metric");
+
     }
 }

@@ -99,9 +99,7 @@ impl MaybeTlsListener {
             {
                 Ok(listener)
             } else {
-                Err(TlsError::Connect {
-                    source: std::io::ErrorKind::ConnectionRefused.into(),
-                })
+                Err(TlsError::DisallowedPeer)
             }
         } else {
             Ok(listener)

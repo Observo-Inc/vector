@@ -18,6 +18,7 @@ use vrl::value::{kind::Collection, Kind};
 use warp::http::{HeaderMap, StatusCode};
 
 use vector_lib::configurable::configurable_component;
+use vector_lib::ipallowlist::IpAllowlistConfig;
 use vector_lib::{
     config::{LegacyKey, LogNamespace},
     schema::Definition,
@@ -92,6 +93,9 @@ pub struct LogplexConfig {
     #[configurable(derived)]
     #[serde(default)]
     keepalive: KeepaliveConfig,
+
+    #[configurable(derived)]
+    pub permit_origin: Option<IpAllowlistConfig>,
 }
 
 impl LogplexConfig {
@@ -162,6 +166,7 @@ impl Default for LogplexConfig {
             acknowledgements: SourceAcknowledgementsConfig::default(),
             log_namespace: None,
             keepalive: KeepaliveConfig::default(),
+            permit_origin: None,
         }
     }
 }
@@ -202,6 +207,7 @@ impl SourceConfig for LogplexConfig {
             cx,
             self.acknowledgements,
             self.keepalive.clone(),
+            self.permit_origin.clone(),
         )
     }
 
@@ -474,6 +480,7 @@ mod tests {
                 acknowledgements: acknowledgements.into(),
                 log_namespace: None,
                 keepalive: Default::default(),
+                permit_origin: None,
             }
             .build(context)
             .await
@@ -809,5 +816,95 @@ mod tests {
         .unknown_fields(Kind::bytes());
 
         assert_eq!(definitions, Some(expected_definition))
+    }
+
+    fn assert_bad_peer_metric_emitted() {
+        let controller = vector_lib::metrics::Controller::get()
+            .expect("metrics controller not initialized");
+        let has_bad_peer = controller
+            .capture_metrics()
+            .into_iter()
+            .any(|m| m.name() == "component_errors_total" && m.tag_matches("error_code", "bad_peer"));
+        assert!(has_bad_peer, "expected component_errors_total with error_code=bad_peer");
+    }
+
+    async fn build_and_spawn_logplex_source(
+        address: std::net::SocketAddr,
+        cidr: &str,
+        sender: SourceSender,
+    ) {
+        use vector_lib::ipallowlist::{IpAllowlistConfig, IpNetConfig};
+        let permit_origin = Some(IpAllowlistConfig(vec![
+            IpNetConfig(cidr.parse().unwrap()),
+        ]));
+        let context = SourceContext::new_test(sender, None);
+        tokio::spawn(async move {
+            LogplexConfig {
+                address,
+                query_parameters: vec![],
+                tls: None,
+                auth: None,
+                framing: default_framing_message_based(),
+                decoding: default_decoding(),
+                acknowledgements: false.into(),
+                log_namespace: None,
+                keepalive: Default::default(),
+                permit_origin,
+            }
+            .build(context)
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+        });
+        wait_for_tcp(address).await;
+    }
+
+    async fn send_logplex_event(
+        address: std::net::SocketAddr,
+        body: &'static str,
+    ) -> reqwest::Result<reqwest::Response> {
+        reqwest::Client::new()
+            .post(format!("http://{}/events", address))
+            .header("Logplex-Msg-Count", "1")
+            .header("Logplex-Frame-Id", "frame-foo")
+            .header("Logplex-Drain-Token", "drain-bar")
+            .body(body)
+            .send()
+            .await
+    }
+
+    #[tokio::test]
+    async fn permit_origin_blocks_non_matching_ip() {
+        use tokio::time::{timeout, Duration};
+        use futures::StreamExt;
+
+        vector_lib::metrics::init_test();
+
+        let (sender, mut recv) = SourceSender::new_test_finalize(EventStatus::Delivered);
+        let address = next_addr();
+        build_and_spawn_logplex_source(address, "10.0.0.1/32", sender).await;
+
+        let _ = send_logplex_event(address, "test heroku blocked").await;
+        let result = timeout(Duration::from_millis(200), recv.next()).await;
+        assert!(result.is_err(), "expected no events from blocked IP");
+        assert_bad_peer_metric_emitted();
+    }
+
+    #[tokio::test]
+    async fn permit_origin_allows_matching_ip() {
+        use tokio::time::{timeout, Duration};
+        use futures::StreamExt;
+
+        let (sender, mut recv) = SourceSender::new_test_finalize(EventStatus::Delivered);
+        let address = next_addr();
+        build_and_spawn_logplex_source(address, "127.0.0.1/32", sender).await;
+
+        let response = send_logplex_event(address, SAMPLE_BODY).await;
+        assert!(response.is_ok(), "expected connection to be accepted for allowed IP");
+        assert_eq!(response.unwrap().status(), 200);
+        let event = timeout(Duration::from_millis(500), recv.next()).await;
+        assert!(event.is_ok(), "expected to receive event from allowed IP");
+        assert!(event.unwrap().unwrap().as_log().contains("message"), "expected log event to contain message field");
     }
 }
