@@ -21,7 +21,13 @@ use crate::{
     internal_events::{EventsReceived, StreamClosedError},
     proto::vector as proto,
     serde::bool_or_struct,
-    sources::{util::grpc::run_grpc_server, Source},
+    sources::{
+        util::{
+            grpc::run_grpc_server,
+            jwt_auth::{JwtAuth, JwtAuthConfig, JwtAuthError},
+        },
+        Source,
+    },
     tls::{MaybeTlsSettings, TlsEnableableConfig},
     SourceSender,
 };
@@ -40,6 +46,8 @@ struct Service {
     pipeline: SourceSender,
     acknowledgements: bool,
     log_namespace: LogNamespace,
+    /// Present when JWT authentication is enabled.
+    auth: Option<JwtAuth>,
 }
 
 #[tonic::async_trait]
@@ -48,6 +56,21 @@ impl proto::Service for Service {
         &self,
         request: Request<proto::PushEventsRequest>,
     ) -> Result<Response<proto::PushEventsResponse>, Status> {
+        if let Some(auth) = &self.auth {
+            let metadata = request.metadata();
+            let authorization = metadata.get("authorization").and_then(|v| v.to_str().ok());
+            let site_id = metadata.get("x-site-id").and_then(|v| v.to_str().ok());
+            auth.validate(authorization, site_id).map_err(|e| match e {
+                JwtAuthError::InvalidToken(msg) => Status::unauthenticated(msg),
+                JwtAuthError::MissingSiteId => {
+                    Status::unauthenticated("missing x-site-id metadata header")
+                }
+                JwtAuthError::SiteNotAuthorized => {
+                    Status::permission_denied("site ID not authorized by this token")
+                }
+            })?;
+        }
+
         let mut events: Vec<Event> = request
             .into_inner()
             .events
@@ -138,6 +161,13 @@ pub struct VectorConfig {
     #[serde(default)]
     #[configurable(metadata(docs::hidden))]
     pub log_namespace: Option<bool>,
+
+    /// JWT authentication settings.
+    ///
+    /// When omitted, all incoming requests are accepted without authentication.
+    /// See [`JwtAuthConfig`] for full documentation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<JwtAuthConfig>,
 }
 
 impl VectorConfig {
@@ -158,6 +188,7 @@ impl Default for VectorConfig {
             tls: None,
             acknowledgements: Default::default(),
             log_namespace: None,
+                auth: None,
         }
     }
 }
@@ -176,10 +207,13 @@ impl SourceConfig for VectorConfig {
         let acknowledgements = cx.do_acknowledgements(self.acknowledgements);
         let log_namespace = cx.log_namespace(self.log_namespace);
 
+        let auth = self.auth.as_ref().map(|cfg| cfg.build()).transpose()?;
+
         let service = proto::Server::new(Service {
             pipeline: cx.out,
             acknowledgements,
             log_namespace,
+            auth,
         })
         .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
         // Tonic added a default of 4MB in 0.9. This replaces the old behavior.

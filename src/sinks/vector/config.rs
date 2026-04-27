@@ -28,6 +28,64 @@ use crate::{
     tls::{MaybeTlsSettings, TlsEnableableConfig},
 };
 
+/// JWT authentication configuration for the `vector` sink.
+///
+/// When present, each outgoing request includes an `authorization: Bearer <token>` header
+/// and an `x-site-id` header read from the configured sources.
+#[configurable_component]
+#[derive(Clone, Debug)]
+pub struct VectorSinkAuthConfig {
+    /// Name of the environment variable containing the JWT bearer token.
+    ///
+    /// The value is re-read on every request so that a rotated Kubernetes secret
+    /// (mounted as an environment variable) is picked up without restarting the agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jwt_token_env: Option<String>,
+
+    /// Path to a file containing the JWT bearer token.
+    ///
+    /// Preferred over `jwt_token_env` for Kubernetes secret volume mounts because
+    /// Kubernetes updates the file automatically when the secret is rotated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jwt_token_file: Option<String>,
+
+    /// Name of the environment variable containing the site ID to send.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub site_id_env: Option<String>,
+
+    /// Static site ID value.
+    ///
+    /// Used when the site ID is known at configuration time rather than at runtime.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub site_id: Option<String>,
+}
+
+impl VectorSinkAuthConfig {
+    /// Reads the JWT token from the configured source (file preferred over env).
+    /// Returns `None` if neither source is configured or the value cannot be read.
+    pub(super) fn jwt_token(&self) -> Option<String> {
+        if let Some(path) = &self.jwt_token_file {
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                return Some(contents.trim().to_owned());
+            }
+        }
+        if let Some(env_name) = &self.jwt_token_env {
+            return std::env::var(env_name).ok();
+        }
+        None
+    }
+
+    /// Returns the site ID from the configured source.
+    pub(super) fn site_id(&self) -> Option<String> {
+        if let Some(env_name) = &self.site_id_env {
+            if let Ok(val) = std::env::var(env_name) {
+                return Some(val);
+            }
+        }
+        self.site_id.clone()
+    }
+}
+
 /// Configuration for the `vector` sink.
 #[configurable_component(sink("vector", "Relay observability data to a Vector instance."))]
 #[derive(Clone, Debug)]
@@ -77,6 +135,12 @@ pub struct VectorConfig {
         skip_serializing_if = "crate::serde::is_default"
     )]
     pub(in crate::sinks::vector) acknowledgements: AcknowledgementsConfig,
+
+    /// JWT authentication settings.
+    ///
+    /// When configured, each request carries a bearer token and site ID in its gRPC metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<VectorSinkAuthConfig>,
 }
 
 impl VectorConfig {
@@ -102,6 +166,7 @@ fn default_config(address: &str) -> VectorConfig {
         request: TowerRequestConfig::default(),
         tls: None,
         acknowledgements: Default::default(),
+        auth: None,
     }
 }
 
@@ -120,9 +185,9 @@ impl SinkConfig for VectorConfig {
             .clone()
             .map(|uri| uri.uri)
             .unwrap_or_else(|| uri.clone());
-        let healthcheck_client = VectorService::new(client.clone(), healthcheck_uri, false);
+        let healthcheck_client = VectorService::new(client.clone(), healthcheck_uri, false, None);
         let healthcheck = healthcheck(healthcheck_client, cx.healthcheck);
-        let service = VectorService::new(client, uri, self.compression);
+        let service = VectorService::new(client, uri, self.compression, self.auth.clone());
         let request_settings = self.request.into_settings();
         let batch_settings = self.batch.into_batcher_settings()?;
 

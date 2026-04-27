@@ -1,6 +1,8 @@
 #![allow(missing_docs)]
 #[cfg(feature = "sources-http_server")]
 mod body_decoding;
+#[cfg(feature = "sources-utils-jwt-auth")]
+pub mod jwt_auth;
 mod encoding_config;
 #[cfg(all(unix, feature = "sources-dnstap"))]
 pub mod framestream;
@@ -69,6 +71,8 @@ pub use self::http::ErrorMessage;
 pub use self::http::HttpSource;
 #[cfg(feature = "sources-utils-http-auth")]
 pub use self::http::HttpSourceAuthConfig;
+#[cfg(feature = "sources-utils-jwt-auth")]
+pub use self::jwt_auth::{JwtAuth, JwtAuthConfig, JwtAuthError};
 #[cfg(any(
     feature = "sources-aws_sqs",
     feature = "sources-gcp_pubsub",

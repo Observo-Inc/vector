@@ -11,7 +11,7 @@ use tower::Service;
 use vector_lib::request_metadata::{GroupedCountByteSize, MetaDescriptive, RequestMetadata};
 use vector_lib::stream::DriverResponse;
 
-use super::VectorSinkError;
+use super::{config::VectorSinkAuthConfig, VectorSinkError};
 use crate::{
     event::{EventFinalizers, EventStatus, Finalizable},
     internal_events::EndpointBytesSent,
@@ -25,6 +25,8 @@ pub struct VectorService {
     pub client: proto_vector::Client<HyperSvc>,
     pub protocol: String,
     pub endpoint: String,
+    /// Auth config for injecting JWT + site_id into request metadata.
+    auth: Option<VectorSinkAuthConfig>,
 }
 
 pub struct VectorResponse {
@@ -69,6 +71,7 @@ impl VectorService {
         hyper_client: hyper::Client<ProxyConnector<HttpsConnector<HttpConnector>>, BoxBody>,
         uri: Uri,
         compression: bool,
+        auth: Option<VectorSinkAuthConfig>,
     ) -> Self {
         let (protocol, endpoint) = uri::protocol_endpoint(uri.clone());
         let mut proto_client = proto_vector::Client::new(HyperSvc {
@@ -83,6 +86,7 @@ impl VectorService {
             client: proto_client,
             protocol,
             endpoint,
+            auth,
         }
     }
 }
@@ -110,9 +114,40 @@ impl Service<VectorRequest> for VectorService {
         let events_byte_size = metadata.into_events_estimated_json_encoded_byte_size();
 
         let future = async move {
+            let mut request = list.request.into_request();
+
+            // Inject auth metadata on every call so a rotated token is always used.
+            if let Some(auth) = &service.auth {
+                if let Some(token) = auth.jwt_token() {
+                    match format!("Bearer {}", token).parse() {
+                        Ok(value) => {
+                            request.metadata_mut().insert("authorization", value);
+                        }
+                        Err(err) => {
+                            warn!(message = "JWT token contains invalid characters for gRPC metadata.", error = %err);
+                        }
+                    }
+                } else {
+                    warn!(message = "Auth is configured but no JWT token could be read.");
+                }
+
+                if let Some(site_id) = auth.site_id() {
+                    match site_id.parse() {
+                        Ok(value) => {
+                            request.metadata_mut().insert("x-site-id", value);
+                        }
+                        Err(err) => {
+                            warn!(message = "Site ID contains invalid characters for gRPC metadata.", error = %err);
+                        }
+                    }
+                } else {
+                    warn!(message = "Auth is configured but no site_id could be read.");
+                }
+            }
+
             service
                 .client
-                .push_events(list.request.into_request())
+                .push_events(request)
                 .map_ok(|_response| {
                     emit!(EndpointBytesSent {
                         byte_size,
