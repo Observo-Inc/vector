@@ -225,7 +225,13 @@ impl GlobalOptions {
         let mut telemetry = self.telemetry.clone();
         telemetry.merge(&with.telemetry);
 
-        let checkpoint = self.checkpoint.merge(&with.checkpoint);
+        let checkpoint = match self.checkpoint.merge(&with.checkpoint) {
+            Ok(c) => c,
+            Err(e) => {
+                errors.push(e.to_string());
+                self.checkpoint.clone()
+            }
+        };
 
         if errors.is_empty() {
             Ok(Self {

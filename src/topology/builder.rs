@@ -112,7 +112,7 @@ impl<'a> Builder<'a> {
     /// Builds the new pieces of the topology found in `self.diff`.
     async fn build(mut self) -> Result<TopologyPieces, Vec<ScopedError>> {
         let enrichment_tables = self.load_enrichment_tables().await;
-        let chkpt_store = self.load_checkpoint_store();
+        let chkpt_store = self.load_checkpoint_store().await;
         let source_tasks = self.build_sources(chkpt_store).await;
         self.build_transforms(enrichment_tables).await;
         self.build_sinks(enrichment_tables).await;
@@ -151,7 +151,7 @@ impl<'a> Builder<'a> {
         finalized_outputs
     }
 
-    fn load_checkpoint_store(&mut self) -> Arc<Mutex<Option<Box<dyn CheckpointStore>>>> {
+    async fn load_checkpoint_store(&mut self) -> Arc<Mutex<Option<Box<dyn CheckpointStore>>>> {
         let cfg = self.config.global.checkpoint.clone();
         if let Ok(mut store) = CHECKPT_STORE.lock() {
             let span = error_span!(
@@ -160,11 +160,11 @@ impl<'a> Builder<'a> {
                 component_id = "checkpoint_store",
                 component_type = %cfg.get_component_name());
             if let Some(s) = store.as_mut() {
-                if let Err(e) = s.reload(cfg, self.config.global.data_dir.clone()) {
+                if let Err(e) = s.reload(cfg, self.config.global.data_dir.clone()).await {
                     self.errors.push((&span, format!("Checkpoint Store: {}", e)).into());
                 }
             } else {
-                match cfg.build(self.config.global.data_dir.clone()) {
+                match cfg.build(self.config.global.data_dir.clone()).await {
                     Ok(Some(s)) => {
                         *store = Some(s);
                     },

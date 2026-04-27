@@ -1,5 +1,6 @@
 use std::{error::Error, fmt::Display};
 
+use async_trait::async_trait;
 use crate::id::ComponentKey;
 use chrono::{DateTime, Utc};
 
@@ -46,9 +47,10 @@ impl Error for ChkptErr {
     }
 }
 
+#[async_trait]
 pub trait Accessor: Send + dyn_clone::DynClone + Sync {
-    fn get(&self, id: String) -> Result<Value, ChkptErr>;
-    fn set(&self, id: String, value: String, ctx: String) -> Result<(), ChkptErr>;
+    async fn get(&self, id: String) -> Result<Value, ChkptErr>;
+    async fn set(&self, id: String, value: String, ctx: String) -> Result<(), ChkptErr>;
 }
 
 dyn_clone::clone_trait_object!(Accessor);
