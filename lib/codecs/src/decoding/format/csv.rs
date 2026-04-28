@@ -26,35 +26,44 @@ pub struct CsvDeserializerConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Derivative)]
 #[derivative(Default)]
 pub struct CsvDeserializerOptions {
-    /// Column names for the CSV data.
-    ///
-    /// If specified, these are used as field keys in the emitted events
-    /// and `has_header` is ignored. If not specified, behavior depends on
-    /// `has_header`:
-    /// - `false` (default): fields are returned as an array in `message`.
-    /// - `true`: the first row is consumed as headers.
-    #[serde(default)]
-    pub headers: Option<Vec<String>>,
-
     /// The field delimiter character.
     #[serde(default = "default_delimiter")]
     #[derivative(Default(value = "','"))]
     pub delimiter: char,
 
-    /// Whether the first row is a header row.
+    /// How CSV header field names are resolved.
     ///
-    /// Ignored when `headers` is set.
-    #[serde(default = "default_has_header")]
-    #[derivative(Default(value = "false"))]
-    pub has_header: bool,
+    /// - A list of strings (e.g. `[host, message]`) supplies headers directly.
+    /// - `snoop` consumes the first row of input as headers.
+    /// - `none` (default) emits each row as a positional array under `message`.
+    #[serde(default)]
+    pub headers: Headers,
 }
 
 fn default_delimiter() -> char {
     ','
 }
 
-fn default_has_header() -> bool {
-    false
+/// How CSV headers are resolved.
+#[configurable_component]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Headers {
+    /// Use the supplied list of column names as field keys for every row.
+    Provided {
+        /// Column names.
+        columns: Vec<String>,
+    },
+    /// Consume the first row of input as headers.
+    Snoop,
+    /// No headers; emit each row as a positional array under `message`.
+    None,
+}
+
+impl Default for Headers {
+    fn default() -> Self {
+        Headers::None
+    }
 }
 
 impl CsvDeserializerConfig {
@@ -101,8 +110,7 @@ impl CsvDeserializerConfig {
 #[derive(Debug, Clone)]
 pub struct CsvDeserializer {
     delimiter: u8,
-    has_header: bool,
-    headers: Option<Vec<String>>,
+    headers: Headers,
 }
 
 impl Default for CsvDeserializer {
@@ -115,7 +123,6 @@ impl From<&CsvDeserializerConfig> for CsvDeserializer {
     fn from(config: &CsvDeserializerConfig) -> Self {
         Self {
             delimiter: config.csv.delimiter as u8,
-            has_header: config.csv.has_header,
             headers: config.csv.headers.clone(),
         }
     }
@@ -139,16 +146,15 @@ impl Deserializer for CsvDeserializer {
 
         let mut records = reader.records();
 
-        // Resolve headers for this call: configured wins; else first row if
-        // has_header; else None (positional output).
-        let headers: Option<Vec<String>> = match (&self.headers, self.has_header) {
-            (Some(h), _) => Some(h.clone()),
-            (None, true) => match records.next().transpose() {
+        // Resolve headers for this call.
+        let headers: Option<Vec<String>> = match &self.headers {
+            Headers::Provided { columns } => Some(columns.clone()),
+            Headers::Snoop => match records.next().transpose() {
                 Ok(Some(r)) => Some(r.iter().map(String::from).collect()),
                 Ok(None) => return Ok(smallvec![]),
                 Err(e) => return Err(format!("CSV parse error: {}", e).into()),
             },
-            (None, false) => None,
+            Headers::None => None,
         };
 
         let timestamp = Utc::now();
@@ -201,7 +207,7 @@ mod tests {
     fn config_with_header() -> CsvDeserializerConfig {
         CsvDeserializerConfig {
             csv: CsvDeserializerOptions {
-                has_header: true,
+                headers: Headers::Snoop,
                 ..Default::default()
             },
         }
@@ -294,11 +300,13 @@ server02,"ok","all good""#,
         let input = Bytes::from("server01,hello,info\nserver02,world,warning");
         let config = CsvDeserializerConfig {
             csv: CsvDeserializerOptions {
-                headers: Some(vec![
-                    "host".to_string(),
-                    "message".to_string(),
-                    "severity".to_string(),
-                ]),
+                headers: Headers::Provided {
+                    columns: vec![
+                        "host".to_string(),
+                        "message".to_string(),
+                        "severity".to_string(),
+                    ],
+                },
                 ..Default::default()
             },
         };
@@ -317,7 +325,7 @@ server02,"ok","all good""#,
         let input = Bytes::from("server01,hello,info");
         let config = CsvDeserializerConfig {
             csv: CsvDeserializerOptions {
-                has_header: false,
+                headers: Headers::None,
                 ..Default::default()
             },
         };
@@ -343,8 +351,7 @@ server02,"ok","all good""#,
         let config = CsvDeserializerConfig {
             csv: CsvDeserializerOptions {
                 delimiter: '\t',
-                has_header: true,
-                ..Default::default()
+                headers: Headers::Snoop,
             },
         };
         let deserializer = config.build();
@@ -456,4 +463,21 @@ server02,"ok","all good""#,
         assert!(event.get("column_2").is_none());
     }
 
+    #[test]
+    fn headers_variants_round_trip() {
+        let provided: Headers =
+            serde_json::from_str(r#"{"type":"provided","columns":["a","b","c"]}"#).unwrap();
+        assert_eq!(
+            provided,
+            Headers::Provided {
+                columns: vec!["a".into(), "b".into(), "c".into()]
+            }
+        );
+
+        let snoop: Headers = serde_json::from_str(r#"{"type":"snoop"}"#).unwrap();
+        assert_eq!(snoop, Headers::Snoop);
+
+        let none: Headers = serde_json::from_str(r#"{"type":"none"}"#).unwrap();
+        assert_eq!(none, Headers::None);
+    }
 }
