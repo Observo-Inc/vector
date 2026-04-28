@@ -460,8 +460,8 @@ impl PingManager {
         }
     }
 
-    const fn record_pong(&mut self) {
-        self.waiting_for_pong = false;
+    fn record_pong(&mut self) {
+        self.reset();
     }
 
     fn reset(&mut self) {
@@ -633,36 +633,43 @@ mod integration_test {
         assert_eq!(event["message"], "second message".into());
     }
 
-    /// Starts a server that sends a message on the first connection, goes silent
-    /// (simulating a dead peer / network partition), then accepts a second connection
-    /// and sends another message.
-    async fn start_silent_then_recover_server() -> String {
+    /// Starts a server that sends a message on the first connection, holds it open
+    /// without responding (simulating a dead peer / network partition), then accepts
+    /// a second connection and sends another message.
+    ///
+    /// If `consume_messages` is true, the first connection drains reads silently —
+    /// used when the client sends text-based ping messages that the server must read
+    /// but not reply to. If false, the connection just sleeps without reading.
+    async fn start_silent_then_recover_server(consume_messages: bool) -> String {
         let addr = next_addr();
         let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
         let server_addr = format!("ws://{}", listener.local_addr().unwrap());
 
         tokio::spawn(async move {
-            // First connection: send a message then go completely silent
             let (stream, _) = listener.accept().await.unwrap();
             let mut websocket = accept_async(stream).await.expect("Failed to accept");
             websocket
                 .send(Message::Text("before silence".to_string()))
                 .await
                 .unwrap();
-            // Hold the connection open but never respond to anything — simulating a dead peer.
-            // The client's ping will go unanswered, triggering a pong timeout.
+            // Spawn so the listener can accept the second connection while the
+            // first is still alive (the client's reconnect creates the new
+            // connection before dropping the old one).
+            tokio::spawn(async move {
+                if consume_messages {
+                    while websocket.next().await.is_some() {}
+                } else {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    drop(websocket);
+                }
+            });
 
-            // Second connection: after client detects dead connection and reconnects
-            let (stream2, _) = listener.accept().await.unwrap();
-            let mut websocket2 = accept_async(stream2).await.expect("Failed to accept");
-            websocket2
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut websocket = accept_async(stream).await.expect("Failed to accept");
+            websocket
                 .send(Message::Text("after reconnect".to_string()))
                 .await
                 .unwrap();
-
-            // Keep first connection alive so it doesn't produce a TCP RST
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            drop(websocket);
         });
 
         server_addr
@@ -672,7 +679,7 @@ mod integration_test {
     /// pong timeout, reconnect, and continue receiving data — NOT exit permanently.
     #[tokio::test(flavor = "multi_thread")]
     async fn websocket_source_reconnects_after_pong_timeout() {
-        let server_addr = start_silent_then_recover_server().await;
+        let server_addr = start_silent_then_recover_server(false).await;
 
         let mut config = make_config(&server_addr);
         config.common.ping_interval = NonZeroU64::new(1);
@@ -825,45 +832,9 @@ mod integration_test {
         assert_eq!(events[1].as_log()["message"], "after close".into());
     }
 
-    /// Starts a server that sends a message on the first connection then stops responding
-    /// to pings. When the client reconnects (after pong timeout), the server accepts the
-    /// new connection and sends another message.
-    async fn start_unresponsive_then_recover_server() -> String {
-        let addr = next_addr();
-        let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
-        let server_addr = format!("ws://{}", listener.local_addr().unwrap());
-
-        tokio::spawn(async move {
-            // First connection: send a message then stop responding to pings.
-            // Spawn into a separate task so the listener can accept the second connection
-            // while the first is still alive (the client's reconnect() creates a new
-            // connection before dropping the old one).
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut websocket = accept_async(stream).await.expect("Failed to accept");
-            websocket
-                .send(Message::Text("before pong timeout".to_string()))
-                .await
-                .unwrap();
-            tokio::spawn(async move {
-                // Consume messages silently (don't respond to pings)
-                while websocket.next().await.is_some() {}
-            });
-
-            // Second connection: after client reconnects due to pong timeout
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut websocket = accept_async(stream).await.expect("Failed to accept");
-            websocket
-                .send(Message::Text("after pong timeout".to_string()))
-                .await
-                .unwrap();
-        });
-
-        server_addr
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn websocket_source_reconnects_on_pong_timeout() {
-        let server_addr = start_unresponsive_then_recover_server().await;
+        let server_addr = start_silent_then_recover_server(true).await;
 
         let mut config = make_config(&server_addr);
         config.common.ping_interval = NonZeroU64::new(1);
@@ -878,8 +849,8 @@ mod integration_test {
             2,
             "Should reconnect after pong timeout and receive messages from both connections"
         );
-        assert_eq!(events[0].as_log()["message"], "before pong timeout".into());
-        assert_eq!(events[1].as_log()["message"], "after pong timeout".into());
+        assert_eq!(events[0].as_log()["message"], "before silence".into());
+        assert_eq!(events[1].as_log()["message"], "after reconnect".into());
     }
 
 }
