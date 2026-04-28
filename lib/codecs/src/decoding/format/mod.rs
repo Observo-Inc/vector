@@ -5,6 +5,7 @@
 
 mod avro;
 mod bytes;
+mod csv;
 mod gelf;
 mod influxdb;
 mod json;
@@ -19,6 +20,7 @@ mod vrl;
 
 use ::bytes::Bytes;
 pub use avro::{AvroDeserializer, AvroDeserializerConfig, AvroDeserializerOptions};
+pub use self::csv::{CsvDeserializer, CsvDeserializerConfig, CsvDeserializerOptions};
 use dyn_clone::DynClone;
 pub use gelf::{GelfDeserializer, GelfDeserializerConfig, GelfDeserializerOptions};
 pub use influxdb::{InfluxdbDeserializer, InfluxdbDeserializerConfig};

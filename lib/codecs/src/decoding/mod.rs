@@ -9,14 +9,15 @@ use crate::decoding::format::{VrlDeserializer, VrlDeserializerConfig};
 use bytes::{Bytes, BytesMut};
 pub use error::StreamDecodingError;
 pub use format::{
-    BoxedDeserializer, BytesDeserializer, BytesDeserializerConfig, GelfDeserializer,
-    GelfDeserializerConfig, GelfDeserializerOptions, InfluxdbDeserializer,
-    InfluxdbDeserializerConfig, JsonDeserializer, JsonDeserializerConfig, JsonDeserializerOptions,
-    JsonPathDeserializer, JsonPathDeserializerConfig, JsonPathDeserializerOptions,
-    NativeDeserializer, NativeDeserializerConfig, NativeJsonDeserializer,
-    NativeJsonDeserializerConfig, NativeJsonDeserializerOptions, ProtobufDeserializer,
-    ProtobufDeserializerConfig, ProtobufDeserializerOptions, StrataDeserializer,
-    StrataDeserializerConfig, StrataDeserializerOptions,
+    BoxedDeserializer, BytesDeserializer, BytesDeserializerConfig, CsvDeserializer,
+    CsvDeserializerConfig, CsvDeserializerOptions, GelfDeserializer, GelfDeserializerConfig,
+    GelfDeserializerOptions, InfluxdbDeserializer, InfluxdbDeserializerConfig, JsonDeserializer,
+    JsonDeserializerConfig, JsonDeserializerOptions, JsonPathDeserializer,
+    JsonPathDeserializerConfig, JsonPathDeserializerOptions, NativeDeserializer,
+    NativeDeserializerConfig, NativeJsonDeserializer, NativeJsonDeserializerConfig,
+    NativeJsonDeserializerOptions, ProtobufDeserializer, ProtobufDeserializerConfig,
+    ProtobufDeserializerOptions, StrataDeserializer, StrataDeserializerConfig,
+    StrataDeserializerOptions,
 };
 #[cfg(feature = "syslog")]
 pub use format::{SyslogDeserializer, SyslogDeserializerConfig, SyslogDeserializerOptions};
@@ -259,6 +260,12 @@ pub enum DeserializerConfig {
     /// Uses the raw bytes as-is.
     Bytes,
 
+    /// Decodes the raw bytes as CSV data.
+    ///
+    /// Uses csv-core's zero-alloc DFA parser which handles quoted fields
+    /// with embedded newlines and supports streaming partial data.
+    Csv(CsvDeserializerConfig),
+
     /// Decodes the raw bytes as [JSON][json].
     ///
     /// [json]: https://www.json.org/
@@ -411,6 +418,7 @@ impl DeserializerConfig {
                 .build(),
             )),
             DeserializerConfig::Bytes => Ok(Deserializer::Bytes(BytesDeserializerConfig.build())),
+            DeserializerConfig::Csv(config) => Ok(Deserializer::Csv(config.build())),
             DeserializerConfig::Json(config) => Ok(Deserializer::Json(config.build())),
             DeserializerConfig::Protobuf(config) => Ok(Deserializer::Protobuf(config.build()?)),
             #[cfg(feature = "syslog")]
@@ -431,6 +439,7 @@ impl DeserializerConfig {
     pub fn default_stream_framing(&self) -> FramingConfig {
         match self {
             DeserializerConfig::Avro { .. } => FramingConfig::Bytes,
+            DeserializerConfig::Csv(_) => FramingConfig::Bytes,
             DeserializerConfig::Native => FramingConfig::LengthDelimited(Default::default()),
             DeserializerConfig::Bytes
             | DeserializerConfig::Json(_)
@@ -467,6 +476,7 @@ impl DeserializerConfig {
             }
             .output_type(),
             DeserializerConfig::Bytes => BytesDeserializerConfig.output_type(),
+            DeserializerConfig::Csv(config) => config.output_type(),
             DeserializerConfig::Json(config) => config.output_type(),
             DeserializerConfig::JsonPaths(config) => config.output_type(),
             DeserializerConfig::Protobuf(config) => config.output_type(),
@@ -489,6 +499,7 @@ impl DeserializerConfig {
             }
             .schema_definition(log_namespace),
             DeserializerConfig::Bytes => BytesDeserializerConfig.schema_definition(log_namespace),
+            DeserializerConfig::Csv(config) => config.schema_definition(log_namespace),
             DeserializerConfig::Json(config) => config.schema_definition(log_namespace),
             DeserializerConfig::JsonPaths(config) => config.schema_definition(log_namespace),
             DeserializerConfig::Protobuf(config) => config.schema_definition(log_namespace),
@@ -537,6 +548,7 @@ impl DeserializerConfig {
                 | DeserializerConfig::Strata(_),
                 _,
             ) => "text/plain",
+            (DeserializerConfig::Csv(_), _) => "text/csv",
             #[cfg(feature = "syslog")]
             (DeserializerConfig::Syslog(_), _) => "text/plain",
         }
@@ -550,6 +562,8 @@ pub enum Deserializer {
     Avro(AvroDeserializer),
     /// Uses a `BytesDeserializer` for deserialization.
     Bytes(BytesDeserializer),
+    /// Uses a `CsvDeserializer` for deserialization.
+    Csv(CsvDeserializer),
     /// Uses a `JsonDeserializer` for deserialization.
     Json(JsonDeserializer),
     /// Uses a `JsonPathDeserializer` for deserialization.
@@ -584,6 +598,7 @@ impl format::Deserializer for Deserializer {
         match self {
             Deserializer::Avro(deserializer) => deserializer.parse(bytes, log_namespace),
             Deserializer::Bytes(deserializer) => deserializer.parse(bytes, log_namespace),
+            Deserializer::Csv(deserializer) => deserializer.parse(bytes, log_namespace),
             Deserializer::Json(deserializer) => deserializer.parse(bytes, log_namespace),
             Deserializer::JsonPaths(deserializer) => deserializer.parse(bytes, log_namespace),
             Deserializer::Protobuf(deserializer) => deserializer.parse(bytes, log_namespace),

@@ -34,7 +34,13 @@ pub enum PathOperation {
 #[configurable_component]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathOperationConfig {
-    /// Map of JSON paths (as strings) to operations to perform on them
+    /// Map of JSON paths (as strings) to operations to perform on them.
+    ///
+    /// Keys may be written as `.` (root), `.meta`, or `meta`. A single
+    /// leading `.` is optional and stripped on load, so `.` ≡ `""`,
+    /// `.meta` ≡ `meta`, `.a.b` ≡ `a.b`. Two keys that normalize to the
+    /// same value (e.g. `.meta` and `meta`) are rejected at load time.
+    #[serde(deserialize_with = "deserialize_paths")]
     pub paths: BTreeMap<String, PathOperation>,
 }
 
@@ -66,6 +72,46 @@ impl PathOperationConfig {
     fn as_map(&self) -> BTreeMap<String, PathOperation> {
         self.paths.clone()
     }
+}
+
+/// Normalize a user-facing path key into the internal runtime form
+/// produced by `ParserState::current_path()`.
+///
+/// - `.` and `""` both mean root → stored as `""`
+/// - A single leading `.` on non-root keys is stripped (`.meta` → `meta`)
+/// - Everything else is left as-is (including `..meta`, `meta.`, etc.)
+fn normalize_config_key(k: &str) -> String {
+    match k {
+        "." | "" => String::new(),
+        s if s.starts_with('.') => s[1..].to_string(),
+        s => s.to_string(),
+    }
+}
+
+fn deserialize_paths<'de, D>(de: D) -> Result<BTreeMap<String, PathOperation>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    use serde::Deserialize;
+
+    let raw: BTreeMap<String, PathOperation> = BTreeMap::deserialize(de)?;
+    let mut out: BTreeMap<String, PathOperation> = BTreeMap::new();
+    let mut originals: BTreeMap<String, String> = BTreeMap::new();
+
+    for (k, v) in raw {
+        let normalized = normalize_config_key(&k);
+        if let Some(prev) = originals.get(&normalized) {
+            return Err(D::Error::custom(format!(
+                "duplicate path key after normalization: {:?} and {:?} both map to {:?}",
+                prev, k, normalized
+            )));
+        }
+        originals.insert(normalized.clone(), k);
+        out.insert(normalized, v);
+    }
+
+    Ok(out)
 }
 
 /// Config used to build a `JsonPathDeserializer`.
@@ -1143,6 +1189,71 @@ mod tests {
 
         let events = deserializer.parse(input, LogNamespace::Vector).unwrap();
         assert_eq!(events.len(), 0, "Explode on non-array should produce no events");
+    }
+
+    #[test]
+    fn test_normalized_path_keys_are_equivalent() {
+        use crate::decoding::{Deserializer, DeserializerConfig};
+
+        // Each inner slice is a class of keys that should normalize to the same
+        // runtime key, and therefore produce identical output for the same input.
+        let equivalence_classes: &[&[&str]] = &[
+            &[".", ""],
+            &[".meta", "meta"],
+            &[".a.b", "a.b"],
+        ];
+
+        let input = r#"{"meta":{"x":1},"a":{"b":42}}"#;
+
+        for class in equivalence_classes {
+            let mut counts: Vec<(String, usize)> = Vec::new();
+            for key in class.iter() {
+                let toml_config = format!(
+                    "codec = \"json_paths\"\n[config.paths]\n\"{}\" = \"identity\"\n",
+                    key
+                );
+                let cfg: DeserializerConfig = toml::from_str(&toml_config)
+                    .unwrap_or_else(|e| panic!("toml parse for key {:?}: {}", key, e));
+                let deser = cfg.build().unwrap();
+                let events = match deser {
+                    Deserializer::JsonPaths(d) => {
+                        d.parse(Bytes::from(input), LogNamespace::Vector).unwrap()
+                    }
+                    _ => panic!("expected JsonPaths"),
+                };
+                counts.push((key.to_string(), events.len()));
+            }
+            eprintln!("class {:?}: {:?}", class, counts);
+            let first = counts[0].1;
+            for (key, count) in &counts {
+                assert_eq!(
+                    *count, first,
+                    "key {:?} produced {} events, expected {} (equivalence class {:?})",
+                    key, count, first, class
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_normalized_path_keys_collision_errors() {
+        use crate::decoding::DeserializerConfig;
+
+        let toml_config = r#"
+codec = "json_paths"
+[config.paths]
+".meta" = "identity"
+"meta" = "explode"
+"#;
+        let result: Result<DeserializerConfig, _> = toml::from_str(toml_config);
+        assert!(result.is_err(), "duplicate path keys should be rejected");
+        let err = result.unwrap_err().to_string();
+        eprintln!("collision error: {}", err);
+        assert!(
+            err.contains("duplicate"),
+            "error message should mention duplicate, got: {}",
+            err
+        );
     }
 
     #[test]

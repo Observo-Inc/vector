@@ -173,6 +173,8 @@ fn deserializer_config_to_serializer(config: &DeserializerConfig) -> encoding::S
         // TODO: Influxdb has no serializer yet
         DeserializerConfig::Influxdb { .. } => todo!(),
         DeserializerConfig::Vrl { .. } => unimplemented!(),
+        // CSV rows are emitted as JSON objects (keyed by headers) or arrays
+        DeserializerConfig::Csv { .. } => SerializerConfig::Json(JsonSerializerConfig::default()),
         // Strata logs are JSON, so use JSON serializer
         DeserializerConfig::Strata { .. } => SerializerConfig::Json(JsonSerializerConfig::default()),
     };
