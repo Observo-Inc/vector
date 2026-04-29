@@ -29,6 +29,11 @@ pub trait Store : Send + Sync + 'static {
     async fn reload( &mut self, config: StoreConfig, default_data_dir: Option<PathBuf>) -> crate::Result<()>;
 }
 
+// Send + Sync supertrait bounds on `Store` constrain implementors but do not
+// propagate to `dyn Store`, so trait-object types must spell them out to be
+// usable across `.await` while held in a `std::sync::Mutex`.
+pub type BoxedStore = Box<dyn Store + Send + Sync>;
+
 #[cfg(feature = "observo")]
 #[async_trait]
 impl Store for ObStore {
@@ -52,7 +57,7 @@ impl Store for ObStore {
 
 impl StoreConfig {
     #[allow(unused)]
-    pub async fn build(self, data_dir: Option<PathBuf>) -> crate::Result<Option<Box<dyn Store + Send + Sync>>> {
+    pub async fn build(self, data_dir: Option<PathBuf>) -> crate::Result<Option<BoxedStore>> {
         match self {
             #[cfg(feature = "observo")]
             StoreConfig::Observo(cfg) => Ok(Some(Box::new(cfg.build(data_dir).await?))),

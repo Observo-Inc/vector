@@ -322,7 +322,7 @@ mod test {
         net::{SocketAddr, UdpSocket},
         sync::{
             atomic::{AtomicBool, Ordering},
-            Arc, Mutex,
+            Arc,
         },
         thread,
     };
@@ -998,7 +998,7 @@ mod test {
                 Default::default(),
                 HashMap::default(),
                 Default::default(),
-                Arc::new(Mutex::new(None))))
+                Arc::new(tokio::sync::Mutex::new(None))))
             .await
             .unwrap();
         let source_handle = tokio::spawn(server);
