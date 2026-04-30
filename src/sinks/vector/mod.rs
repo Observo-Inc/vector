@@ -229,6 +229,201 @@ mod tests {
         .collect()
     }
 
+    // -- JWT auth integration tests --
+
+    fn make_ok_responder() -> impl Fn() -> hyper::Response<hyper::Body> + Clone + Send + Sync + 'static
+    {
+        move || {
+            hyper::Response::builder()
+                .header("grpc-status", "0")
+                .header("content-type", "application/grpc")
+                .body(hyper::Body::from(encode_body(proto::PushEventsResponse {})))
+                .unwrap()
+        }
+    }
+
+    async fn run_auth_sink(config: VectorConfig, in_addr: std::net::SocketAddr) -> http::request::Parts {
+        let cx = SinkContext::default();
+        let (sink, _) = config.build(cx).await.expect("sink should build");
+
+        let (rx, trigger, server) = build_test_server_generic(in_addr, make_ok_responder());
+        tokio::spawn(server);
+
+        let (_, events) = random_lines_with_stream(8, 1, None);
+        sink.run(events).await.expect("sink run failed");
+        drop(trigger);
+
+        let mut parts_list: Vec<_> = rx.collect().await;
+        assert_eq!(parts_list.len(), 1, "expected exactly one request");
+        parts_list.remove(0).0
+    }
+
+    #[tokio::test]
+    async fn auth_inline_sends_authorization_and_site_id_headers() {
+        let in_addr = next_addr();
+        let config: VectorConfig = toml::from_str(&format!(
+            r#"
+            address = "http://{}/"
+            [auth]
+            site_id = "site-123"
+            [auth.jwt_token]
+            type  = "inline"
+            value = "my-jwt-token"
+            "#,
+            in_addr
+        ))
+        .unwrap();
+
+        let parts = run_auth_sink(config, in_addr).await;
+
+        assert_eq!(
+            parts.headers.get("authorization").unwrap().to_str().unwrap(),
+            "Bearer my-jwt-token"
+        );
+        assert_eq!(
+            parts.headers.get("x-site-id").unwrap().to_str().unwrap(),
+            "site-123"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_file_sends_authorization_and_site_id_headers() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut f, b"file-token").unwrap();
+
+        let in_addr = next_addr();
+        let config: VectorConfig = toml::from_str(&format!(
+            r#"
+            address = "http://{}/"
+            [auth]
+            site_id = "site-file"
+            [auth.jwt_token]
+            type = "file"
+            path = "{}"
+            "#,
+            in_addr,
+            f.path().display()
+        ))
+        .unwrap();
+
+        let parts = run_auth_sink(config, in_addr).await;
+
+        assert_eq!(
+            parts.headers.get("authorization").unwrap().to_str().unwrap(),
+            "Bearer file-token"
+        );
+        assert_eq!(
+            parts.headers.get("x-site-id").unwrap().to_str().unwrap(),
+            "site-file"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_auth_sends_no_auth_headers() {
+        let in_addr = next_addr();
+        let config: VectorConfig =
+            toml::from_str(&format!(r#"address = "http://{}/""#, in_addr)).unwrap();
+
+        let parts = run_auth_sink(config, in_addr).await;
+
+        assert!(
+            parts.headers.get("authorization").is_none(),
+            "no authorization header expected"
+        );
+        assert!(
+            parts.headers.get("x-site-id").is_none(),
+            "no x-site-id header expected"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_file_missing_token_file_fails_batch() {
+        let in_addr = next_addr();
+        let config: VectorConfig = toml::from_str(&format!(
+            r#"
+            address = "http://{}/"
+            [auth]
+            site_id = "site-abc"
+            [auth.jwt_token]
+            type = "file"
+            path = "/nonexistent/path/to/token"
+            "#,
+            in_addr
+        ))
+        .unwrap();
+
+        let cx = SinkContext::default();
+        let (sink, _) = config.build(cx).await.unwrap();
+
+        let (_rx, _trigger, server) = build_test_server_generic(in_addr, make_ok_responder());
+        tokio::spawn(server);
+
+        let (batch, mut receiver) = BatchNotifier::new_with_receiver();
+        let (_, events) = random_lines_with_stream(8, 1, Some(batch));
+
+        sink.run(events).await.expect("run itself should not error");
+        assert_eq!(
+            receiver.try_recv(),
+            Ok(BatchStatus::Rejected),
+            "batch should be rejected when token file is missing"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_rejects_invalid_site_id() {
+        let in_addr = next_addr();
+
+        // Parse a valid config, then inject an invalid site_id programmatically
+        // (NUL bytes cannot appear in TOML strings so we must bypass the parser).
+        let mut config: VectorConfig = toml::from_str(&format!(
+            r#"
+            address = "http://{}/"
+            [auth]
+            site_id = "valid-site"
+            [auth.jwt_token]
+            type  = "inline"
+            value = "token"
+            "#,
+            in_addr
+        ))
+        .unwrap();
+        config.auth.as_mut().unwrap().site_id = "bad\0site".into();
+
+        let cx = SinkContext::default();
+        assert!(
+            config.build(cx).await.is_err(),
+            "build should fail for site_id with invalid characters"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_rejects_invalid_inline_token() {
+        let in_addr = next_addr();
+
+        let mut config: VectorConfig = toml::from_str(&format!(
+            r#"
+            address = "http://{}/"
+            [auth]
+            site_id = "valid-site"
+            [auth.jwt_token]
+            type  = "inline"
+            value = "token"
+            "#,
+            in_addr
+        ))
+        .unwrap();
+
+        use crate::sinks::util::JwtTokenConfig;
+        config.auth.as_mut().unwrap().jwt_token =
+            JwtTokenConfig::Inline { value: "bad\0token".into() };
+
+        let cx = SinkContext::default();
+        assert!(
+            config.build(cx).await.is_err(),
+            "build should fail for inline token with invalid characters"
+        );
+    }
+
     // taken from <https://github.com/hyperium/tonic/blob/5aa8ae1fec27377cd4c2a41d309945d7e38087d0/examples/src/grpc-web/client.rs#L45-L75>
     fn encode_body<T>(msg: T) -> Bytes
     where

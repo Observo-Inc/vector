@@ -274,6 +274,9 @@ impl RetryLogic for VectorGrpcRetryLogic {
                     | Unauthenticated
                     | DataLoss
             ),
+            // A missing or unreadable token file is a local configuration error;
+            // retrying will not fix it and would block the batch indefinitely.
+            VectorSinkError::JwtTokenUnavailable { .. } => false,
             _ => true,
         }
     }
