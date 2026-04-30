@@ -29,6 +29,8 @@ pub trait Store : Send + Sync + 'static {
     async fn reload( &mut self, config: StoreConfig, default_data_dir: Option<PathBuf>) -> crate::Result<()>;
 }
 
+pub type CheckpointStore = Box<dyn Store + Send + Sync>;
+
 #[cfg(feature = "observo")]
 #[async_trait]
 impl Store for ObStore {
@@ -52,7 +54,7 @@ impl Store for ObStore {
 
 impl StoreConfig {
     #[allow(unused)]
-    pub async fn build(self, data_dir: Option<PathBuf>) -> crate::Result<Option<Box<dyn Store + Send + Sync>>> {
+    pub async fn build(self, data_dir: Option<PathBuf>) -> crate::Result<Option<CheckpointStore>> {
         match self {
             #[cfg(feature = "observo")]
             StoreConfig::Observo(cfg) => Ok(Some(Box::new(cfg.build(data_dir).await?))),

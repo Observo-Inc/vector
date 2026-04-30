@@ -20,7 +20,7 @@ use crate::config::{SourceConfig, SourceContext};
 impl SourceConfig for Config {
     async fn build(&self, cx: SourceContext) -> Result<Source> {
         let lns = cx.log_namespace(self.log_namespace);
-        let chkptr = cx.checkpoint_accessor();
+        let chkptr = cx.checkpoint_accessor().await;
         let src = self
             .clone()
             .build_source(cx.out, cx.shutdown, chkptr, lns)

@@ -27,7 +27,7 @@ use vector_lib::{
     },
     schema::Definition,
     EstimatedJsonEncodedSizeOf,
-    chkpts::Store as CheckpointStore
+    chkpts::CheckpointStore,
 };
 
 use super::{
@@ -56,8 +56,8 @@ use crate::{
 static ENRICHMENT_TABLES: LazyLock<vector_lib::enrichment::TableRegistry> =
     LazyLock::new(vector_lib::enrichment::TableRegistry::default);
 
-static CHECKPT_STORE: LazyLock<Arc<Mutex<Option<Box<dyn CheckpointStore>>>>> =
-    LazyLock::new(|| Arc::new(Mutex::new(None::<Box<dyn CheckpointStore>>)));
+static CHECKPT_STORE: LazyLock<Arc<tokio::sync::Mutex<Option<CheckpointStore>>>> =
+    LazyLock::new(|| Arc::new(tokio::sync::Mutex::new(None::<CheckpointStore>)));
 
 pub(crate) static SOURCE_SENDER_BUFFER_SIZE: LazyLock<usize> =
     LazyLock::new(|| *TRANSFORM_CONCURRENCY_LIMIT * CHUNK_SIZE);
@@ -151,30 +151,30 @@ impl<'a> Builder<'a> {
         finalized_outputs
     }
 
-    async fn load_checkpoint_store(&mut self) -> Arc<Mutex<Option<Box<dyn CheckpointStore>>>> {
+    async fn load_checkpoint_store(&mut self) -> Arc<tokio::sync::Mutex<Option<CheckpointStore>>> {
         let cfg = self.config.global.checkpoint.clone();
-        if let Ok(mut store) = CHECKPT_STORE.lock() {
-            let span = error_span!(
-                "checkpoint_store",
-                component_kind = "checkpoint_store",
-                component_id = "checkpoint_store",
-                component_type = %cfg.get_component_name());
-            if let Some(s) = store.as_mut() {
-                if let Err(e) = s.reload(cfg, self.config.global.data_dir.clone()).await {
-                    self.errors.push((&span, format!("Checkpoint Store: {}", e)).into());
-                }
-            } else {
-                match cfg.build(self.config.global.data_dir.clone()).await {
-                    Ok(Some(s)) => {
-                        *store = Some(s);
-                    },
-                    Ok(None) => {},
-                    Err(error) => {
-                        self.errors.push((&span, format!("Checkpoint Store: {}", error)).into());
-                    }
+        let mut store = CHECKPT_STORE.lock().await;
+        let span = error_span!(
+            "checkpoint_store",
+            component_kind = "checkpoint_store",
+            component_id = "checkpoint_store",
+            component_type = %cfg.get_component_name());
+        if let Some(s) = store.as_mut() {
+            if let Err(e) = s.reload(cfg, self.config.global.data_dir.clone()).await {
+                self.errors.push((&span, format!("Checkpoint Store: {}", e)).into());
+            }
+        } else {
+            match cfg.build(self.config.global.data_dir.clone()).await {
+                Ok(Some(s)) => {
+                    *store = Some(s);
+                },
+                Ok(None) => {},
+                Err(error) => {
+                    self.errors.push((&span, format!("Checkpoint Store: {}", error)).into());
                 }
             }
         }
+        drop(store);
         CHECKPT_STORE.clone()
     }
 
@@ -238,7 +238,7 @@ impl<'a> Builder<'a> {
         &ENRICHMENT_TABLES
     }
 
-    async fn build_sources(&mut self, chkpt_store: Arc<Mutex<Option<Box<dyn CheckpointStore>>>>) -> HashMap<ComponentKey, Task> {
+    async fn build_sources(&mut self, chkpt_store: Arc<tokio::sync::Mutex<Option<CheckpointStore>>>) -> HashMap<ComponentKey, Task> {
         let mut source_tasks = HashMap::new();
 
         for (key, source) in self
