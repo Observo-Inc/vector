@@ -8,7 +8,7 @@ use vector_config::{Configurable, GenerateError, Metadata, NamedComponent};
 use vector_config_common::attributes::CustomAttribute;
 use vector_config_common::schema::{SchemaGenerator, SchemaObject};
 use vector_config_macros::configurable_component;
-use vector_lib::chkpts::{Accessor, BoxedStore};
+use vector_lib::chkpts::{Accessor, CheckpointStore};
 use vector_lib::{
     config::{
         AcknowledgementsConfig, GlobalOptions, LogNamespace, SourceAcknowledgementsConfig,
@@ -21,8 +21,6 @@ use super::{dot_graph::GraphConfig, schema, ComponentKey, ProxyConfig, Resource}
 use crate::{extra_context::ExtraContext, shutdown::ShutdownSignal, SourceSender};
 
 pub type BoxedSource = Box<dyn SourceConfig>;
-
-type CheckpointStore = BoxedStore;
 
 impl Configurable for BoxedSource {
     fn referenceable_name() -> Option<&'static str> {
