@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use futures::{future::BoxFuture, TryFutureExt};
@@ -11,12 +12,12 @@ use tower::Service;
 use vector_lib::request_metadata::{GroupedCountByteSize, MetaDescriptive, RequestMetadata};
 use vector_lib::stream::DriverResponse;
 
-use super::VectorSinkError;
+use super::{config::VectorSinkAuthConfig, VectorSinkError};
 use crate::{
     event::{EventFinalizers, EventStatus, Finalizable},
     internal_events::EndpointBytesSent,
     proto::vector as proto_vector,
-    sinks::util::uri,
+    sinks::util::{uri, JwtAuthState},
     Error,
 };
 
@@ -25,6 +26,7 @@ pub struct VectorService {
     pub client: proto_vector::Client<HyperSvc>,
     pub protocol: String,
     pub endpoint: String,
+    auth: Option<Arc<JwtAuthState>>,
 }
 
 pub struct VectorResponse {
@@ -69,7 +71,8 @@ impl VectorService {
         hyper_client: hyper::Client<ProxyConnector<HttpsConnector<HttpConnector>>, BoxBody>,
         uri: Uri,
         compression: bool,
-    ) -> Self {
+        auth: Option<VectorSinkAuthConfig>,
+    ) -> crate::Result<Self> {
         let (protocol, endpoint) = uri::protocol_endpoint(uri.clone());
         let mut proto_client = proto_vector::Client::new(HyperSvc {
             uri,
@@ -79,11 +82,21 @@ impl VectorService {
         if compression {
             proto_client = proto_client.send_compressed(tonic::codec::CompressionEncoding::Gzip);
         }
-        Self {
+
+        let auth = auth
+            .map(|cfg| {
+                JwtAuthState::from_config(&cfg.site_id, cfg.jwt_token)
+                    .map(|state| Arc::new(state))
+                    .map_err(|e| -> Error { e.into() })
+            })
+            .transpose()?;
+
+        Ok(Self {
             client: proto_client,
             protocol,
             endpoint,
-        }
+            auth,
+        })
     }
 }
 
@@ -110,9 +123,22 @@ impl Service<VectorRequest> for VectorService {
         let events_byte_size = metadata.into_events_estimated_json_encoded_byte_size();
 
         let future = async move {
+            let mut request = list.request.into_request();
+
+            // Inject auth metadata on every call so a rotated token is always used.
+            if let Some(auth) = &service.auth {
+                let bearer = auth.bearer_token().map_err(|message| {
+                    VectorSinkError::JwtTokenUnavailable { message }
+                })?;
+                request.metadata_mut().insert("authorization", bearer);
+                request
+                    .metadata_mut()
+                    .insert("x-site-id", auth.site_id().clone());
+            }
+
             service
                 .client
-                .push_events(list.request.into_request())
+                .push_events(request)
                 .map_ok(|_response| {
                     emit!(EndpointBytesSent {
                         byte_size,

@@ -1,5 +1,6 @@
 pub mod adaptive_concurrency;
 pub mod auth;
+pub mod jwt_auth;
 // https://github.com/mcarton/rust-derivative/issues/112
 #[allow(clippy::non_canonical_clone_impl)]
 pub mod batch;
@@ -43,6 +44,9 @@ pub use buffer::{
     Buffer, Compression, PartitionBuffer, PartitionInnerBuffer,
 };
 pub use builder::SinkBuilderExt;
+pub use jwt_auth::JwtTokenConfig;
+#[cfg(feature = "sinks-utils-jwt-auth")]
+pub use jwt_auth::{JwtAuthState, JwtAuthToken};
 pub use compressor::Compressor;
 pub use compressor::Decompressor;
 pub use normalizer::Normalizer;
