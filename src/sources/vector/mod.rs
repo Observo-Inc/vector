@@ -62,10 +62,10 @@ impl proto::Service for Service {
             let site_id = metadata.get("x-site-id").and_then(|v| v.to_str().ok());
             auth.validate(authorization, site_id).map_err(|e| match e {
                 JwtAuthError::InvalidToken(msg) => Status::unauthenticated(msg),
-                JwtAuthError::MissingSiteId => {
+                JwtAuthError::MissingMembershipValue => {
                     Status::unauthenticated("missing x-site-id metadata header")
                 }
-                JwtAuthError::SiteNotAuthorized => {
+                JwtAuthError::MembershipNotAuthorized => {
                     Status::permission_denied("site ID not authorized by this token")
                 }
             })?;

@@ -28,61 +28,81 @@ use crate::{
     tls::{MaybeTlsSettings, TlsEnableableConfig},
 };
 
-/// JWT authentication configuration for the `vector` sink.
+/// Source of the JWT bearer token sent with each outgoing request.
 ///
-/// When present, each outgoing request includes an `authorization: Bearer <token>` header
-/// and an `x-site-id` header read from the configured sources.
+/// Exactly one variant must be configured.
+///
+/// ## Examples
+///
+/// Inline value (use Vector's `${VAR}` interpolation for env vars):
+/// ```toml
+/// jwt_token.type  = "inline"
+/// jwt_token.value = "${MY_JWT_TOKEN}"
+/// ```
+///
+/// File path (re-read on every request for Kubernetes secret rotation):
+/// ```toml
+/// jwt_token.type = "file"
+/// jwt_token.path = "/var/run/secrets/vector/token"
+/// ```
 #[configurable_component]
 #[derive(Clone, Debug)]
-pub struct VectorSinkAuthConfig {
-    /// Name of the environment variable containing the JWT bearer token.
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum JwtTokenSource {
+    /// Inline token value.
     ///
-    /// The value is re-read on every request so that a rotated Kubernetes secret
-    /// (mounted as an environment variable) is picked up without restarting the agent.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub jwt_token_env: Option<String>,
+    /// Supports Vector's `${ENV_VAR}` interpolation. The value is resolved once at
+    /// config load time.
+    Inline {
+        /// JWT bearer token value.
+        value: String,
+    },
 
     /// Path to a file containing the JWT bearer token.
     ///
-    /// Preferred over `jwt_token_env` for Kubernetes secret volume mounts because
-    /// Kubernetes updates the file automatically when the secret is rotated.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub jwt_token_file: Option<String>,
+    /// The file is re-read on **every request** so that a rotated Kubernetes secret
+    /// volume mount is picked up automatically without restarting the agent.
+    File {
+        /// Path to the token file.
+        path: String,
+    },
+}
 
-    /// Name of the environment variable containing the site ID to send.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub site_id_env: Option<String>,
+/// JWT authentication configuration for the `vector` sink.
+///
+/// When present, each outgoing request includes an `authorization: Bearer <token>` header
+/// and an `x-site-id` header.
+///
+/// ## Example
+///
+/// ```toml
+/// [sinks.my_sink.auth]
+/// jwt_token.type  = "file"
+/// jwt_token.path  = "/var/run/secrets/vector/token"
+/// site_id         = "${SITE_ID}"
+/// ```
+#[configurable_component]
+#[derive(Clone, Debug)]
+pub struct VectorSinkAuthConfig {
+    /// Source of the JWT bearer token attached to every request.
+    pub jwt_token: JwtTokenSource,
 
-    /// Static site ID value.
+    /// Site ID sent in the `x-site-id` metadata header on every request.
     ///
-    /// Used when the site ID is known at configuration time rather than at runtime.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub site_id: Option<String>,
+    /// Supports Vector's `${ENV_VAR}` interpolation, e.g. `site_id = "${SITE_ID}"`.
+    pub site_id: String,
 }
 
 impl VectorSinkAuthConfig {
-    /// Reads the JWT token from the configured source (file preferred over env).
-    /// Returns `None` if neither source is configured or the value cannot be read.
+    /// Returns the JWT token. `File` variant re-reads on every call for rotation support;
+    /// `Inline` variant returns the value already resolved at config load time.
     pub(super) fn jwt_token(&self) -> Option<String> {
-        if let Some(path) = &self.jwt_token_file {
-            if let Ok(contents) = std::fs::read_to_string(path) {
-                return Some(contents.trim().to_owned());
-            }
+        match &self.jwt_token {
+            JwtTokenSource::Inline { value } => Some(value.clone()),
+            JwtTokenSource::File { path } => std::fs::read_to_string(path)
+                .ok()
+                .map(|s| s.trim().to_owned()),
         }
-        if let Some(env_name) = &self.jwt_token_env {
-            return std::env::var(env_name).ok();
-        }
-        None
-    }
-
-    /// Returns the site ID from the configured source.
-    pub(super) fn site_id(&self) -> Option<String> {
-        if let Some(env_name) = &self.site_id_env {
-            if let Ok(val) = std::env::var(env_name) {
-                return Some(val);
-            }
-        }
-        self.site_id.clone()
     }
 }
 

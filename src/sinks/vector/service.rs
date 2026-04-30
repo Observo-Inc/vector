@@ -118,30 +118,27 @@ impl Service<VectorRequest> for VectorService {
 
             // Inject auth metadata on every call so a rotated token is always used.
             if let Some(auth) = &service.auth {
-                if let Some(token) = auth.jwt_token() {
-                    match format!("Bearer {}", token).parse() {
+                match auth.jwt_token() {
+                    Some(token) => match format!("Bearer {}", token).parse() {
                         Ok(value) => {
                             request.metadata_mut().insert("authorization", value);
                         }
                         Err(err) => {
                             warn!(message = "JWT token contains invalid characters for gRPC metadata.", error = %err);
                         }
+                    },
+                    None => {
+                        warn!(message = "Auth is configured but no JWT token could be read.");
                     }
-                } else {
-                    warn!(message = "Auth is configured but no JWT token could be read.");
                 }
 
-                if let Some(site_id) = auth.site_id() {
-                    match site_id.parse() {
-                        Ok(value) => {
-                            request.metadata_mut().insert("x-site-id", value);
-                        }
-                        Err(err) => {
-                            warn!(message = "Site ID contains invalid characters for gRPC metadata.", error = %err);
-                        }
+                match auth.site_id.parse() {
+                    Ok(value) => {
+                        request.metadata_mut().insert("x-site-id", value);
                     }
-                } else {
-                    warn!(message = "Auth is configured but no site_id could be read.");
+                    Err(err) => {
+                        warn!(message = "Site ID contains invalid characters for gRPC metadata.", error = %err);
+                    }
                 }
             }
 
