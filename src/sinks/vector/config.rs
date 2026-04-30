@@ -20,53 +20,13 @@ use crate::{
     proto::vector as proto,
     sinks::{
         util::{
-            retries::RetryLogic, BatchConfig, RealtimeEventBasedDefaultBatchSettings,
-            ServiceBuilderExt, TowerRequestConfig,
+            retries::RetryLogic, BatchConfig, JwtTokenConfig,
+            RealtimeEventBasedDefaultBatchSettings, ServiceBuilderExt, TowerRequestConfig,
         },
         Healthcheck, VectorSink as VectorSinkType,
     },
     tls::{MaybeTlsSettings, TlsEnableableConfig},
 };
-
-/// Source of the JWT bearer token sent with each outgoing request.
-///
-/// Exactly one variant must be configured.
-///
-/// ## Examples
-///
-/// Inline value (use Vector's `${VAR}` interpolation for env vars):
-/// ```toml
-/// jwt_token.type  = "inline"
-/// jwt_token.value = "${MY_JWT_TOKEN}"
-/// ```
-///
-/// File path (re-read on every request for Kubernetes secret rotation):
-/// ```toml
-/// jwt_token.type = "file"
-/// jwt_token.path = "/var/run/secrets/vector/token"
-/// ```
-#[configurable_component]
-#[derive(Clone, Debug)]
-#[serde(rename_all = "snake_case", tag = "type")]
-pub enum JwtTokenSource {
-    /// Inline token value.
-    ///
-    /// Supports Vector's `${ENV_VAR}` interpolation. The value is resolved once at
-    /// config load time.
-    Inline {
-        /// JWT bearer token value.
-        value: String,
-    },
-
-    /// Path to a file containing the JWT bearer token.
-    ///
-    /// The file is re-read on **every request** so that a rotated Kubernetes secret
-    /// volume mount is picked up automatically without restarting the agent.
-    File {
-        /// Path to the token file.
-        path: String,
-    },
-}
 
 /// JWT authentication configuration for the `vector` sink.
 ///
@@ -86,7 +46,7 @@ pub enum JwtTokenSource {
 #[serde(deny_unknown_fields)]
 pub struct VectorSinkAuthConfig {
     /// Source of the JWT bearer token attached to every request.
-    pub jwt_token: JwtTokenSource,
+    pub jwt_token: JwtTokenConfig,
 
     /// Site ID sent in the `x-site-id` metadata header on every request.
     ///
