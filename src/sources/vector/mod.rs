@@ -22,10 +22,7 @@ use crate::{
     proto::vector as proto,
     serde::bool_or_struct,
     sources::{
-        util::{
-            grpc::run_grpc_server,
-            jwt_auth::{JwtAuth, JwtAuthConfig, JwtAuthError},
-        },
+        util::{grpc::run_grpc_server, JwtAuth, JwtAuthConfig, JwtAuthError},
         Source,
     },
     tls::{MaybeTlsSettings, TlsEnableableConfig},
@@ -188,7 +185,7 @@ impl Default for VectorConfig {
             tls: None,
             acknowledgements: Default::default(),
             log_namespace: None,
-                auth: None,
+            auth: None,
         }
     }
 }

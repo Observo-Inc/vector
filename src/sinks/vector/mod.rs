@@ -28,6 +28,9 @@ pub enum VectorSinkError {
 
     #[snafu(display("URL has no host."))]
     NoHost,
+
+    #[snafu(display("JWT token unavailable: {}", message))]
+    JwtTokenUnavailable { message: String },
 }
 
 #[cfg(test)]

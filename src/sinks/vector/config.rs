@@ -83,6 +83,7 @@ pub enum JwtTokenSource {
 /// ```
 #[configurable_component]
 #[derive(Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct VectorSinkAuthConfig {
     /// Source of the JWT bearer token attached to every request.
     pub jwt_token: JwtTokenSource,
@@ -93,18 +94,6 @@ pub struct VectorSinkAuthConfig {
     pub site_id: String,
 }
 
-impl VectorSinkAuthConfig {
-    /// Returns the JWT token. `File` variant re-reads on every call for rotation support;
-    /// `Inline` variant returns the value already resolved at config load time.
-    pub(super) fn jwt_token(&self) -> Option<String> {
-        match &self.jwt_token {
-            JwtTokenSource::Inline { value } => Some(value.clone()),
-            JwtTokenSource::File { path } => std::fs::read_to_string(path)
-                .ok()
-                .map(|s| s.trim().to_owned()),
-        }
-    }
-}
 
 /// Configuration for the `vector` sink.
 #[configurable_component(sink("vector", "Relay observability data to a Vector instance."))]
@@ -205,9 +194,9 @@ impl SinkConfig for VectorConfig {
             .clone()
             .map(|uri| uri.uri)
             .unwrap_or_else(|| uri.clone());
-        let healthcheck_client = VectorService::new(client.clone(), healthcheck_uri, false, None);
+        let healthcheck_client = VectorService::new(client.clone(), healthcheck_uri, false, None)?;
         let healthcheck = healthcheck(healthcheck_client, cx.healthcheck);
-        let service = VectorService::new(client, uri, self.compression, self.auth.clone());
+        let service = VectorService::new(client, uri, self.compression, self.auth.clone())?;
         let request_settings = self.request.into_settings();
         let batch_settings = self.batch.into_batcher_settings()?;
 

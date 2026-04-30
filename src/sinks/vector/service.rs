@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use futures::{future::BoxFuture, TryFutureExt};
@@ -6,6 +7,7 @@ use hyper::client::HttpConnector;
 use hyper_openssl::HttpsConnector;
 use hyper_proxy::ProxyConnector;
 use prost::Message;
+use tonic::metadata::MetadataValue;
 use tonic::{body::BoxBody, IntoRequest};
 use tower::Service;
 use vector_lib::request_metadata::{GroupedCountByteSize, MetaDescriptive, RequestMetadata};
@@ -20,13 +22,31 @@ use crate::{
     Error,
 };
 
+/// Pre-parsed auth state built once at `VectorService` construction time.
+///
+/// `site_id` and, for inline tokens, the `Authorization` header value are parsed
+/// into `MetadataValue` up front so the hot `call()` path pays no allocation or
+/// parse cost for those fields.
+#[derive(Debug)]
+struct AuthState {
+    site_id: MetadataValue<tonic::metadata::Ascii>,
+    token: AuthToken,
+}
+
+#[derive(Debug)]
+enum AuthToken {
+    /// Fully-formatted `"Bearer <value>"` ready to insert into gRPC metadata.
+    Static(MetadataValue<tonic::metadata::Ascii>),
+    /// Path to a file re-read on every request (K8s secret rotation).
+    File(String),
+}
+
 #[derive(Clone, Debug)]
 pub struct VectorService {
     pub client: proto_vector::Client<HyperSvc>,
     pub protocol: String,
     pub endpoint: String,
-    /// Auth config for injecting JWT + site_id into request metadata.
-    auth: Option<VectorSinkAuthConfig>,
+    auth: Option<Arc<AuthState>>,
 }
 
 pub struct VectorResponse {
@@ -72,7 +92,7 @@ impl VectorService {
         uri: Uri,
         compression: bool,
         auth: Option<VectorSinkAuthConfig>,
-    ) -> Self {
+    ) -> crate::Result<Self> {
         let (protocol, endpoint) = uri::protocol_endpoint(uri.clone());
         let mut proto_client = proto_vector::Client::new(HyperSvc {
             uri,
@@ -82,12 +102,35 @@ impl VectorService {
         if compression {
             proto_client = proto_client.send_compressed(tonic::codec::CompressionEncoding::Gzip);
         }
-        Self {
+
+        let auth = auth.map(|cfg| {
+            let site_id: MetadataValue<tonic::metadata::Ascii> = cfg
+                .site_id
+                .parse()
+                .map_err(|_| "site_id contains characters invalid for gRPC metadata")?;
+
+            let token = match cfg.jwt_token {
+                super::config::JwtTokenSource::Inline { value } => {
+                    let header: MetadataValue<tonic::metadata::Ascii> =
+                        format!("Bearer {value}").parse().map_err(|_| {
+                            "JWT token (inline) contains characters invalid for gRPC metadata"
+                        })?;
+                    AuthToken::Static(header)
+                }
+                super::config::JwtTokenSource::File { path } => AuthToken::File(path),
+            };
+
+            Ok::<_, &'static str>(Arc::new(AuthState { site_id, token }))
+        });
+
+        let auth = auth.transpose().map_err(|e| -> Error { e.into() })?;
+
+        Ok(Self {
             client: proto_client,
             protocol,
             endpoint,
             auth,
-        }
+        })
     }
 }
 
@@ -96,17 +139,10 @@ impl Service<VectorRequest> for VectorService {
     type Error = Error;
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
-    // Emission of an internal event in case of errors is handled upstream by the caller.
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // Readiness check of the client is done through the `push_events()`
-        // call happening inside `call()`. That check blocks until the client is
-        // ready to perform another request.
-        //
-        // See: <https://docs.rs/tonic/0.4.2/tonic/client/struct.Grpc.html#method.ready>
         Poll::Ready(Ok(()))
     }
 
-    // Emission of internal events for errors and dropped events is handled upstream by the caller.
     fn call(&mut self, mut list: VectorRequest) -> Self::Future {
         let mut service = self.clone();
         let byte_size = list.request.encoded_len();
@@ -116,30 +152,37 @@ impl Service<VectorRequest> for VectorService {
         let future = async move {
             let mut request = list.request.into_request();
 
-            // Inject auth metadata on every call so a rotated token is always used.
             if let Some(auth) = &service.auth {
-                match auth.jwt_token() {
-                    Some(token) => match format!("Bearer {}", token).parse() {
-                        Ok(value) => {
-                            request.metadata_mut().insert("authorization", value);
+                let bearer = match &auth.token {
+                    AuthToken::Static(value) => Some(value.clone()),
+                    AuthToken::File(path) => match std::fs::read_to_string(path) {
+                        Ok(raw) => {
+                            let token = raw.trim();
+                            match format!("Bearer {token}").parse::<MetadataValue<_>>() {
+                                Ok(value) => Some(value),
+                                Err(err) => {
+                                    return Err(VectorSinkError::JwtTokenUnavailable {
+                                        message: format!("token file contains invalid characters: {err}"),
+                                    }
+                                    .into())
+                                }
+                            }
                         }
                         Err(err) => {
-                            warn!(message = "JWT token contains invalid characters for gRPC metadata.", error = %err);
+                            return Err(VectorSinkError::JwtTokenUnavailable {
+                                message: format!("failed to read token file '{}': {err}", path),
+                            }
+                            .into())
                         }
                     },
-                    None => {
-                        warn!(message = "Auth is configured but no JWT token could be read.");
-                    }
-                }
+                };
 
-                match auth.site_id.parse() {
-                    Ok(value) => {
-                        request.metadata_mut().insert("x-site-id", value);
-                    }
-                    Err(err) => {
-                        warn!(message = "Site ID contains invalid characters for gRPC metadata.", error = %err);
-                    }
+                if let Some(value) = bearer {
+                    request.metadata_mut().insert("authorization", value);
                 }
+                request
+                    .metadata_mut()
+                    .insert("x-site-id", auth.site_id.clone());
             }
 
             service
@@ -173,12 +216,10 @@ impl Service<hyper::Request<BoxBody>> for HyperSvc {
     type Error = hyper::Error;
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
-    // Emission of an internal event in case of errors is handled upstream by the caller.
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 
-    // Emission of internal events for errors and dropped events is handled upstream by the caller.
     fn call(&mut self, mut req: hyper::Request<BoxBody>) -> Self::Future {
         let uri = Uri::builder()
             .scheme(self.uri.scheme().unwrap().clone())
