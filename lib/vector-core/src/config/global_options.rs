@@ -255,7 +255,7 @@ impl GlobalOptions {
                 expire_metrics: self.expire_metrics.or(with.expire_metrics),
                 expire_metrics_secs: self.expire_metrics_secs.or(with.expire_metrics_secs),
                 checkpoint,
-                permit_origin: self.permit_origin.or(with.permit_origin),
+                permit_origin: self.permit_origin.clone().or(with.permit_origin),
             })
         } else {
             Err(errors)
