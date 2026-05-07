@@ -196,6 +196,7 @@ impl SourceConfig for LogplexConfig {
             log_namespace,
         };
 
+        let permit_origin = cx.effective_permit_origin(self.permit_origin.clone());
         source.run(
             self.address,
             "events",
@@ -207,7 +208,7 @@ impl SourceConfig for LogplexConfig {
             cx,
             self.acknowledgements,
             self.keepalive.clone(),
-            self.permit_origin.clone(),
+            permit_origin,
         )
     }
 

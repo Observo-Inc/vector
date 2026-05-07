@@ -41,6 +41,7 @@ httparse = "1"
 mime = "0.3"
 memchr = "2"
 metrics.workspace = true
+ipnet = { version = "2", default-features = false, features = ["serde"] }
 socket2 = "0.5"
 chrono.workspace = true
 tracing.workspace = true

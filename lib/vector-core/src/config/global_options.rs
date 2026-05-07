@@ -3,6 +3,7 @@ use std::{fs::DirBuilder, path::PathBuf, time::Duration};
 use snafu::{ResultExt, Snafu};
 use vector_common::TimeZone;
 use crate::chkpts::StoreConfig as CheckpointConfig;
+use crate::ipallowlist::IpAllowlistConfig;
 use vector_config::configurable_component;
 
 use super::super::default_data_dir;
@@ -108,6 +109,12 @@ pub struct GlobalOptions {
     /// Configuration for the checkpoint store.
     #[serde(skip_serializing_if = "crate::serde::is_default", default)]
     pub checkpoint: CheckpointConfig,
+
+    /// List of allowed origin IP networks applied to all sources that support IP allowlisting.
+    /// Acts as a site-level default; a source's own `permit_origin` setting takes precedence when set.
+    #[configurable(derived)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permit_origin: Option<IpAllowlistConfig>,
 }
 
 impl GlobalOptions {
@@ -233,6 +240,10 @@ impl GlobalOptions {
             }
         };
 
+        if conflicts(self.permit_origin.as_ref(), with.permit_origin.as_ref()) {
+            errors.push("conflicting values for 'permit_origin' found".to_owned());
+        }
+
         if errors.is_empty() {
             Ok(Self {
                 data_dir,
@@ -244,6 +255,7 @@ impl GlobalOptions {
                 expire_metrics: self.expire_metrics.or(with.expire_metrics),
                 expire_metrics_secs: self.expire_metrics_secs.or(with.expire_metrics_secs),
                 checkpoint,
+                permit_origin: self.permit_origin.clone().or(with.permit_origin),
             })
         } else {
             Err(errors)

@@ -101,6 +101,7 @@ impl GenerateConfig for PrometheusRemoteWriteConfig {
 impl SourceConfig for PrometheusRemoteWriteConfig {
     async fn build(&self, cx: SourceContext) -> crate::Result<sources::Source> {
         let source = RemoteWriteSource;
+        let permit_origin = cx.effective_permit_origin(self.permit_origin.clone());
         source.run(
             self.address,
             "",
@@ -112,7 +113,7 @@ impl SourceConfig for PrometheusRemoteWriteConfig {
             cx,
             self.acknowledgements,
             self.keepalive.clone(),
-            self.permit_origin.clone(),
+            permit_origin,
         )
     }
 

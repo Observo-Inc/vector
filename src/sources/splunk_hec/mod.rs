@@ -154,6 +154,7 @@ impl SourceConfig for SplunkConfig {
         let tls = MaybeTlsSettings::from_config(self.tls.as_ref(), true)?;
         let shutdown = cx.shutdown.clone();
         let out = cx.out.clone();
+        let allowlist = cx.effective_permit_origin(self.permit_origin.clone()).map(Into::into);
         let source = SplunkSource::new(self, tls.http_protocol_name(), cx);
 
         let event_service = source.event_service(out.clone());
@@ -178,7 +179,7 @@ impl SourceConfig for SplunkConfig {
 
         let listener = tls.bind(&self.address).await?;
         let listener = listener
-            .with_allowlist(self.permit_origin.clone().map(Into::into));
+            .with_allowlist(allowlist);
 
         let keepalive_settings = self.keepalive.clone();
         Ok(Box::pin(async move {

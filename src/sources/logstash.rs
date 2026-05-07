@@ -156,6 +156,7 @@ impl SourceConfig for LogstashConfig {
             .and_then(|k| k.path);
 
         let tls = MaybeTlsSettings::from_config(tls_config.as_ref(), true)?;
+        let allowlist = cx.effective_permit_origin(self.permit_origin.clone()).map(Into::into);
         source.run(
             self.address,
             self.keepalive,
@@ -167,7 +168,7 @@ impl SourceConfig for LogstashConfig {
             cx,
             self.acknowledgements,
             self.connection_limit,
-            self.permit_origin.clone().map(Into::into),
+            allowlist,
             LogstashConfig::NAME,
             log_namespace,
         )

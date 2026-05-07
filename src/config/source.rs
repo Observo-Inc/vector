@@ -14,6 +14,7 @@ use vector_lib::{
         AcknowledgementsConfig, GlobalOptions, LogNamespace, SourceAcknowledgementsConfig,
         SourceOutput,
     },
+    ipallowlist::IpAllowlistConfig,
     source::Source,
 };
 
@@ -227,6 +228,17 @@ impl SourceContext {
             .merge_default(&self.globals.acknowledgements)
             .merge_default(&self.acknowledgements.into())
             .enabled()
+    }
+
+    /// Returns the effective `permit_origin` for this source.
+    ///
+    /// If the source provides its own `permit_origin`, that value is used.
+    /// Otherwise the site-level `permit_origin` from `GlobalOptions` is used as a fallback.
+    pub fn effective_permit_origin(
+        &self,
+        source_permit_origin: Option<IpAllowlistConfig>,
+    ) -> Option<IpAllowlistConfig> {
+        source_permit_origin.or_else(|| self.globals.permit_origin.clone())
     }
 
     /// Gets the log namespacing to use. The passed in value is from the source itself

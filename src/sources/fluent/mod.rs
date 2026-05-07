@@ -49,7 +49,7 @@ pub struct FluentConfig {
     connection_limit: Option<u32>,
 
     #[configurable(derived)]
-    keepalive: Option<TcpKeepaliveConfig>,
+    keepalive: Option<TcpKeepaliveConfig>, 
 
     #[configurable(derived)]
     pub permit_origin: Option<IpAllowlistConfig>,
@@ -104,6 +104,7 @@ impl SourceConfig for FluentConfig {
             .and_then(|tls| tls.client_metadata_key.clone())
             .and_then(|k| k.path);
         let tls = MaybeTlsSettings::from_config(tls_config.as_ref(), true)?;
+        let allowlist = cx.effective_permit_origin(self.permit_origin.clone()).map(Into::into);
         source.run(
             self.address,
             self.keepalive,
@@ -115,7 +116,7 @@ impl SourceConfig for FluentConfig {
             cx,
             self.acknowledgements,
             self.connection_limit,
-            self.permit_origin.clone().map(Into::into),
+            allowlist,
             FluentConfig::NAME,
             log_namespace,
         )

@@ -174,6 +174,7 @@ impl SourceConfig for OpentelemetryConfig {
         let acknowledgements = cx.do_acknowledgements(self.acknowledgements);
         let events_received = register!(EventsReceived);
         let log_namespace = cx.log_namespace(self.log_namespace);
+        let permit_origin = cx.effective_permit_origin(self.permit_origin.clone());
 
         let log_service = LogsServiceServer::new(Service {
             pipeline: cx.out.clone(),
@@ -216,7 +217,7 @@ impl SourceConfig for OpentelemetryConfig {
                 grpc_tls_settings,
                 builder.routes(),
                 cx.shutdown.clone(),
-                self.permit_origin.clone(),
+                permit_origin.clone(),
             )
             .map_err(|error| {
                 error!(message = "Source future failed.", %error);
@@ -245,7 +246,7 @@ impl SourceConfig for OpentelemetryConfig {
                 filters,
                 cx.shutdown,
                 http_config.keepalive.clone(),
-                self.permit_origin.clone(),
+                permit_origin,
             ))
         } else {
             None
