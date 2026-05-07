@@ -13471,6 +13471,7 @@ dependencies = [
  "hyper 1.4.1",
  "hyper-util",
  "inventory",
+ "ipnet",
  "libgssapi",
  "memchr",
  "metrics",
