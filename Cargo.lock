@@ -2381,6 +2381,8 @@ dependencies = [
  "async-trait",
  "chrono",
  "deadpool-postgres",
+ "futures 0.3.31",
+ "itertools 0.14.0",
  "metrics",
  "rand 0.8.5",
  "rusqlite",
