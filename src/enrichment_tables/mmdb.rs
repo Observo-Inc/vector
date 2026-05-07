@@ -4,7 +4,7 @@
 //! [maxmind]: https://maxmind.com
 use std::{fs, net::IpAddr, sync::Arc, time::SystemTime};
 
-use maxminddb::{MaxMindDBError, Reader};
+use maxminddb::Reader;
 use vector_lib::configurable::configurable_component;
 use vector_lib::enrichment::{Case, Condition, IndexHandle, Table};
 use vrl::value::{ObjectMap, Value};
@@ -52,22 +52,19 @@ impl Mmdb {
     pub fn new(config: MmdbConfig) -> crate::Result<Self> {
         let dbreader = Arc::new(Reader::open_readfile(config.path.clone())?);
 
-        // Check if we can read database with dummy Ip.
+        // Verify the database is readable; missing-record is fine, not an error.
         let ip = IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
-        let result = dbreader.lookup::<ObjectMap>(ip).map(|_| ());
+        dbreader.lookup(ip)?;
 
-        match result {
-            Ok(_) | Err(MaxMindDBError::AddressNotFoundError(_)) => Ok(Mmdb {
-                last_modified: fs::metadata(&config.path)?.modified()?,
-                dbreader,
-                config,
-            }),
-            Err(error) => Err(error.into()),
-        }
+        Ok(Mmdb {
+            last_modified: fs::metadata(&config.path)?.modified()?,
+            dbreader,
+            config,
+        })
     }
 
     fn lookup(&self, ip: IpAddr, select: Option<&[String]>) -> Option<ObjectMap> {
-        let data = self.dbreader.lookup::<ObjectMap>(ip).ok()?;
+        let data: ObjectMap = self.dbreader.lookup(ip).ok()?.decode().ok()??;
 
         if let Some(fields) = select {
             let mut filtered = Value::from(ObjectMap::new());
