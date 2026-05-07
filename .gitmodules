@@ -3,4 +3,4 @@
 	url = https://github.com/janmejay/oxide-auth.git
 [submodule "lib/observo/private"]
 	path = lib/observo/private
-	url = git@ghe.eng.sentinelone.tech:sentinel-one/dataplane-private.git
+	url = https://ghe.eng.sentinelone.tech/sentinel-one/dataplane-private.git
