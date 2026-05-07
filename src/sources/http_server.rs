@@ -378,6 +378,7 @@ impl SourceConfig for SimpleHttpConfig {
             decoder,
             log_namespace,
         };
+        let permit_origin = cx.effective_permit_origin(self.permit_origin.clone());
         source.run(
             self.address,
             self.path.as_str(),
@@ -389,7 +390,7 @@ impl SourceConfig for SimpleHttpConfig {
             cx,
             self.acknowledgements,
             self.keepalive.clone(),
-            self.permit_origin.clone(),
+            permit_origin,
         )
     }
 

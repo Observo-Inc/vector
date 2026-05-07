@@ -197,7 +197,7 @@ impl SourceConfig for DatadogAgentConfig {
         );
         let listener = tls.bind(&self.address).await?;
         let listener = listener
-            .with_allowlist(self.permit_origin.clone().map(Into::into));
+            .with_allowlist(cx.effective_permit_origin(self.permit_origin.clone()).map(Into::into));
         let acknowledgements = cx.do_acknowledgements(self.acknowledgements);
         let filters = source.build_warp_filters(cx.out, acknowledgements, self)?;
         let shutdown = cx.shutdown;

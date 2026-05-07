@@ -132,6 +132,7 @@ impl SourceConfig for SocketConfig {
                     .and_then(|tls| tls.client_metadata_key.clone())
                     .and_then(|k| k.path);
                 let tls = MaybeTlsSettings::from_config(tls_config.as_ref(), true)?;
+                let allowlist = cx.effective_permit_origin(config.permit_origin.clone()).map(Into::into);
                 tcp.run(
                     config.address(),
                     config.keepalive(),
@@ -143,12 +144,12 @@ impl SourceConfig for SocketConfig {
                     cx,
                     false.into(),
                     config.connection_limit,
-                    config.permit_origin.map(Into::into),
+                    allowlist,
                     SocketConfig::NAME,
                     log_namespace,
                 )
             }
-            Mode::Udp(config) => {
+            Mode::Udp(mut config) => {
                 let log_namespace = cx.log_namespace(config.log_namespace);
                 let decoding = config.decoding().clone();
                 let framing = config
@@ -156,6 +157,7 @@ impl SourceConfig for SocketConfig {
                     .clone()
                     .unwrap_or_else(|| decoding.default_message_based_framing());
                 let decoder = DecodingConfig::new(framing, decoding, log_namespace).build()?;
+                config.permit_origin = cx.effective_permit_origin(config.permit_origin);
                 Ok(udp::udp(
                     config,
                     decoder,

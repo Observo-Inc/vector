@@ -162,6 +162,7 @@ impl SourceConfig for AwsKinesisFirehoseConfig {
                 .build()?;
 
         let acknowledgements = cx.do_acknowledgements(self.acknowledgements);
+        let allowlist = cx.effective_permit_origin(self.permit_origin.clone()).map(Into::into);
 
         if self.access_key.is_some() {
             warn!("DEPRECATION `access_key`, use `access_keys` instead.")
@@ -187,7 +188,7 @@ impl SourceConfig for AwsKinesisFirehoseConfig {
         let tls = MaybeTlsSettings::from_config(self.tls.as_ref(), true)?;
         let listener = tls.bind(&self.address).await?;
         let listener = listener
-            .with_allowlist(self.permit_origin.clone().map(Into::into));
+            .with_allowlist(allowlist);
 
         let keepalive_settings = self.keepalive.clone();
         let shutdown = cx.shutdown;

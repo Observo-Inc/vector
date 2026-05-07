@@ -112,6 +112,7 @@ impl SourceConfig for PrometheusPushgatewayConfig {
         let source = PushgatewaySource {
             aggregate_metrics: self.aggregate_metrics,
         };
+        let permit_origin = cx.effective_permit_origin(self.permit_origin.clone());
         source.run(
             self.address,
             "",
@@ -123,7 +124,7 @@ impl SourceConfig for PrometheusPushgatewayConfig {
             cx,
             self.acknowledgements,
             self.keepalive.clone(),
-            self.permit_origin.clone(),
+            permit_origin,
         )
     }
 

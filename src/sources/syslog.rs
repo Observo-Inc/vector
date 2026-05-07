@@ -196,6 +196,7 @@ impl SourceConfig for SyslogConfig {
                     .and_then(|tls| tls.client_metadata_key.clone())
                     .and_then(|k| k.path);
                 let tls = MaybeTlsSettings::from_config(tls_config.as_ref(), true)?;
+                let allowlist = cx.effective_permit_origin(permit_origin).map(Into::into);
                 source.run(
                     address,
                     keepalive,
@@ -207,7 +208,7 @@ impl SourceConfig for SyslogConfig {
                     cx,
                     false.into(),
                     connection_limit,
-                    permit_origin.map(Into::into),
+                    allowlist,
                     SyslogConfig::NAME,
                     log_namespace,
                 )

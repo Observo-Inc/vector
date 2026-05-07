@@ -184,7 +184,7 @@ impl SourceConfig for StatsdConfig {
                 let statsd_tcp_source = StatsdTcpSource {
                     sanitize: config.sanitize,
                 };
-
+                let allowlist = cx.effective_permit_origin(config.permit_origin.clone()).map(Into::into);
                 statsd_tcp_source.run(
                     config.address,
                     config.keepalive,
@@ -196,7 +196,7 @@ impl SourceConfig for StatsdConfig {
                     cx,
                     false.into(),
                     config.connection_limit,
-                    config.permit_origin.clone().map(Into::into),
+                    allowlist,
                     StatsdConfig::NAME,
                     LogNamespace::Legacy,
                 )
