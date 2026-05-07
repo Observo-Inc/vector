@@ -9,7 +9,7 @@ use lookup::lookup_v2::OptionalValuePath;
 use openssl::{
     pkcs12::{ParsedPkcs12_2, Pkcs12},
     pkey::{PKey, Private},
-    ssl::{select_next_proto, AlpnError, ConnectConfiguration, SslContextBuilder, SslVerifyMode},
+    ssl::{AlpnError, ConnectConfiguration, SslContextBuilder, SslVerifyMode},
     stack::Stack,
     x509::{store::X509StoreBuilder, X509},
 };
@@ -331,7 +331,32 @@ impl TlsSettings {
             if for_server {
                 let server_proto = alpn.clone();
                 context.set_alpn_select_callback(move |_, client_proto| {
-                    select_next_proto(server_proto.as_slice(), client_proto).ok_or(AlpnError::NOACK)
+                    // Walk the server's preference list and return the first
+                    // protocol that also appears in the client's list, returned
+                    // as a borrow of `client_proto` so the lifetime escapes the
+                    // closure as required by the callback signature.
+                    let mut server = server_proto.as_slice();
+                    while let Some((&len, rest)) = server.split_first() {
+                        let len = len as usize;
+                        if rest.len() < len {
+                            break;
+                        }
+                        let (sproto, after) = rest.split_at(len);
+                        let mut client = client_proto;
+                        while let Some((&clen, crest)) = client.split_first() {
+                            let clen = clen as usize;
+                            if crest.len() < clen {
+                                break;
+                            }
+                            let (cproto, cafter) = crest.split_at(clen);
+                            if cproto == sproto {
+                                return Ok(cproto);
+                            }
+                            client = cafter;
+                        }
+                        server = after;
+                    }
+                    Err(AlpnError::NOACK)
                 });
             } else {
                 context
