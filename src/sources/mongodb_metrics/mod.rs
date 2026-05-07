@@ -194,7 +194,7 @@ impl MongoDbMetrics {
         let doc = self
             .client
             .database("admin")
-            .run_command(doc! { "isMaster": 1 }, None)
+            .run_command(doc! { "isMaster": 1 })
             .await
             .map_err(CollectError::Mongo)?;
         let msg: CommandIsMaster = from_document(doc).map_err(CollectError::Bson)?;
@@ -215,7 +215,7 @@ impl MongoDbMetrics {
         let doc = self
             .client
             .database("admin")
-            .run_command(doc! { "buildInfo": 1 }, None)
+            .run_command(doc! { "buildInfo": 1 })
             .await
             .map_err(CollectError::Mongo)?;
         from_document(doc).map_err(CollectError::Bson)
@@ -281,7 +281,7 @@ impl MongoDbMetrics {
         let command = doc! { "serverStatus": 1, "opLatencies": { "histograms": true }};
         let db = self.client.database("admin");
         let doc = db
-            .run_command(command, None)
+            .run_command(command)
             .await
             .map_err(CollectError::Mongo)?;
         let byte_size = document_size(&doc);
