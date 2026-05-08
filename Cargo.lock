@@ -8790,15 +8790,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "quick-csv"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edf4b7701db7d2e4c9c010f21eebd8676a50f79223a0cf858162d24bff47338c"
-dependencies = [
- "rustc-serialize",
-]
-
-[[package]]
 name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9681,12 +9672,6 @@ name = "rustc-hash"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "357703d41365b4b27c590e3ed91eabb1b663f07c4c084095e60cbed4362dff0d"
-
-[[package]]
-name = "rustc-serialize"
-version = "0.3.25"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe834bc780604f4674073badbad26d7219cadfb4a2275802db12cbae17498401"
 
 [[package]]
 name = "rustc_version"
@@ -12954,7 +12939,6 @@ checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
 [[package]]
 name = "vrl"
 version = "0.21.0"
-source = "git+https://github.com/Observo-Inc/vrl.git?rev=31a47f93c86e5aec216debde3c93134ab3ca36be#31a47f93c86e5aec216debde3c93134ab3ca36be"
 dependencies = [
  "aes",
  "aes-siv",
@@ -13027,7 +13011,6 @@ dependencies = [
  "psl",
  "psl-types",
  "publicsuffix",
- "quick-csv",
  "quickcheck",
  "quoted_printable",
  "rand 0.8.6",
