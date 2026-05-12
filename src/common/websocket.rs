@@ -155,13 +155,15 @@ impl WebSocketConnector {
         }
     }
 
-    fn handle_connect_error(&self, error: WebSocketError) {
+    fn handle_connect_error(&self, error: WebSocketError, attempt: u32, elapsed_ms: u64) {
         if let Some(status) = self.is_retriable_http_error(&error) {
             // Retriable errors are logged at INFO to avoid unnecessary alarm.
             info!(
                 message = "WebSocket connection failed with retriable HTTP status, will retry with backoff.",
                 status_code = %status.as_u16(),
                 status = %status,
+                attempt,
+                elapsed_ms,
                 internal_log_rate_limit = true,
             );
         } else {
@@ -176,21 +178,33 @@ impl WebSocketConnector {
         timeout_per_attempt: Duration,
     ) -> WebSocketStream<MaybeTlsStream<TcpStream>> {
         let mut backoff = Self::fresh_backoff();
+        let start = std::time::Instant::now();
+        let mut attempt: u32 = 0;
         loop {
+            attempt += 1;
             // Apply timeout to individual connection attempts, not the entire loop.
             let result = time::timeout(timeout_per_attempt, self.connect()).await;
 
             match result {
                 Ok(Ok(ws_stream)) => {
+                    info!(
+                        message = "WebSocket connection established.",
+                        attempts = attempt,
+                        elapsed_ms = start.elapsed().as_millis() as u64,
+                    );
                     emit!(WebSocketConnectionEstablished {});
                     return ws_stream;
                 }
                 Ok(Err(error)) => {
-                    self.handle_connect_error(error);
+                    self.handle_connect_error(error, attempt, start.elapsed().as_millis() as u64);
                     time::sleep(backoff.next().unwrap()).await;
                 }
                 Err(_) => {
-                    self.handle_connect_error(Self::timeout_error());
+                    self.handle_connect_error(
+                        Self::timeout_error(),
+                        attempt,
+                        start.elapsed().as_millis() as u64,
+                    );
                     time::sleep(backoff.next().unwrap()).await;
                 }
             }
@@ -219,7 +233,11 @@ pub(crate) struct PingInterval {
 impl PingInterval {
     pub(crate) fn new(period: Option<u64>) -> Self {
         Self {
-            interval: period.map(|period| time::interval(Duration::from_secs(period))),
+            interval: period.map(|period| {
+                let mut interval = time::interval(Duration::from_secs(period));
+                interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+                interval
+            }),
         }
     }
 
