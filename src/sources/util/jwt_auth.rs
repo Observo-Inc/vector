@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::sync::{Arc, LazyLock};
 
@@ -39,9 +40,8 @@ pub enum AuthError {
 pub enum AuthEventError {
     /// The configured auth field was absent from the event or held a non-string value.
     ///
-    /// Equivalent to HTTP 401 — the event cannot prove its identity.
-    /// Maps to gRPC `Unauthenticated`.
-    Unauthenticated,
+    /// The request JWT itself was valid — only the per-event authorization field is missing.
+    AuthorizationMissing,
 
     /// The field value was present but is not listed in the token's membership claim.
     ///
@@ -54,7 +54,7 @@ impl AuthEventError {
     /// Short label used as a metric tag value for the `outcome` dimension.
     pub fn label(&self) -> &'static str {
         match self {
-            AuthEventError::Unauthenticated => "unauthenticated",
+            AuthEventError::AuthorizationMissing => "authorization_missing",
             AuthEventError::Forbidden => "forbidden",
         }
     }
@@ -175,8 +175,10 @@ pub struct CompiledValuePath {
     pub(crate) trace: CompiledPath,
 }
 
-impl CompiledValuePath {
-    pub fn from_config(vp: &AuthValuePath) -> Result<Self, vrl::path::PathParseError> {
+impl TryFrom<&AuthValuePath> for CompiledValuePath {
+    type Error = vrl::path::PathParseError;
+
+    fn try_from(vp: &AuthValuePath) -> Result<Self, Self::Error> {
         let log_str = vp.log.as_deref().unwrap_or(&vp.default);
         let metric_str = vp.metric_tag.as_deref().unwrap_or(&vp.default);
         let trace_str = vp.trace.as_deref().unwrap_or(&vp.default);
@@ -379,7 +381,7 @@ impl AuthConfig {
         let value_path = self
             .value_path
             .as_ref()
-            .map(CompiledValuePath::from_config)
+            .map(CompiledValuePath::try_from)
             .transpose()
             .map_err(|e| format!("Failed to parse auth value_path: {e}"))?;
 
@@ -473,37 +475,38 @@ impl<'a> EventValidator<'a> {
     /// * `Ok((field_name, field_value))` — the event is authorized. `field_name`
     ///   borrows the user-configured path string from the validator;
     ///   `field_value` is the value extracted from the event.
-    /// * `Err(AuthEventError::Unauthenticated)` — the configured field is absent or
+    /// * `Err(AuthEventError::AuthorizationMissing)` — the configured field is absent or
     ///   holds a non-string value; the event's identity cannot be determined.
     /// * `Err(AuthEventError::Forbidden)` — the field value is present but not listed
     ///   in the token's membership claim.
-    pub fn check(&self, event: &Event) -> Result<(&'a str, String), AuthEventError> {
+    pub fn check<'e>(
+        &self,
+        event: &'e Event,
+    ) -> Result<(&'a str, Cow<'e, str>), AuthEventError> {
         let (field_name, field_value) = self.read_field(event);
         match field_value {
-            None => Err(AuthEventError::Unauthenticated),
-            Some(value) if !self.context.is_authorized(&value) => Err(AuthEventError::Forbidden),
-            Some(value) => Ok((field_name, value)),
+            Some(value) if self.context.is_authorized(&value) => Ok((field_name, value)),
+            Some(_) => Err(AuthEventError::Forbidden),
+            None => Err(AuthEventError::AuthorizationMissing),
         }
     }
 
-    fn read_field(&self, event: &Event) -> (&'a str, Option<String>) {
+    fn read_field<'e>(&self, event: &'e Event) -> (&'a str, Option<Cow<'e, str>>) {
         match event {
             Event::Log(log) => {
-                let value = log
-                    .get(&self.value_path.log.path)
-                    .and_then(|v| v.as_str())
-                    .map(|cow| cow.into_owned());
+                let value = log.get(&self.value_path.log.path).and_then(|v| v.as_str());
                 (self.value_path.log.name.as_str(), value)
             }
             Event::Metric(metric) => {
-                let value = metric.tag_value(&self.value_path.metric_tag);
+                let value = metric
+                    .tag_value(&self.value_path.metric_tag)
+                    .map(Cow::Owned);
                 (self.value_path.metric_tag.as_str(), value)
             }
             Event::Trace(trace) => {
                 let value = trace
                     .get(&self.value_path.trace.path)
-                    .and_then(|v| v.as_str())
-                    .map(|cow| cow.into_owned());
+                    .and_then(|v| v.as_str());
                 (self.value_path.trace.name.as_str(), value)
             }
         }

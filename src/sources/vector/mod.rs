@@ -61,7 +61,7 @@ struct Service {
 struct AuthMetrics {
     batch_failed: Counter,
     authorized: Histogram,
-    unauthenticated: Histogram,
+    authorization_missing: Histogram,
     forbidden: Histogram,
 }
 
@@ -70,9 +70,9 @@ impl AuthMetrics {
         Self {
             batch_failed: counter!("vector_source_auth_batch_failed_total"),
             authorized: histogram!("vector_source_auth_events", "outcome" => "authorized"),
-            unauthenticated: histogram!(
+            authorization_missing: histogram!(
                 "vector_source_auth_events",
-                "outcome" => AuthEventError::Unauthenticated.label(),
+                "outcome" => AuthEventError::AuthorizationMissing.label(),
             ),
             forbidden: histogram!(
                 "vector_source_auth_events",
@@ -89,7 +89,7 @@ impl AuthMetrics {
             self.authorized.record(stats.authorized as f64);
         }
         if stats.missing_value > 0 {
-            self.unauthenticated.record(stats.missing_value as f64);
+            self.authorization_missing.record(stats.missing_value as f64);
         }
         if stats.not_allowed > 0 {
             self.forbidden.record(stats.not_allowed as f64);
@@ -160,16 +160,16 @@ impl proto::Service for Service {
                     let mut event = Event::from(proto_event);
                     match validator.check(&event) {
                         Ok((name, value)) => {
+                            let value = value.into_owned();
                             add_auth_metadata(&mut event, name, &value);
-                            auth_stats.authorized += 1;
                             Some(event)
                         }
-                        Err(AuthEventError::Unauthenticated) => {
+                        Err(AuthEventError::AuthorizationMissing) => {
                             auth_stats.missing_value += 1;
                             error!(
-                                message = "Unauthenticated event dropped",
+                                message = "Event dropped: authorization field missing",
                                 event = ?event,
-                                outcome = AuthEventError::Unauthenticated.label(),
+                                outcome = AuthEventError::AuthorizationMissing.label(),
                                 internal_log_rate_limit = true
                             );
                             None
@@ -188,13 +188,12 @@ impl proto::Service for Service {
                 })
                 .collect()
         } else {
-            let events: Vec<Event> = proto_events.into_iter().map(Event::from).collect();
-            if auth_ctx.is_some() {
-                // Auth configured but no value_path → request-level validation only.
-                auth_stats.authorized = events.len() as u64;
-            }
-            events
+            proto_events.into_iter().map(Event::from).collect()
         };
+
+        if auth_ctx.is_some() {
+            auth_stats.authorized = events.len() as u64;
+        }
 
         // Emit auth outcome metrics when auth is configured.
         if let (Some(metrics), true) = (&self.auth_metrics, auth_ctx.is_some()) {
@@ -203,7 +202,7 @@ impl proto::Service for Service {
                 warn!(
                     message = "Batch contained events rejected due to auth failures.",
                     accepted = auth_stats.authorized,
-                    unauthenticated = auth_stats.missing_value,
+                    authorization_missing = auth_stats.missing_value,
                     forbidden = auth_stats.not_allowed,
                     internal_log_rate_limit = true
                 );
@@ -241,7 +240,7 @@ impl proto::Service for Service {
 
         if auth_stats.any_failed() {
             return Err(Status::permission_denied(format!(
-                "partial auth failure: accepted={} unauthenticated={} forbidden={}",
+                "partial auth failure: accepted={} authorization_missing={} forbidden={}",
                 auth_stats.authorized, auth_stats.missing_value, auth_stats.not_allowed
             )));
         }
@@ -479,7 +478,7 @@ mod auth_unit_tests {
     }
 
     fn compile(vp: AuthValuePath) -> CompiledValuePath {
-        CompiledValuePath::from_config(&vp).expect("test value_path should compile")
+        CompiledValuePath::try_from(&vp).expect("test value_path should compile")
     }
 
     fn make_value_path(default: &str) -> CompiledValuePath {
@@ -503,16 +502,16 @@ mod auth_unit_tests {
             .into_iter()
             .filter_map(|mut event| match validator.check(&event) {
                 Ok((name, value)) => {
+                    let value = value.into_owned();
                     add_auth_metadata(&mut event, name, &value);
-                    stats.authorized += 1;
                     Some(event)
                 }
-                Err(AuthEventError::Unauthenticated) => {
+                Err(AuthEventError::AuthorizationMissing) => {
                     stats.missing_value += 1;
                     warn!(
-                        message = "Unauthenticated event dropped",
+                        message = "Event dropped: authorization field missing",
                         event = ?event,
-                        outcome = AuthEventError::Unauthenticated.label(),
+                        outcome = AuthEventError::AuthorizationMissing.label(),
                         internal_log_rate_limit = true
                     );
                     None
@@ -529,6 +528,7 @@ mod auth_unit_tests {
                 }
             })
             .collect();
+        stats.authorized = out.len() as u64;
         (out, stats)
     }
 
@@ -565,7 +565,7 @@ mod auth_unit_tests {
 
         let (out, stats) = filter_events_by_auth(events, &validator);
 
-        assert_eq!(stats.missing_value, 1); // Unauthenticated → missing_value counter
+        assert_eq!(stats.missing_value, 1); // AuthorizationMissing → missing_value counter
         assert_eq!(out.len(), 0);
     }
 
@@ -677,18 +677,19 @@ mod auth_unit_tests {
         log.insert("tenant_id", "site-123");
         let event = Event::Log(log);
 
-        let result = validator.check(&event);
-        assert_eq!(result, Ok(("tenant_id", "site-123".to_string())));
+        let (name, value) = validator.check(&event).expect("event should authorize");
+        assert_eq!(name, "tenant_id");
+        assert_eq!(value, "site-123");
     }
 
     #[test]
-    fn validator_check_returns_unauthenticated_for_missing_field() {
+    fn validator_check_returns_authorization_missing_for_missing_field() {
         let ctx = make_auth_ctx(&["site-123"]);
         let vp = make_value_path("tenant_id");
         let validator = make_validator(&ctx, &vp);
 
         let event = Event::Log(LogEvent::default());
-        assert_eq!(validator.check(&event), Err(AuthEventError::Unauthenticated));
+        assert_eq!(validator.check(&event), Err(AuthEventError::AuthorizationMissing));
     }
 
     #[test]
@@ -938,7 +939,7 @@ type  = "inline"
 value = "{token}""#
             );
             // random_lines_with_stream creates log events without a `tenant_id` field;
-            // every event fails the Unauthenticated check.
+            // every event fails the AuthorizationMissing check.
             assert_eq!(
                 run_auth_pair(&source_auth, &sink_auth).await,
                 BatchStatus::Rejected
