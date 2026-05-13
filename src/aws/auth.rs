@@ -102,9 +102,9 @@ pub enum AwsAuthentication {
         /// The optional custom endpoint URL for STS `AssumeRole` calls.
         ///
         /// When set, overrides the default STS endpoint (e.g. `sts.amazonaws.com`).
-        /// Useful for GovCloud, private-link setups, or pointing at a mock STS in tests.
+        /// Useful for GovCloud or private-link deployments.
         /// When unset, the AWS SDK default is used — no behaviour change for existing configs.
-        #[configurable(metadata(docs::examples = "http://localhost:4566"))]
+        #[configurable(metadata(docs::examples = "https://sts.us-gov-west-1.amazonaws.com"))]
         sts_endpoint: Option<String>,
     },
 
@@ -164,9 +164,9 @@ pub enum AwsAuthentication {
         /// The optional custom endpoint URL for STS `AssumeRole` calls.
         ///
         /// When set, overrides the default STS endpoint (e.g. `sts.amazonaws.com`).
-        /// Useful for GovCloud, private-link setups, or pointing at a mock STS in tests.
+        /// Useful for GovCloud or private-link deployments.
         /// When unset, the AWS SDK default is used — no behaviour change for existing configs.
-        #[configurable(metadata(docs::examples = "http://localhost:4566"))]
+        #[configurable(metadata(docs::examples = "https://sts.us-gov-west-1.amazonaws.com"))]
         sts_endpoint: Option<String>,
     },
 
@@ -239,9 +239,7 @@ impl AwsAuthentication {
             .http_client(connector)
             .region(region.clone())
             .time_source(SystemTimeSource::new());
-        if let Some(endpoint) = sts_endpoint {
-            config_builder = config_builder.endpoint_url(endpoint);
-        }
+        config_builder.set_endpoint_url(sts_endpoint.map(str::to_owned));
         let config = config_builder.build();
 
         let mut builder = AssumeRoleProviderBuilder::new(assume_role)
