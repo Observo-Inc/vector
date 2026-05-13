@@ -20,13 +20,33 @@ use crate::{
     proto::vector as proto,
     sinks::{
         util::{
-            retries::RetryLogic, BatchConfig, RealtimeEventBasedDefaultBatchSettings,
-            ServiceBuilderExt, TowerRequestConfig,
+            retries::RetryLogic, AuthTokenConfig, BatchConfig,
+            RealtimeEventBasedDefaultBatchSettings, ServiceBuilderExt, TowerRequestConfig,
         },
         Healthcheck, VectorSink as VectorSinkType,
     },
     tls::{MaybeTlsSettings, TlsEnableableConfig},
 };
+
+/// Authentication configuration for the `vector` sink.
+///
+/// When present, each outgoing request includes an `authorization: Bearer <token>` header.
+///
+/// ## Example
+///
+/// ```toml
+/// [sinks.my_sink.auth]
+/// token.type  = "file"
+/// token.path  = "/var/run/secrets/vector/token"
+/// ```
+#[configurable_component]
+#[derive(Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct VectorSinkAuthConfig {
+    /// Source of the bearer token attached to every request.
+    pub token: AuthTokenConfig,
+}
+
 
 /// Configuration for the `vector` sink.
 #[configurable_component(sink("vector", "Relay observability data to a Vector instance."))]
@@ -77,6 +97,12 @@ pub struct VectorConfig {
         skip_serializing_if = "crate::serde::is_default"
     )]
     pub(in crate::sinks::vector) acknowledgements: AcknowledgementsConfig,
+
+    /// JWT authentication settings.
+    ///
+    /// When configured, each request carries a bearer token and site ID in its gRPC metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<VectorSinkAuthConfig>,
 }
 
 impl VectorConfig {
@@ -102,6 +128,7 @@ fn default_config(address: &str) -> VectorConfig {
         request: TowerRequestConfig::default(),
         tls: None,
         acknowledgements: Default::default(),
+        auth: None,
     }
 }
 
@@ -120,9 +147,10 @@ impl SinkConfig for VectorConfig {
             .clone()
             .map(|uri| uri.uri)
             .unwrap_or_else(|| uri.clone());
-        let healthcheck_client = VectorService::new(client.clone(), healthcheck_uri, false);
+        let healthcheck_client =
+            VectorService::new(client.clone(), healthcheck_uri, false, self.auth.clone())?;
         let healthcheck = healthcheck(healthcheck_client, cx.healthcheck);
-        let service = VectorService::new(client, uri, self.compression);
+        let service = VectorService::new(client, uri, self.compression, self.auth.clone())?;
         let request_settings = self.request.into_settings();
         let batch_settings = self.batch.into_batcher_settings()?;
 
@@ -159,8 +187,19 @@ async fn healthcheck(
         return Ok(());
     }
 
-    let request = service.client.health_check(proto::HealthCheckRequest {});
-    match request.await {
+    // Build the request manually so we can attach the same authorization
+    // header that `Service::call` attaches to `push_events`. Without this,
+    // a source configured with `require_token = true` would refuse this
+    // healthcheck even though the sink has valid credentials.
+    let mut request = tonic::Request::new(proto::HealthCheckRequest {});
+    if let Some(auth) = service.auth() {
+        let bearer = auth.bearer_token().map_err(|message| {
+            Box::new(VectorSinkError::AuthTokenUnavailable { message })
+        })?;
+        request.metadata_mut().insert("authorization", bearer);
+    }
+
+    match service.client.health_check(request).await {
         Ok(response) => match proto::ServingStatus::try_from(response.into_inner().status) {
             Ok(proto::ServingStatus::Serving) => Ok(()),
             Ok(status) => Err(Box::new(VectorSinkError::Health {
@@ -216,7 +255,7 @@ fn new_client(
 }
 
 #[derive(Debug, Clone)]
-struct VectorGrpcRetryLogic;
+pub(super) struct VectorGrpcRetryLogic;
 
 impl RetryLogic for VectorGrpcRetryLogic {
     type Error = VectorSinkError;
@@ -240,6 +279,9 @@ impl RetryLogic for VectorGrpcRetryLogic {
                     | Unauthenticated
                     | DataLoss
             ),
+            // A missing or unreadable token file is a local configuration error;
+            // retrying will not fix it and would block the batch indefinitely.
+            VectorSinkError::AuthTokenUnavailable { .. } => false,
             _ => true,
         }
     }

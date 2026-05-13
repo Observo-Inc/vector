@@ -28,6 +28,9 @@ pub mod metrics;
 #[cfg(test)]
 pub mod mock;
 
+#[cfg(all(test, feature = "sources-vector"))]
+pub mod jwt_auth;
+
 pub mod stats;
 
 pub use vector_lib::test_util::*;
