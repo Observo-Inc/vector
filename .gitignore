@@ -26,3 +26,4 @@ tilt_modules/
 
 # VSCode
 .vscode/
+.claude/worktrees/
