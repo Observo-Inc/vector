@@ -1,4 +1,4 @@
-FROM registry.access.redhat.com/ubi9/ubi:9.7-1764794285 AS builder
+FROM artifactory.eng.sentinelone.tech/docker-release/common/ubuntu-base/ubuntu:2.0.75 AS builder
 
 WORKDIR /vector
 
@@ -7,21 +7,25 @@ RUN tar -xvf vector-*-$(uname -m)-unknown-linux-*.tar.gz --strip-components=2
 
 RUN mkdir -p /var/lib/vector
 
-FROM registry.access.redhat.com/ubi9/ubi:latest
+FROM artifactory.eng.sentinelone.tech/docker-release/common/ubuntu-base/ubuntu:2.0.75
 
 # Install dependencies for Vector and FIPS
-RUN dnf install -y \
+# hadolint ignore=DL3008
+RUN apt-get update && apt-get install -y --no-install-recommends \
       openssl \
-      openssl-devel \
+      libssl-dev \
       ca-certificates \
       tzdata \
       systemd \
-      && dnf clean all
+      && apt-get clean \
+      && rm -rf /var/lib/apt/lists/*
 
 # Set environment for Rust to use system OpenSSL
 ENV OPENSSL_FIPS=1
 ENV OPENSSL_DIR=/usr
 ENV OPENSSL_STATIC=0
+ENV OPENSSL_CONF=/etc/ssl/openssl.cnf.fips
+ENV OPENSSL_MODULES=/usr/lib/x86_64-linux-gnu/ossl-modules
 
 # Copy from builder stage
 COPY --from=builder /vector/bin/* /usr/bin/
