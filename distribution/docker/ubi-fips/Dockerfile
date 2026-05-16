@@ -12,7 +12,6 @@ FROM artifactory.eng.sentinelone.tech/docker-release/common/ubuntu-base/ubuntu:2
 # Install dependencies for Vector and FIPS
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      openssl \
       libssl-dev \
       ca-certificates \
       tzdata \
@@ -21,11 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       && rm -rf /var/lib/apt/lists/*
 
 # Set environment for Rust to use system OpenSSL
-ENV OPENSSL_FIPS=1
-ENV OPENSSL_DIR=/usr
-ENV OPENSSL_STATIC=0
 ENV OPENSSL_CONF=/etc/ssl/openssl.cnf.fips
-ENV OPENSSL_MODULES=/usr/lib/x86_64-linux-gnu/ossl-modules
+RUN echo "export OPENSSL_MODULES=/usr/lib/$(uname -m)-linux-gnu/ossl-modules" > /etc/profile.d/openssl-fips.sh
 
 # Copy from builder stage
 COPY --from=builder /vector/bin/* /usr/bin/
@@ -37,4 +33,4 @@ RUN ["vector", "--version"]
 
 USER root
 
-ENTRYPOINT ["/usr/bin/vector"]
+ENTRYPOINT ["/bin/bash", "-c", ". /etc/profile.d/openssl-fips.sh && exec /usr/bin/vector"]

@@ -24,5 +24,10 @@ apt-get update
 apt-get install -y \
       libclang1-9 \
       llvm-9 \
-      unzip \
-      libssl-dev
+      unzip
+
+# Xenial ships OpenSSL 1.0.2g; openssl-sys requires >= 1.1.0.
+# Pull libssl-dev 1.1.x from Ubuntu 18.04 Bionic security repo.
+echo "deb http://security.ubuntu.com/ubuntu bionic-security main" > /etc/apt/sources.list.d/bionic-security.list
+apt-get update
+apt-get install -y libssl1.1 libssl-dev
