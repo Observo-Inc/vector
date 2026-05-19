@@ -40,6 +40,7 @@ serde_json.workspace = true
 httparse = "1"
 mime = "0.3"
 memchr = "2"
+ipnet = { version = "2", default-features = false, features = ["serde", "std"] }
 metrics.workspace = true
 socket2 = "0.5"
 chrono.workspace = true
