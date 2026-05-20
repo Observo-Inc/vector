@@ -857,28 +857,40 @@ mod tests {
     ) where
         <T as DataType>::T: Default,
     {
-        let mut values = Vec::new();
-        values.resize(count, <T as DataType>::T::default());
-        let mut def_levels = Vec::new();
-        def_levels.resize(count, 0);
-        let mut rep_levels = Vec::new();
-        rep_levels.resize(count, 0);
-        let (read, level) = column_reader
-            .read_batch(
+        let mut values: Vec<<T as DataType>::T> = Vec::with_capacity(count);
+        let mut def_levels: Vec<i16> = Vec::with_capacity(count);
+        let mut rep_levels: Vec<i16> = Vec::with_capacity(count);
+        let (_records_read, _values_read, levels_read) = column_reader
+            .read_records(
                 count,
-                Some(def_levels.as_mut_slice()).filter(|_| expect_def_levels.is_some()),
-                Some(rep_levels.as_mut_slice()).filter(|_| expect_rep_levels.is_some()),
+                if expect_def_levels.is_some() {
+                    Some(&mut def_levels)
+                } else {
+                    None
+                },
+                if expect_rep_levels.is_some() {
+                    Some(&mut rep_levels)
+                } else {
+                    None
+                },
                 &mut values,
             )
             .unwrap();
 
-        assert_eq!(level, count);
-        assert_eq!(&values[..read], expect_values);
-        if expect_rep_levels.is_some() {
-            assert_eq!(rep_levels, expect_rep_levels.unwrap());
+        assert_eq!(levels_read, count);
+        assert_eq!(values.as_slice(), expect_values);
+        if let Some(expected) = expect_rep_levels {
+            // In parquet 55, columns with max_rep_level = 0 leave the rep_levels
+            // buffer empty rather than writing zeros. Treat empty as all zeros
+            // to keep tests independent of buffer-fill behavior.
+            if rep_levels.is_empty() && expected.iter().all(|&l| l == 0) {
+                // ok
+            } else {
+                assert_eq!(rep_levels, expected);
+            }
         }
-        if expect_def_levels.is_some() {
-            assert_eq!(def_levels, expect_def_levels.unwrap());
+        if let Some(expected) = expect_def_levels {
+            assert_eq!(def_levels, expected);
         }
     }
 

@@ -25,7 +25,7 @@ netflow_parser = { version = "=0.5.2", features = ["parse_unknown_fields"]}
 memchr = { version = "2", default-features = false }
 metrics.workspace = true
 ordered-float = { version = "4.5.0", default-features = false }
-parquet = {version = "39.0.0", default-feature = false}
+parquet = { version = "55.2.0", default-features = false, features = ["arrow", "snap", "brotli", "flate2", "lz4", "zstd"] }
 prost.workspace = true
 prost-reflect.workspace = true
 rand.workspace = true
