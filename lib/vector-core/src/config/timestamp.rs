@@ -489,7 +489,7 @@ mod tests {
                 name: "error - completely invalid input",
                 input: "not-a-timestamp",
                 format: "rfc3339",
-                expected: err("%Y-%m-%dT%H:%M:%S%.fZ", "not-a-timestamp"),
+                expected: Err(DateTime::parse_from_rfc3339("not-a-timestamp").unwrap_err()),
             },
             TestCase {
                 name: "fallback to rfc3339",
