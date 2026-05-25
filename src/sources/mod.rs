@@ -96,6 +96,8 @@ pub mod syslog;
 pub mod vector;
 #[cfg(all(feature = "sources-wef"))]
 pub mod wef;
+#[cfg(all(feature = "sources-eventhub"))]
+pub mod eventhub;
 #[cfg(feature = "sources-websocket")]
 pub mod websocket;
 

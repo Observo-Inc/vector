@@ -1,0 +1,43 @@
+[package]
+name = "eventhub"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# Azure SDK (latest generation — requires Rust 1.85+)
+azure_messaging_eventhubs = "0.12"
+azure_messaging_eventhubs_checkpointstore_blob = "0.6"
+azure_core = "0.33"
+azure_identity = "0.33"
+azure_storage_blob = "0.10"
+
+# Time (used by EventProcessor builder)
+time = "0.3"
+
+# Async runtime
+tokio.workspace = true
+futures.workspace = true
+
+# Utilities
+anyhow.workspace = true
+serde.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+smallvec.workspace = true
+toml.workspace = true
+
+# Vector libraries
+vector-lib.workspace = true
+vector-config.workspace = true
+vector-config-macros.workspace = true
+vector-config-common.workspace = true
+vector-core = { path = "../../vector-core" }
+lookup = { package = "vector-lookup", path = "../../vector-lookup" }
+inventory.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[features]
+default = []
