@@ -21,7 +21,6 @@ futures.workspace = true
 
 # Utilities
 anyhow.workspace = true
-snafu = "0.8"
 serde.workspace = true
 chrono.workspace = true
 tracing.workspace = true

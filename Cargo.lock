@@ -4025,7 +4025,6 @@ dependencies = [
  "inventory",
  "serde",
  "smallvec",
- "snafu 0.8.0",
  "time",
  "tokio",
  "toml",
