@@ -386,7 +386,7 @@ pub struct AuthConfig {
     /// Source of the RSA public key used to verify auth token signatures.
     ///
     /// Required — deserialization fails if no variant key is present.
-    #[serde(flatten)]
+    #[serde(flatten, deserialize_with = "deserialize_authority_required")]
     pub authority: Authority,
 
     /// JWT signing algorithms accepted for token verification.
@@ -444,6 +444,30 @@ fn default_require_token() -> bool {
 
 fn default_membership_claim() -> String {
     "site_ids".to_string()
+}
+
+/// Replace serde's flattened-enum error with an actionable message naming the
+/// expected variant keys. Other errors (typos in inner fields, bad `type`
+/// values) are passed through with an `auth.authority` prefix so the failing
+/// config path is unambiguous.
+fn deserialize_authority_required<'de, D>(d: D) -> Result<Authority, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    use serde::Deserialize;
+
+    Authority::deserialize(d).map_err(|original| {
+        let msg = original.to_string();
+        if msg.contains("no variant of enum") {
+            D::Error::custom(
+                "auth: must set one of `public_key` or `tls_cert` \
+                 (e.g. `public_key.type = \"file\"`, `public_key.path = \"/path/to/key.pem\"`)",
+            )
+        } else {
+            D::Error::custom(format!("auth.authority: {msg}"))
+        }
+    })
 }
 
 impl AuthConfig {
@@ -1326,6 +1350,82 @@ pubic_key.value  = "pem"
 membership_claim = "tenants"
 "#;
         assert!(toml::from_str::<AuthConfig>(toml).is_err());
+    }
+
+    // ── deserialize_authority_required error messages ───────────────────────
+    //
+    // These tests pin the contract of `deserialize_authority_required`:
+    // 1. Missing/unrecognized variant key → friendly message naming the
+    //    expected keys.
+    // 2. Any other deserialization error → original detail preserved with
+    //    an `auth.authority:` prefix so the failing field path is unambiguous.
+
+    #[test]
+    fn auth_config_missing_authority_variant_gives_friendly_error() {
+        // No `public_key` or `tls_cert` at all — replaces serde's opaque
+        // "no variant of enum Authority found in flattened data".
+        let toml = r#"membership_claim = "site_ids""#;
+        let err = toml::from_str::<AuthConfig>(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("must set one of `public_key` or `tls_cert`"),
+            "expected friendly message, got: {err}",
+        );
+    }
+
+    #[test]
+    fn auth_config_typo_in_variant_name_gives_friendly_error() {
+        // Typo'd variant key (`pubic_key`) is indistinguishable from
+        // "no variant set" at the flatten layer, so the friendly fallback
+        // fires here too.
+        let toml = r#"
+pubic_key.type  = "inline"
+pubic_key.value = "pem"
+"#;
+        let err = toml::from_str::<AuthConfig>(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("must set one of `public_key` or `tls_cert`"),
+            "expected friendly message, got: {err}",
+        );
+    }
+
+    #[test]
+    fn auth_config_bad_type_value_gets_authority_prefix() {
+        // Variant key is correct; the inner `type` discriminator is
+        // unknown. The original serde "unknown variant" message must
+        // survive — only prefixed with the field path.
+        let toml = r#"
+public_key.type  = "env"
+public_key.value = "pem"
+"#;
+        let err = toml::from_str::<AuthConfig>(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("auth.authority:"),
+            "expected `auth.authority:` prefix, got: {err}",
+        );
+        assert!(
+            err.contains("env"),
+            "expected the bad variant name in the message, got: {err}",
+        );
+    }
+
+    #[test]
+    fn auth_config_inner_field_typo_gets_authority_prefix() {
+        // Variant resolves, but `deny_unknown_fields` on AuthPublicKey
+        // rejects the misspelled `paht`. Want the `auth.authority:` prefix
+        // in front of serde's "unknown field" detail.
+        let toml = r#"
+public_key.type = "file"
+public_key.paht = "/etc/key.pem"
+"#;
+        let err = toml::from_str::<AuthConfig>(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("auth.authority:"),
+            "expected `auth.authority:` prefix, got: {err}",
+        );
+        assert!(
+            err.contains("paht"),
+            "expected the typo'd field name in the message, got: {err}",
+        );
     }
 
     #[test]
