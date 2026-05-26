@@ -351,14 +351,9 @@ impl Authority {
 /// with no network calls. When the `authorization` header is absent,
 /// [`Auth::authenticate`] returns `Ok(None)` and the request is accepted
 /// without per-event filtering.
-///
-/// Note: `deny_unknown_fields` is intentionally omitted here because serde
-/// can't combine it with `#[serde(flatten)]`. Strict-unknown-field checking
-/// still applies inside the `public_key` / `tls_cert` blocks via the enums
-/// they wrap; only typos in sibling top-level keys (e.g. `issuer`,
-/// `membership_claim`) will be silently ignored.
 #[configurable_component]
 #[derive(Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct AuthConfig {
     /// Source of the RSA public key used to verify auth token signatures.
     ///
@@ -1273,28 +1268,21 @@ tls_cert.path = "/etc/pki/tls/certs/auth.crt"
     }
 
     #[test]
-    fn auth_config_typo_in_sibling_field_is_silently_dropped() {
-        // Trade-off fence-post: with `#[serde(flatten)]`, AuthConfig cannot
-        // carry `deny_unknown_fields`. Serde forwards unknown sibling keys
-        // to Authority's deserializer; once Authority picks its variant
-        // (`public_key` here), any leftover keys are discarded rather than
-        // rejected — Authority's own `deny_unknown_fields` only applies
-        // inside the chosen variant, not at the enum-discriminator level.
-        //
-        // Net effect: a typo like `mempership_claim` parses cleanly and the
-        // configured value is silently lost. This test pins that behavior so
-        // a future serde / configurable_component change that starts catching
-        // these typos won't silently break the contract documented on
-        // `AuthConfig`.
+    fn auth_config_typo_in_sibling_field_is_rejected() {
+        // `#[serde(deny_unknown_fields)]` on AuthConfig catches misspellings
+        // of any sibling top-level key (here `mempership_claim` →
+        // `membership_claim`) at parse time, so the configured value is
+        // never silently lost.
         let toml = r#"
 public_key.type  = "inline"
 public_key.value = "pem"
 mempership_claim = "tenants"
 "#;
-        let cfg = toml::from_str::<AuthConfig>(toml)
-            .expect("sibling-field typo currently slips past flatten");
-        // The typo'd key is dropped; the real field keeps its default.
-        assert_eq!(cfg.membership_claim, default_membership_claim());
+        let err = toml::from_str::<AuthConfig>(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("unknown field `mempership_claim`"),
+            "expected `unknown field` error for the typo, got: {err}",
+        );
     }
 
     #[test]
