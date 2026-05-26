@@ -175,7 +175,7 @@ prost-build = { version = "0.12", default-features = false }
 prost-reflect = { version = "0.14", features = ["serde"], default-features = false }
 prost-types = { version = "0.12", default-features = false }
 rand = { version = "0.8.5", default-features = false, features = ["small_rng"] }
-serde_json = { version = "=1.0.133", default-features = false, features = ["raw_value", "std"] }
+serde_json = { version = "=1.0.140", default-features = false, features = ["raw_value", "std"] }
 serde = { version = "1.0.215", default-features = false, features = ["alloc", "derive", "rc"] }
 serde_with = { version = "3.12.0", default-features = false, features = ["macros", "std"] }
 snafu = { version = "0.7.5", default-features = false, features = ["futures", "std"] }
@@ -410,7 +410,7 @@ postgres-openssl = { version = "0.5.0", default-features = false, features = ["r
 pulsar = { version = "6.3.0", default-features = false, features = ["tokio-runtime", "auth-oauth2", "flate2", "lz4", "snap", "zstd"], optional = true }
 rand.workspace = true
 rand_distr.workspace = true
-rdkafka = { version = "0.37.0", default-features = false, features = ["curl-static", "tokio", "libz-static", "ssl", "zstd"], optional = true }
+rdkafka = { version = "0.39.0", default-features = false, features = ["curl-static", "tokio", "libz-static", "ssl", "zstd"], optional = true }
 redis = { version = "0.24.0", default-features = false, features = ["connection-manager", "tokio-comp", "tokio-native-tls-comp"], optional = true }
 regex.workspace = true
 roaring = { version = "0.10.7", default-features = false, features = ["std"], optional = true }
