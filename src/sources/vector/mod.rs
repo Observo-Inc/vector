@@ -459,7 +459,7 @@ mod test {
 
 #[cfg(all(test, feature = "sources-vector"))]
 mod auth_unit_tests {
-    use vector_lib::event::{LogEvent, Metric, MetricKind, MetricValue};
+    use vector_lib::event::{LogEvent, Metric, MetricKind, MetricValue, TraceEvent};
 
     use super::*;
     use crate::sources::util::{AuthContext, AuthValuePath, CompiledValuePath};
@@ -644,6 +644,74 @@ mod auth_unit_tests {
     }
 
     #[test]
+    fn metric_event_missing_tag_is_filtered() {
+        // The `AuthorizationMissing` branch for metrics: the configured tag
+        // key isn't present, so the event must be dropped and counted
+        // against `missing_value`.
+        let ctx = make_auth_ctx(&["site-123"]);
+        let vp = compile(AuthValuePath {
+            default: "tenant_id".into(),
+            log: None,
+            metric_tag: Some("tenant".into()),
+            trace: None,
+        });
+        let validator = make_validator(&ctx, &vp);
+
+        let metric = Metric::new(
+            "test_metric",
+            MetricKind::Incremental,
+            MetricValue::Counter { value: 1.0 },
+        );
+        // No `tenant` tag set.
+
+        let events = vec![Event::Metric(metric)];
+        let (out, stats) = filter_events_by_auth(events, &validator);
+
+        assert_eq!(stats.missing_value, 1);
+        assert_eq!(stats.authorized, 0);
+        assert_eq!(out.len(), 0);
+    }
+
+    #[test]
+    fn trace_event_authorized_via_default_path() {
+        // Exercises both `EventValidator::check`'s `Event::Trace` arm and
+        // `add_auth_metadata`'s trace branch — neither is covered by the
+        // log/metric tests.
+        let ctx = make_auth_ctx(&["site-123"]);
+        let vp = make_value_path("tenant_id");
+        let validator = make_validator(&ctx, &vp);
+
+        let mut trace = TraceEvent::default();
+        trace.insert("tenant_id", "site-123");
+        let events = vec![Event::Trace(trace)];
+
+        let (out, stats) = filter_events_by_auth(events, &validator);
+
+        assert_eq!(stats.authorized, 1);
+        assert_eq!(out.len(), 1);
+
+        let t = out[0].as_trace();
+        assert_eq!(t.get("auth_field_name").and_then(|v| v.as_str()).as_deref(), Some("tenant_id"));
+        assert_eq!(t.get("auth_field_value").and_then(|v| v.as_str()).as_deref(), Some("site-123"));
+    }
+
+    #[test]
+    fn trace_event_missing_field_is_filtered() {
+        // `AuthorizationMissing` branch for traces.
+        let ctx = make_auth_ctx(&["site-123"]);
+        let vp = make_value_path("tenant_id");
+        let validator = make_validator(&ctx, &vp);
+
+        let trace = TraceEvent::default(); // no tenant_id field
+        let events = vec![Event::Trace(trace)];
+
+        let (out, stats) = filter_events_by_auth(events, &validator);
+
+        assert_eq!(stats.missing_value, 1);
+        assert_eq!(out.len(), 0);
+    }
+
+    #[test]
     fn type_specific_log_override_is_used() {
         let ctx = make_auth_ctx(&["site-123"]);
         let vp = compile(AuthValuePath {
@@ -823,7 +891,7 @@ mod tests {
         use vector_lib::event::{BatchNotifier, BatchStatus};
 
         use super::*;
-        use crate::test_util::jwt_auth::{make_token, TEST_PUBLIC_KEY};
+        use crate::test_util::jwt_auth::{make_token, TEST_CERT, TEST_PUBLIC_KEY};
 
         /// Run a source+sink pair and return the final `BatchStatus`.
         async fn run_auth_pair(source_auth_toml: &str, sink_auth_toml: &str) -> BatchStatus {
@@ -862,6 +930,31 @@ public_key.type  = "inline"
 public_key.value = "{}"
 membership_claim = "site_ids""#,
                 TEST_PUBLIC_KEY.replace('\n', "\\n")
+            );
+            let sink_auth = format!(
+                r#"[auth]
+[auth.token]
+type  = "inline"
+value = "{token}""#
+            );
+            assert_eq!(
+                run_auth_pair(&source_auth, &sink_auth).await,
+                BatchStatus::Delivered
+            );
+        }
+
+        #[tokio::test]
+        async fn valid_token_delivers_with_tls_cert_authority() {
+            // End-to-end exercise of the tls_cert variant at the source/sink
+            // boundary: the inline X.509 cert in the source config must yield a
+            // verifier that accepts a token signed by the matching test key.
+            let token = make_token(HashMap::new());
+            let source_auth = format!(
+                r#"[auth]
+tls_cert.type  = "inline"
+tls_cert.value = "{}"
+membership_claim = "site_ids""#,
+                TEST_CERT.replace('\n', "\\n")
             );
             let sink_auth = format!(
                 r#"[auth]
