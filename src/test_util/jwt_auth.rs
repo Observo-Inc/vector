@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 
-use crate::sources::util::{Auth, AuthConfig, AuthPublicKey};
+use crate::sources::util::{Auth, AuthConfig, AuthPublicKey, Authority};
 
 // RSA-2048 test key pair (not used outside of tests).
 pub const TEST_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----
@@ -102,10 +102,9 @@ pub fn bearer(token: &str) -> String {
 /// Build an `Auth` from the test public key with optional issuer/audience.
 pub fn build_auth(issuer: Option<&str>, audience: Option<Vec<&str>>) -> Auth {
     AuthConfig {
-        public_key: Some(AuthPublicKey::Inline {
+        authority: Authority::PublicKey(AuthPublicKey::Inline {
             value: TEST_PUBLIC_KEY.to_string(),
         }),
-        public_cert: None,
         issuer: issuer.map(str::to_string),
         audience: audience.map(|v| v.iter().map(|s| s.to_string()).collect()),
         membership_claim: "site_ids".to_string(),

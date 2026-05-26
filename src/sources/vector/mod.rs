@@ -823,7 +823,7 @@ mod tests {
         use vector_lib::event::{BatchNotifier, BatchStatus};
 
         use super::*;
-        use crate::test_util::jwt_auth::{make_token, TEST_PUBLIC_KEY};
+        use crate::test_util::jwt_auth::{make_token, TEST_CERT, TEST_PUBLIC_KEY};
 
         /// Run a source+sink pair and return the final `BatchStatus`.
         async fn run_auth_pair(source_auth_toml: &str, sink_auth_toml: &str) -> BatchStatus {
@@ -862,6 +862,31 @@ public_key.type  = "inline"
 public_key.value = "{}"
 membership_claim = "site_ids""#,
                 TEST_PUBLIC_KEY.replace('\n', "\\n")
+            );
+            let sink_auth = format!(
+                r#"[auth]
+[auth.token]
+type  = "inline"
+value = "{token}""#
+            );
+            assert_eq!(
+                run_auth_pair(&source_auth, &sink_auth).await,
+                BatchStatus::Delivered
+            );
+        }
+
+        #[tokio::test]
+        async fn valid_token_delivers_with_tls_cert_authority() {
+            // End-to-end exercise of the tls_cert variant at the source/sink
+            // boundary: the inline X.509 cert in the source config must yield a
+            // verifier that accepts a token signed by the matching test key.
+            let token = make_token(HashMap::new());
+            let source_auth = format!(
+                r#"[auth]
+tls_cert.type  = "inline"
+tls_cert.value = "{}"
+membership_claim = "site_ids""#,
+                TEST_CERT.replace('\n', "\\n")
             );
             let sink_auth = format!(
                 r#"[auth]

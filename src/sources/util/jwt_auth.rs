@@ -64,14 +64,14 @@ impl AuthEventError {
 /// Source of the RSA public key PEM used to verify auth token signatures.
 ///
 /// Accepts an RSA public key PEM (`BEGIN PUBLIC KEY` / `BEGIN RSA PUBLIC KEY`).
-/// For an X.509 certificate, use [`AuthPublicCert`] instead. Exactly one of
-/// `public_key` or `public_cert` must be configured on [`AuthConfig`].
+/// For an X.509 certificate, use [`AuthTlsCert`] instead. Selected via the
+/// [`Authority::PublicKey`] variant on [`AuthConfig::authority`].
 ///
 /// ## Examples
 ///
 /// Inline PEM (use Vector's `${VAR}` interpolation for env vars):
 /// ```toml
-/// public_key.type = "inline"
+/// public_key.type  = "inline"
 /// public_key.value = "${RSA_PUBLIC_KEY}"
 /// ```
 ///
@@ -111,26 +111,26 @@ pub enum AuthPublicKey {
 /// at runtime — certificate validity windows, issuer chains, and revocation status
 /// are **not** checked.
 ///
-/// For a bare public key PEM, use [`AuthPublicKey`] instead. Exactly one of
-/// `public_key` or `public_cert` must be configured on [`AuthConfig`].
+/// For a bare public key PEM, use [`AuthPublicKey`] instead. Selected via the
+/// [`Authority::TlsCert`] variant on [`AuthConfig::authority`].
 ///
 /// ## Examples
 ///
 /// Inline cert PEM:
 /// ```toml
-/// public_cert.type = "inline"
-/// public_cert.value = "${TRUST_BUNDLE_PEM}"
+/// tls_cert.type  = "inline"
+/// tls_cert.value = "${TRUST_BUNDLE_PEM}"
 /// ```
 ///
 /// File path (typical for Kubernetes trust-bundle mounts):
 /// ```toml
-/// public_cert.type = "file"
-/// public_cert.path = "/etc/pki/tls/certs/jwt-signer.crt"
+/// tls_cert.type = "file"
+/// tls_cert.path = "/etc/pki/tls/certs/jwt-signer.crt"
 /// ```
 #[configurable_component]
 #[derive(Clone, Debug)]
 #[serde(rename_all = "snake_case", tag = "type", deny_unknown_fields)]
-pub enum AuthPublicCert {
+pub enum AuthTlsCert {
     /// Inline PEM value.
     ///
     /// Supports Vector's `${ENV_VAR}` interpolation. The value is read once at startup.
@@ -326,29 +326,68 @@ pub(crate) fn default_algorithms() -> Vec<AuthAlgorithm> {
     ]
 }
 
-/// Auth configuration for sources.
+/// Source of the RSA public key used to verify auth token signatures.
 ///
-/// Exactly one of `public_key` or `public_cert` must be set; the resulting RSA
-/// public key is parsed once at source startup, after which per-request
-/// validation is purely in-process with no network calls. When the
-/// `authorization` header is absent, [`Auth::authenticate`] returns `Ok(None)`
-/// and the request is accepted without per-event filtering.
+/// Exactly one variant must be configured. Flattened into [`AuthConfig`], so the
+/// variant key sits directly under `[auth]`:
+///
+/// ```toml
+/// [auth]
+/// public_key.type  = "inline"
+/// public_key.value = "${RSA_PUBLIC_KEY}"
+/// ```
+///
+/// or
+///
+/// ```toml
+/// [auth]
+/// tls_cert.type = "file"
+/// tls_cert.path = "/etc/pki/tls/certs/jwt-signer.crt"
+/// ```
 #[configurable_component]
 #[derive(Clone, Debug)]
-#[serde(deny_unknown_fields)]
-pub struct AuthConfig {
-    /// Source of the RSA public key PEM used to verify auth token signatures.
-    ///
-    /// Mutually exclusive with `public_cert` — exactly one must be set.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub public_key: Option<AuthPublicKey>,
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Authority {
+    /// Bare RSA public key PEM.
+    PublicKey(AuthPublicKey),
+    /// X.509 certificate PEM; the embedded public key is extracted at startup.
+    TlsCert(AuthTlsCert),
+}
 
-    /// Source of an X.509 certificate PEM whose embedded public key verifies
-    /// auth token signatures.
+impl Authority {
+    /// Resolve the configured source into the public-key PEM that
+    /// `jsonwebtoken::DecodingKey::from_rsa_pem` accepts.
+    fn load_public_key_pem(&self) -> crate::Result<String> {
+        match self {
+            Authority::PublicKey(pk) => pk.load(),
+            Authority::TlsCert(cert) => extract_public_key_pem_from_cert_pem(&cert.load()?),
+        }
+    }
+}
+
+/// Auth configuration for sources.
+///
+/// `authority` selects the RSA public key source (a bare public key PEM or an
+/// X.509 certificate PEM) and is flattened — its `public_key` / `tls_cert`
+/// variant key sits directly under `[auth]`. The resulting key is parsed once
+/// at source startup, after which per-request validation is purely in-process
+/// with no network calls. When the `authorization` header is absent,
+/// [`Auth::authenticate`] returns `Ok(None)` and the request is accepted
+/// without per-event filtering.
+///
+/// Note: `deny_unknown_fields` is intentionally omitted here because serde
+/// can't combine it with `#[serde(flatten)]`. Strict-unknown-field checking
+/// still applies inside the `public_key` / `tls_cert` blocks via the enums
+/// they wrap; only typos in sibling top-level keys (e.g. `issuer`,
+/// `membership_claim`) will be silently ignored.
+#[configurable_component]
+#[derive(Clone, Debug)]
+pub struct AuthConfig {
+    /// Source of the RSA public key used to verify auth token signatures.
     ///
-    /// Mutually exclusive with `public_key` — exactly one must be set.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub public_cert: Option<AuthPublicCert>,
+    /// Required — deserialization fails if no variant key is present.
+    #[serde(flatten)]
+    pub authority: Authority,
 
     /// JWT signing algorithms accepted for token verification.
     ///
@@ -408,25 +447,14 @@ fn default_membership_claim() -> String {
 }
 
 impl AuthConfig {
-    /// Builds the runtime [`Auth`] by resolving the configured public key source
-    /// (either `public_key` directly or `public_cert` via SPKI extraction) and
-    /// parsing it into a verifier.
+    /// Builds the runtime [`Auth`] by resolving the configured [`Authority`]
+    /// (either an `AuthPublicKey` directly or an `AuthTlsCert` via SPKI
+    /// extraction) and parsing it into a verifier.
     ///
     /// All I/O and PEM parsing happen here — once at startup.
     /// The resulting [`Auth`] is cheap to clone and holds no file handles.
     pub fn build(&self) -> crate::Result<Auth> {
-        let pem = match (&self.public_key, &self.public_cert) {
-            (Some(_), Some(_)) => {
-                return Err(
-                    "auth: set exactly one of public_key or public_cert, not both".into(),
-                );
-            }
-            (None, None) => {
-                return Err("auth: one of public_key or public_cert must be set".into());
-            }
-            (Some(pk), None) => pk.load()?,
-            (None, Some(pc)) => extract_public_key_pem_from_cert_pem(&pc.load()?)?,
-        };
+        let pem = self.authority.load_public_key_pem()?;
 
         let decoding_key = DecodingKey::from_rsa_pem(pem.as_bytes())
             .map_err(|error| format!("Failed to parse RSA public key PEM: {error}"))?;
@@ -481,12 +509,12 @@ impl AuthPublicKey {
     }
 }
 
-impl AuthPublicCert {
+impl AuthTlsCert {
     fn load(&self) -> crate::Result<String> {
         match self {
             Self::Inline { value } => Ok(value.clone()),
             Self::File { path } => std::fs::read_to_string(path).map_err(|error| {
-                format!("Failed to read auth public_cert from '{path}': {error}").into()
+                format!("Failed to read auth tls_cert from '{path}': {error}").into()
             }),
         }
     }
@@ -724,23 +752,38 @@ mod tests {
         bearer, build_auth, make_token, now_secs, TEST_CERT, TEST_PRIVATE_KEY, TEST_PUBLIC_KEY,
     };
 
-    // ── AuthConfig::build ────────────────────────────────────────────────────
-
-    #[test]
-    fn build_from_inline_pem_succeeds() {
-        let cfg = AuthConfig {
-            public_key: Some(AuthPublicKey::Inline {
-                value: TEST_PUBLIC_KEY.to_string(),
-            }),
-            public_cert: None,
+    // Construct a baseline `AuthConfig` from the given authority, using the
+    // permissive defaults the tests below want (no issuer/audience/value_path,
+    // `require_token = false`). Individual tests override fields as needed.
+    fn cfg_with(authority: Authority) -> AuthConfig {
+        AuthConfig {
+            authority,
             issuer: None,
             audience: None,
             membership_claim: "site_ids".to_string(),
             value_path: None,
             algorithms: default_algorithms(),
             require_token: false,
-        };
-        assert!(cfg.build().is_ok());
+        }
+    }
+
+    fn inline_public_key() -> Authority {
+        Authority::PublicKey(AuthPublicKey::Inline {
+            value: TEST_PUBLIC_KEY.to_string(),
+        })
+    }
+
+    fn inline_tls_cert() -> Authority {
+        Authority::TlsCert(AuthTlsCert::Inline {
+            value: TEST_CERT.to_string(),
+        })
+    }
+
+    // ── AuthConfig::build ────────────────────────────────────────────────────
+
+    #[test]
+    fn build_from_inline_pem_succeeds() {
+        assert!(cfg_with(inline_public_key()).build().is_ok());
     }
 
     #[test]
@@ -748,89 +791,41 @@ mod tests {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         f.write_all(TEST_PUBLIC_KEY.as_bytes()).unwrap();
 
-        let cfg = AuthConfig {
-            public_key: Some(AuthPublicKey::File {
-                path: f.path().to_str().unwrap().into(),
-            }),
-            public_cert: None,
-            issuer: None,
-            audience: None,
-            membership_claim: "site_ids".to_string(),
-            value_path: None,
-            algorithms: default_algorithms(),
-            require_token: false,
-        };
+        let cfg = cfg_with(Authority::PublicKey(AuthPublicKey::File {
+            path: f.path().to_str().unwrap().into(),
+        }));
         assert!(cfg.build().is_ok());
     }
 
     #[test]
     fn build_with_invalid_pem_fails() {
-        let cfg = AuthConfig {
-            public_key: Some(AuthPublicKey::Inline {
-                value: "this is not a PEM".to_string(),
-            }),
-            public_cert: None,
-            issuer: None,
-            audience: None,
-            membership_claim: "site_ids".to_string(),
-            value_path: None,
-            algorithms: default_algorithms(),
-            require_token: false,
-        };
+        let cfg = cfg_with(Authority::PublicKey(AuthPublicKey::Inline {
+            value: "this is not a PEM".to_string(),
+        }));
         assert!(cfg.build().is_err());
     }
 
     #[test]
     fn build_with_missing_pem_file_fails() {
-        let cfg = AuthConfig {
-            public_key: Some(AuthPublicKey::File {
-                path: "/nonexistent/path/key.pem".to_string(),
-            }),
-            public_cert: None,
-            issuer: None,
-            audience: None,
-            membership_claim: "site_ids".to_string(),
-            value_path: None,
-            algorithms: default_algorithms(),
-            require_token: false,
-        };
+        let cfg = cfg_with(Authority::PublicKey(AuthPublicKey::File {
+            path: "/nonexistent/path/key.pem".to_string(),
+        }));
         assert!(cfg.build().is_err());
     }
 
     #[test]
-    fn build_with_missing_certificate_file_fails() {
-        let cfg = AuthConfig {
-            public_key: None,
-            public_cert: Some(AuthPublicCert::File {
-                path: "/nonexistent/path/auth.crt".to_string(),
-            }),
-            issuer: None,
-            audience: None,
-            membership_claim: "site_ids".to_string(),
-            value_path: None,
-            algorithms: default_algorithms(),
-            require_token: false,
-        };
+    fn build_with_missing_tls_cert_file_fails() {
+        let cfg = cfg_with(Authority::TlsCert(AuthTlsCert::File {
+            path: "/nonexistent/path/auth.crt".to_string(),
+        }));
         assert!(cfg.build().is_err());
     }
 
     #[test]
-    fn build_from_inline_certificate_pem_succeeds() {
-        let cfg = AuthConfig {
-            public_key: None,
-            public_cert: Some(AuthPublicCert::Inline {
-                value: TEST_CERT.to_string(),
-            }),
-            issuer: None,
-            audience: None,
-            membership_claim: "site_ids".to_string(),
-            value_path: None,
-            algorithms: default_algorithms(),
-            require_token: false,
-        };
-        let auth = cfg
+    fn build_from_inline_tls_cert_succeeds() {
+        let auth = cfg_with(inline_tls_cert())
             .build()
-            .expect("AuthConfig::build should accept an X.509 certificate PEM via public_cert");
+            .expect("AuthConfig::build should accept an X.509 certificate PEM via tls_cert");
 
         // The public key extracted from the cert must actually verify tokens
         // signed by the matching test private key — not just parse cleanly.
@@ -840,59 +835,32 @@ mod tests {
     }
 
     #[test]
-    fn build_from_certificate_file_succeeds() {
+    fn build_from_tls_cert_file_succeeds() {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         f.write_all(TEST_CERT.as_bytes()).unwrap();
 
-        let cfg = AuthConfig {
-            public_key: None,
-            public_cert: Some(AuthPublicCert::File {
-                path: f.path().to_str().unwrap().into(),
-            }),
-            issuer: None,
-            audience: None,
-            membership_claim: "site_ids".to_string(),
-            value_path: None,
-            algorithms: default_algorithms(),
-            require_token: false,
-        };
+        let cfg = cfg_with(Authority::TlsCert(AuthTlsCert::File {
+            path: f.path().to_str().unwrap().into(),
+        }));
         assert!(cfg.build().is_ok());
     }
 
     #[test]
-    fn build_with_malformed_certificate_pem_fails() {
-        let cfg = AuthConfig {
-            public_key: None,
-            public_cert: Some(AuthPublicCert::Inline {
-                value: "-----BEGIN CERTIFICATE-----\nnot-base64\n-----END CERTIFICATE-----\n"
-                    .to_string(),
-            }),
-            issuer: None,
-            audience: None,
-            membership_claim: "site_ids".to_string(),
-            value_path: None,
-            algorithms: default_algorithms(),
-            require_token: false,
-        };
+    fn build_with_malformed_tls_cert_pem_fails() {
+        let cfg = cfg_with(Authority::TlsCert(AuthTlsCert::Inline {
+            value: "-----BEGIN CERTIFICATE-----\nnot-base64\n-----END CERTIFICATE-----\n"
+                .to_string(),
+        }));
         assert!(cfg.build().is_err());
     }
 
     #[test]
-    fn build_with_public_key_pem_in_public_cert_field_fails() {
-        // public_cert is strictly X.509 — feeding it a bare RSA public key
+    fn build_with_public_key_pem_in_tls_cert_field_fails() {
+        // tls_cert is strictly X.509 — feeding it a bare RSA public key
         // PEM must surface the cert parser's failure, not silently accept it.
-        let cfg = AuthConfig {
-            public_key: None,
-            public_cert: Some(AuthPublicCert::Inline {
-                value: TEST_PUBLIC_KEY.to_string(),
-            }),
-            issuer: None,
-            audience: None,
-            membership_claim: "site_ids".to_string(),
-            value_path: None,
-            algorithms: default_algorithms(),
-            require_token: false,
-        };
+        let cfg = cfg_with(Authority::TlsCert(AuthTlsCert::Inline {
+            value: TEST_PUBLIC_KEY.to_string(),
+        }));
         assert!(cfg.build().is_err());
     }
 
@@ -903,39 +871,10 @@ mod tests {
     // depending on the cert's extension layout). That's upstream behavior, not
     // ours — we don't promise either outcome, so we don't assert it.
 
-    #[test]
-    fn build_with_neither_public_key_nor_public_cert_fails() {
-        let cfg = AuthConfig {
-            public_key: None,
-            public_cert: None,
-            issuer: None,
-            audience: None,
-            membership_claim: "site_ids".to_string(),
-            value_path: None,
-            algorithms: default_algorithms(),
-            require_token: false,
-        };
-        assert!(cfg.build().is_err());
-    }
-
-    #[test]
-    fn build_with_both_public_key_and_public_cert_fails() {
-        let cfg = AuthConfig {
-            public_key: Some(AuthPublicKey::Inline {
-                value: TEST_PUBLIC_KEY.to_string(),
-            }),
-            public_cert: Some(AuthPublicCert::Inline {
-                value: TEST_CERT.to_string(),
-            }),
-            issuer: None,
-            audience: None,
-            membership_claim: "site_ids".to_string(),
-            value_path: None,
-            algorithms: default_algorithms(),
-            require_token: false,
-        };
-        assert!(cfg.build().is_err());
-    }
+    // No "both authority variants set" runtime check is needed: the
+    // `Authority` enum makes that state unrepresentable in Rust, and the
+    // externally-tagged serde form rejects TOML with two variant keys at
+    // parse time. See `authority_with_multiple_variants_in_toml_fails`.
 
     // ── Auth::authenticate ───────────────────────────────────────────────────
 
@@ -1051,18 +990,8 @@ mod tests {
 
     #[test]
     fn custom_membership_claim_is_checked() {
-        let cfg = AuthConfig {
-            public_key: Some(AuthPublicKey::Inline {
-                value: TEST_PUBLIC_KEY.to_string(),
-            }),
-            public_cert: None,
-            issuer: None,
-            audience: None,
-            membership_claim: "allowed_tenants".to_string(),
-            value_path: None,
-            algorithms: default_algorithms(),
-            require_token: false,
-        };
+        let mut cfg = cfg_with(inline_public_key());
+        cfg.membership_claim = "allowed_tenants".to_string();
         let auth = cfg.build().unwrap();
 
         let mut extra = HashMap::new();
@@ -1078,36 +1007,16 @@ mod tests {
 
     #[test]
     fn empty_algorithms_list_fails_build() {
-        let cfg = AuthConfig {
-            public_key: Some(AuthPublicKey::Inline {
-                value: TEST_PUBLIC_KEY.to_string(),
-            }),
-            public_cert: None,
-            issuer: None,
-            audience: None,
-            membership_claim: "site_ids".to_string(),
-            value_path: None,
-            algorithms: vec![],
-            require_token: false,
-        };
+        let mut cfg = cfg_with(inline_public_key());
+        cfg.algorithms = vec![];
         assert!(cfg.build().is_err());
     }
 
     #[test]
     fn token_with_algorithm_not_in_allowlist_is_rejected() {
         // Allowlist only RS512; sign the token with RS256 → must be rejected.
-        let cfg = AuthConfig {
-            public_key: Some(AuthPublicKey::Inline {
-                value: TEST_PUBLIC_KEY.to_string(),
-            }),
-            public_cert: None,
-            issuer: None,
-            audience: None,
-            membership_claim: "site_ids".to_string(),
-            value_path: None,
-            algorithms: vec![AuthAlgorithm::Rs512],
-            require_token: false,
-        };
+        let mut cfg = cfg_with(inline_public_key());
+        cfg.algorithms = vec![AuthAlgorithm::Rs512];
         let auth = cfg.build().unwrap();
         let token = make_token(HashMap::new()); // signed with RS256 by helper
         let result = auth.authenticate(Some(&bearer(&token)));
@@ -1116,18 +1025,8 @@ mod tests {
 
     #[test]
     fn token_with_algorithm_in_allowlist_is_accepted() {
-        let cfg = AuthConfig {
-            public_key: Some(AuthPublicKey::Inline {
-                value: TEST_PUBLIC_KEY.to_string(),
-            }),
-            public_cert: None,
-            issuer: None,
-            audience: None,
-            membership_claim: "site_ids".to_string(),
-            value_path: None,
-            algorithms: vec![AuthAlgorithm::Rs256, AuthAlgorithm::Rs512],
-            require_token: false,
-        };
+        let mut cfg = cfg_with(inline_public_key());
+        cfg.algorithms = vec![AuthAlgorithm::Rs256, AuthAlgorithm::Rs512];
         let auth = cfg.build().unwrap();
         let token = make_token(HashMap::new()); // signed with RS256
         assert!(auth.authenticate(Some(&bearer(&token))).is_ok());
@@ -1136,20 +1035,9 @@ mod tests {
     // ── require_token enforcement ────────────────────────────────────────────
 
     fn build_auth_with_require_token(require: bool) -> Auth {
-        AuthConfig {
-            public_key: Some(AuthPublicKey::Inline {
-                value: TEST_PUBLIC_KEY.to_string(),
-            }),
-            public_cert: None,
-            issuer: None,
-            audience: None,
-            membership_claim: "site_ids".to_string(),
-            value_path: None,
-            algorithms: default_algorithms(),
-            require_token: require,
-        }
-        .build()
-        .unwrap()
+        let mut cfg = cfg_with(inline_public_key());
+        cfg.require_token = require;
+        cfg.build().unwrap()
     }
 
     #[test]
@@ -1290,33 +1178,175 @@ path = "/etc/certs/auth.pem""#;
         assert!(toml::from_str::<AuthPublicKey>(r#"type = "env""#).is_err());
     }
 
-    // ── AuthPublicCert serde ─────────────────────────────────────────────────
+    // ── AuthTlsCert serde ────────────────────────────────────────────────────
 
     #[test]
-    fn public_cert_inline_deserializes() {
+    fn tls_cert_inline_deserializes() {
         let toml = r#"type = "inline"
 value = "my-cert-pem""#;
-        let cert: AuthPublicCert = toml::from_str(toml).unwrap();
-        assert!(matches!(cert, AuthPublicCert::Inline { value } if value == "my-cert-pem"));
+        let cert: AuthTlsCert = toml::from_str(toml).unwrap();
+        assert!(matches!(cert, AuthTlsCert::Inline { value } if value == "my-cert-pem"));
     }
 
     #[test]
-    fn public_cert_file_deserializes() {
+    fn tls_cert_file_deserializes() {
         let toml = r#"type = "file"
 path = "/etc/pki/tls/certs/auth.crt""#;
-        let cert: AuthPublicCert = toml::from_str(toml).unwrap();
+        let cert: AuthTlsCert = toml::from_str(toml).unwrap();
         assert!(
-            matches!(cert, AuthPublicCert::File { path } if path == "/etc/pki/tls/certs/auth.crt")
+            matches!(cert, AuthTlsCert::File { path } if path == "/etc/pki/tls/certs/auth.crt")
         );
     }
 
     #[test]
-    fn public_cert_missing_type_fails() {
-        assert!(toml::from_str::<AuthPublicCert>(r#"value = "pem""#).is_err());
+    fn tls_cert_missing_type_fails() {
+        assert!(toml::from_str::<AuthTlsCert>(r#"value = "pem""#).is_err());
     }
 
     #[test]
-    fn public_cert_unknown_type_fails() {
-        assert!(toml::from_str::<AuthPublicCert>(r#"type = "env""#).is_err());
+    fn tls_cert_unknown_type_fails() {
+        assert!(toml::from_str::<AuthTlsCert>(r#"type = "env""#).is_err());
+    }
+
+    // ── Authority serde ──────────────────────────────────────────────────────
+
+    #[test]
+    fn authority_public_key_deserializes() {
+        let toml = r#"public_key = { type = "inline", value = "pem" }"#;
+        let a: Authority = toml::from_str(toml).unwrap();
+        assert!(matches!(
+            a,
+            Authority::PublicKey(AuthPublicKey::Inline { value }) if value == "pem"
+        ));
+    }
+
+    #[test]
+    fn authority_tls_cert_deserializes() {
+        let toml = r#"tls_cert = { type = "file", path = "/etc/pki/tls/certs/auth.crt" }"#;
+        let a: Authority = toml::from_str(toml).unwrap();
+        assert!(matches!(
+            a,
+            Authority::TlsCert(AuthTlsCert::File { path }) if path == "/etc/pki/tls/certs/auth.crt"
+        ));
+    }
+
+    #[test]
+    fn authority_empty_table_fails() {
+        // Externally-tagged enum: an empty `[authority]` (no variant key) is
+        // not deserializable — this is how we surface "nothing is set".
+        assert!(toml::from_str::<Authority>("").is_err());
+    }
+
+    #[test]
+    fn authority_unknown_variant_fails() {
+        let toml = r#"jwks_url = "https://idp.example.com/jwks""#;
+        assert!(toml::from_str::<Authority>(toml).is_err());
+    }
+
+    #[test]
+    fn authority_with_multiple_variants_in_toml_fails() {
+        // Externally-tagged enums accept exactly one key. Specifying both
+        // `public_key` and `tls_cert` under `[authority]` must be rejected.
+        let toml = r#"
+public_key = { type = "inline", value = "pem" }
+tls_cert   = { type = "inline", value = "cert" }
+"#;
+        assert!(toml::from_str::<Authority>(toml).is_err());
+    }
+
+    // ── AuthConfig serde ─────────────────────────────────────────────────────
+
+    #[test]
+    fn auth_config_requires_authority() {
+        // No `[authority]` block at all → missing required field.
+        let toml = r#"membership_claim = "site_ids""#;
+        assert!(toml::from_str::<AuthConfig>(toml).is_err());
+    }
+
+    #[test]
+    fn auth_config_with_public_key_authority_deserializes() {
+        // Flat form: variant key sits directly under [auth] thanks to
+        // #[serde(flatten)] on AuthConfig.authority.
+        let toml = r#"
+public_key.type  = "inline"
+public_key.value = "pem"
+"#;
+        let cfg: AuthConfig = toml::from_str(toml).unwrap();
+        assert!(matches!(
+            cfg.authority,
+            Authority::PublicKey(AuthPublicKey::Inline { value }) if value == "pem"
+        ));
+    }
+
+    #[test]
+    fn auth_config_with_tls_cert_authority_deserializes() {
+        let toml = r#"
+tls_cert.type = "file"
+tls_cert.path = "/etc/pki/tls/certs/auth.crt"
+"#;
+        let cfg: AuthConfig = toml::from_str(toml).unwrap();
+        assert!(matches!(
+            cfg.authority,
+            Authority::TlsCert(AuthTlsCert::File { path }) if path == "/etc/pki/tls/certs/auth.crt"
+        ));
+    }
+
+    #[test]
+    fn auth_config_typo_in_sibling_field_is_silently_dropped() {
+        // Trade-off fence-post: with `#[serde(flatten)]`, AuthConfig cannot
+        // carry `deny_unknown_fields`. Serde forwards unknown sibling keys
+        // to Authority's deserializer; once Authority picks its variant
+        // (`public_key` here), any leftover keys are discarded rather than
+        // rejected — Authority's own `deny_unknown_fields` only applies
+        // inside the chosen variant, not at the enum-discriminator level.
+        //
+        // Net effect: a typo like `mempership_claim` parses cleanly and the
+        // configured value is silently lost. This test pins that behavior so
+        // a future serde / configurable_component change that starts catching
+        // these typos won't silently break the contract documented on
+        // `AuthConfig`.
+        let toml = r#"
+public_key.type  = "inline"
+public_key.value = "pem"
+mempership_claim = "tenants"
+"#;
+        let cfg = toml::from_str::<AuthConfig>(toml)
+            .expect("sibling-field typo currently slips past flatten");
+        // The typo'd key is dropped; the real field keeps its default.
+        assert_eq!(cfg.membership_claim, default_membership_claim());
+    }
+
+    #[test]
+    fn auth_config_typo_in_variant_name_is_rejected() {
+        // The variant key itself is misspelled; sibling fields are valid.
+        // Authority sees `pubic_key` as an unknown variant and rejects it.
+        let toml = r#"
+pubic_key.type   = "inline"
+pubic_key.value  = "pem"
+membership_claim = "tenants"
+"#;
+        assert!(toml::from_str::<AuthConfig>(toml).is_err());
+    }
+
+    #[test]
+    fn auth_config_with_other_fields_alongside_variant_deserializes() {
+        // Confirms the flatten machinery doesn't get confused by sibling
+        // top-level fields — `issuer`, `membership_claim` etc. coexist with
+        // the flattened variant key.
+        let toml = r#"
+public_key.type   = "inline"
+public_key.value  = "pem"
+membership_claim  = "tenants"
+issuer            = "https://issuer.example.com/"
+require_token     = false
+"#;
+        let cfg: AuthConfig = toml::from_str(toml).unwrap();
+        assert!(matches!(
+            cfg.authority,
+            Authority::PublicKey(AuthPublicKey::Inline { value }) if value == "pem"
+        ));
+        assert_eq!(cfg.membership_claim, "tenants");
+        assert_eq!(cfg.issuer.as_deref(), Some("https://issuer.example.com/"));
+        assert!(!cfg.require_token);
     }
 }
