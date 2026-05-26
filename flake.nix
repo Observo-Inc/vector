@@ -27,6 +27,7 @@
             protobuf
             protoc-gen-rust
             cyrus_sasl
+            krb5
             cargo-nextest
             openssl
             lldb
@@ -55,6 +56,12 @@
               # fallback '-C link-arg=-fuse-ld=lld'
             elif [[ "${system}" == *"darwin"* ]]; then
               export RUSTFLAGS='-C linker=clang -C link-arg=-fuse-ld=lld'
+              # rdkafka-sys builds librdkafka.dylib which links vendored libsasl2.a (with GSSAPI).
+              # On macOS, dylib links must resolve all symbols; the MIT Kerberos symbols
+              # (_krb5_gss_register_acceptor_identity, _GSS_C_SEC_CONTEXT_SASL_SSF, etc.) are
+              # not in Apple GSS.framework — they're only in MIT libgssapi_krb5. Point the
+              # C linker at the nix krb5 dylibs so the intermediate dylib link succeeds.
+              export LDFLAGS="-L${pkgs.krb5.lib}/lib -lgssapi_krb5 -lkrb5 -lk5crypto -lcom_err -lkrb5support"
             fi
             rustup component add rust-analyzer
             unset DEVELOPER_DIR
