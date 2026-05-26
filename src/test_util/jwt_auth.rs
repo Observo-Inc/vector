@@ -48,6 +48,29 @@ YsuJD5nLVuLmiPWo0DyEHufC6TYdZQ8Pmi0Rzv3tEgqm1DQEUy0nUiMDVd3ZbVoE
 vQIDAQAB
 -----END PUBLIC KEY-----";
 
+// Self-signed X.509 certificate wrapping `TEST_PUBLIC_KEY` (CN=vector-test-jwt-signer,
+// SHA-256/RSA-2048, valid until ~2126). Used to verify that `AuthConfig` accepts a
+// `BEGIN CERTIFICATE` PEM and extracts the embedded public key correctly.
+pub const TEST_CERT: &str = "-----BEGIN CERTIFICATE-----
+MIIDJTCCAg2gAwIBAgIUVbKf6yXWhoONy5OO4QQmDddORmgwDQYJKoZIhvcNAQEL
+BQAwITEfMB0GA1UEAwwWdmVjdG9yLXRlc3Qtand0LXNpZ25lcjAgFw0yNjA1MjYx
+MjI5NTlaGA8yMTI2MDUwMjEyMjk1OVowITEfMB0GA1UEAwwWdmVjdG9yLXRlc3Qt
+and0LXNpZ25lcjCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAMnkPuWk
+ysYmmXvMJxnvdepvMFpqBo9r1AOgabKlNs6iLKyeeZxMd/L7Bw/ZoGUNMLxoH7uI
+91mvS0AQ13MhDT+RkUFYJ3CoC1BgPJ8a5nH3L7cT0jxEWV4OoNLADppStKh6wL04
+EfO15tfSbhP10BbOfxWvcJgpWmnhdxjB9fqJazMKbjfO/h8Im7+phfrsi84/yHro
+4wFnyzsDgrXnPWfxJwjdHq/pqZz3iIHvPYH2F2+6hMqTz10XlcbETVlWcjNI+v/z
++hBAmAZFpipABWLLiQ+Zy1bi5oj1qNA8hB7nwuk2HWUPD5otEc797RIKptQ0BFMt
+J1IjA1Xd2W1aBL0CAwEAAaNTMFEwHQYDVR0OBBYEFI+RBPkshN3T+Ua4+eNeKtDM
+Rfn/MB8GA1UdIwQYMBaAFI+RBPkshN3T+Ua4+eNeKtDMRfn/MA8GA1UdEwEB/wQF
+MAMBAf8wDQYJKoZIhvcNAQELBQADggEBAI6hkfHsDJfpNXQFyFqmJDXDeSOkKviw
+s7Wn8T6+u1e0iV8ufji9kTjs1g25311KQnl3v0nBbg6KtYZm8nmjE69zPLwswjkT
+hub2+oIA99DY5VZh8HUxw2GzJttu/sfXM+CzTMz4kr0aiYnTlcDYI7D0dT0uuzTw
+Trls8yi+PL94c8Eb+m6qr8q6BGob2N6HwVJtcpgFfzmjubmg+o8dT78Ual2XtnP9
+SUp/fertFUmpey5ERyaNtuA5pY3ApOOg7elHSyL7BGdoAHwduCk52JHsIA2mFhvb
+q2PnSLA/85i34yxEJ8lUekVbx4VBaZZpmaNMpNbtabYGkxEgK59kMws=
+-----END CERTIFICATE-----";
+
 pub fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -79,9 +102,10 @@ pub fn bearer(token: &str) -> String {
 /// Build an `Auth` from the test public key with optional issuer/audience.
 pub fn build_auth(issuer: Option<&str>, audience: Option<Vec<&str>>) -> Auth {
     AuthConfig {
-        public_key: AuthPublicKey::Inline {
+        public_key: Some(AuthPublicKey::Inline {
             value: TEST_PUBLIC_KEY.to_string(),
-        },
+        }),
+        public_cert: None,
         issuer: issuer.map(str::to_string),
         audience: audience.map(|v| v.iter().map(|s| s.to_string()).collect()),
         membership_claim: "site_ids".to_string(),
