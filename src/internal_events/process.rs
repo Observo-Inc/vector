@@ -18,7 +18,7 @@ impl InternalEvent for VectorStarted {
             revision = built_info::VECTOR_BUILD_DESC.unwrap_or(""),
         );
         counter!("started_total").increment(1);
-        gauge!("valid_config").set(1.0);
+        gauge!("config_load_succeeded").set(1.0);
     }
 }
 
@@ -46,7 +46,7 @@ impl InternalEvent for VectorReloaded<'_> {
             path = ?self.config_paths
         );
         counter!("reloaded_total").increment(1);
-        gauge!("valid_config").set(1.0);
+        gauge!("config_load_succeeded").set(1.0);
         gauge!("reload_in_progress").set(0.0);
     }
 }
@@ -96,7 +96,7 @@ impl InternalEvent for VectorReloadError {
             "stage" => error_stage::PROCESSING,
         )
         .increment(1);
-        gauge!("valid_config").set(0.0);
+        gauge!("config_load_succeeded").set(0.0);
         gauge!("reload_in_progress").set(0.0);
     }
 }
@@ -120,7 +120,7 @@ impl InternalEvent for VectorConfigLoadError {
             "stage" => error_stage::PROCESSING,
         )
         .increment(1);
-        gauge!("valid_config").set(0.0);
+        gauge!("config_load_succeeded").set(0.0);
     }
 }
 
