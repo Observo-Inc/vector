@@ -73,8 +73,7 @@ pub use self::http::HttpSource;
 pub use self::http::HttpSourceAuthConfig;
 #[cfg(feature = "sources-vector")]
 pub use self::jwt_auth::{
-    add_auth_metadata, Auth, AuthAlgorithm, AuthConfig, AuthContext, AuthError, AuthEventError,
-    AuthValuePath, Authority, AuthorityData, CompiledValuePath, EventValidator,
+    add_auth_metadata, Auth, AuthConfig, AuthContext, AuthError, AuthEventError, EventValidator,
 };
 #[cfg(any(
     feature = "sources-aws_sqs",
