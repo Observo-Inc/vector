@@ -99,29 +99,41 @@ impl MembershipClaim {
         &self,
         claims: &serde_json::Map<String, Value>,
     ) -> Result<HashSet<String>, AuthError> {
-        let array = claims
+        let value = claims
             .get(self.claim_name())
-            .and_then(Value::as_array)
             .ok_or(AuthError::InvalidToken("token missing membership claim"))?;
 
-        // Pre-allocate to the claim array length so the hot path never rehashes.
-        let mut set = HashSet::with_capacity(array.len());
         match self {
             MembershipClaim::Identity(_) => {
+                // Expects a JSON array — standard for custom multi-value claims
+                // like `site_ids`. Pre-allocate to the array length to avoid
+                // rehashing on the hot path.
+                let array = value
+                    .as_array()
+                    .ok_or(AuthError::InvalidToken("token missing membership claim"))?;
+                let mut set = HashSet::with_capacity(array.len());
                 for v in array.iter().filter_map(Value::as_str) {
                     set.insert(v.to_owned());
                 }
+                Ok(set)
             }
             MembershipClaim::Regexp(_, re) => {
-                for v in array.iter().filter_map(Value::as_str) {
-                    if let Some(m) = re.find(v) {
+                // Expects a JSON string — standard for scalar claims like `email`.
+                // All capture groups from a successful match are admitted; the
+                // full match (group 0) is excluded so the caller receives only
+                // the explicitly captured sub-values.
+                let s = value
+                    .as_str()
+                    .ok_or(AuthError::InvalidToken("regexp membership claim must be a string"))?;
+                let mut set = HashSet::new();
+                if let Some(caps) = re.captures(s) {
+                    for m in caps.iter().skip(1).flatten() {
                         set.insert(m.as_str().to_owned());
                     }
                 }
+                Ok(set)
             }
         }
-
-        Ok(set)
     }
 }
 
@@ -1491,62 +1503,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn regexp_membership_claim_admits_matching_values() {
+    async fn regexp_membership_claim_capture_groups_are_authorized_values() {
+        // Pattern extracts the tenant ID from an email claim string.
+        // Capture group 1 ("42") becomes the authorized value — not the full email.
         let mut cfg = cfg_with(inline_public_key());
         cfg.membership_claim = MembershipClaimConfig::Regexp {
-            claim: "roles".to_string(),
-            pattern: r"^tenant:[^:]+$".to_string(),
+            claim: "email".to_string(),
+            pattern: r"^tenant_([0-9]+)@example\.com$".to_string(),
         };
         let auth = cfg.build().await.unwrap();
 
         let mut extra = HashMap::new();
-        extra.insert("roles", serde_json::json!(["tenant:abc", "admin", "tenant:def"]));
+        extra.insert("email", serde_json::json!("tenant_42@example.com"));
         let token = make_token(extra);
 
         let ctx = auth.authenticate(Some(&bearer(&token))).await.unwrap().unwrap();
-        assert!(ctx.is_authorized("tenant:abc"));
-        assert!(ctx.is_authorized("tenant:def"));
-        assert!(!ctx.is_authorized("admin")); // doesn't match pattern
+        assert!(ctx.is_authorized("42"));
+        assert!(!ctx.is_authorized("tenant_42@example.com")); // full email not in set
+        assert!(!ctx.is_authorized("tenant_42"));
     }
 
     #[tokio::test]
-    async fn regexp_membership_claim_returns_matched_substring() {
-        // Pattern has no anchors — only the matched portion enters the set, not
-        // the full claim value.
+    async fn regexp_membership_claim_multiple_capture_groups() {
+        // Both capture groups enter the set independently.
         let mut cfg = cfg_with(inline_public_key());
         cfg.membership_claim = MembershipClaimConfig::Regexp {
-            claim: "roles".to_string(),
-            pattern: r"tenant:[^:]+".to_string(),
+            claim: "email".to_string(),
+            pattern: r"^(tenant)_([0-9]+)@example\.com$".to_string(),
         };
         let auth = cfg.build().await.unwrap();
 
         let mut extra = HashMap::new();
-        extra.insert("roles", serde_json::json!(["prefix:tenant:abc:suffix"]));
+        extra.insert("email", serde_json::json!("tenant_42@example.com"));
         let token = make_token(extra);
 
         let ctx = auth.authenticate(Some(&bearer(&token))).await.unwrap().unwrap();
-        assert!(ctx.is_authorized("tenant:abc")); // matched substring
-        assert!(!ctx.is_authorized("prefix:tenant:abc:suffix")); // full value not in set
+        assert!(ctx.is_authorized("tenant"));
+        assert!(ctx.is_authorized("42"));
     }
 
     #[tokio::test]
     async fn regexp_membership_claim_no_match_yields_empty_context() {
-        // Token is valid and the claim exists, but no values match the pattern.
-        // authenticate() succeeds; the returned AuthContext simply admits nothing.
+        // Token is valid and the claim exists, but the pattern does not match.
+        // authenticate() succeeds; the AuthContext admits nothing.
         let mut cfg = cfg_with(inline_public_key());
         cfg.membership_claim = MembershipClaimConfig::Regexp {
-            claim: "roles".to_string(),
-            pattern: r"^tenant:.+".to_string(),
+            claim: "email".to_string(),
+            pattern: r"^tenant_([0-9]+)@example\.com$".to_string(),
         };
         let auth = cfg.build().await.unwrap();
 
         let mut extra = HashMap::new();
-        extra.insert("roles", serde_json::json!(["admin", "viewer"]));
+        extra.insert("email", serde_json::json!("admin@example.com"));
         let token = make_token(extra);
 
         let ctx = auth.authenticate(Some(&bearer(&token))).await.unwrap().unwrap();
         assert!(!ctx.is_authorized("admin"));
-        assert!(!ctx.is_authorized("viewer"));
     }
 
     // ── algorithm allowlist ──────────────────────────────────────────────────
@@ -2066,6 +2078,7 @@ public_key.value = "pem"
 
     #[test]
     fn extract_identity_non_array_claim_is_error() {
+        // Identity always expects a JSON array — a plain string is rejected.
         let claim = MembershipClaim::Identity("ids".to_string());
         let mut claims = serde_json::Map::new();
         claims.insert("ids".into(), serde_json::json!("not-an-array"));
@@ -2076,40 +2089,75 @@ public_key.value = "pem"
     }
 
     #[test]
-    fn extract_regexp_admits_matching_values() {
-        let re = Regex::new(r"^tenant:[^:]+$").unwrap();
-        let claim = MembershipClaim::Regexp("roles".to_string(), re);
+    fn extract_regexp_returns_all_capture_groups() {
+        // Pattern has two capture groups; both enter the set.
+        // The full match (group 0) is excluded.
+        let re = Regex::new(r"^(tenant)_([0-9]+)@example\.com$").unwrap();
+        let claim = MembershipClaim::Regexp("email".to_string(), re);
         let mut claims = serde_json::Map::new();
-        claims.insert(
-            "roles".into(),
-            serde_json::json!(["tenant:abc", "admin", "tenant:def"]),
-        );
+        claims.insert("email".into(), serde_json::json!("tenant_42@example.com"));
         let set = claim.extract(&claims).unwrap();
-        let expected: HashSet<String> =
-            ["tenant:abc", "tenant:def"].iter().map(|s| s.to_string()).collect();
+        let expected: HashSet<String> = ["tenant", "42"].iter().map(|s| s.to_string()).collect();
         assert_eq!(set, expected);
     }
 
     #[test]
-    fn extract_regexp_returns_matched_substring_not_full_value() {
-        // Pattern without anchors: only the portion that matches enters the set.
-        let re = Regex::new(r"tenant:[^:]+").unwrap();
-        let claim = MembershipClaim::Regexp("roles".to_string(), re);
+    fn extract_regexp_single_capture_group_email_claim() {
+        // Pattern extracts the numeric tenant ID from an email-style claim.
+        let re = Regex::new(r"^tenant_([0-9]+)@example\.com$").unwrap();
+        let claim = MembershipClaim::Regexp("email".to_string(), re);
         let mut claims = serde_json::Map::new();
-        claims.insert("roles".into(), serde_json::json!(["prefix:tenant:abc:suffix"]));
+        claims.insert("email".into(), serde_json::json!("tenant_42@example.com"));
         let set = claim.extract(&claims).unwrap();
-        let expected: HashSet<String> = ["tenant:abc"].iter().map(|s| s.to_string()).collect();
+        let expected: HashSet<String> = ["42"].iter().map(|s| s.to_string()).collect();
         assert_eq!(set, expected);
     }
 
     #[test]
-    fn extract_regexp_no_matches_returns_empty_set() {
-        let re = Regex::new(r"^tenant:.+").unwrap();
-        let claim = MembershipClaim::Regexp("roles".to_string(), re);
+    fn extract_regexp_partial_capture_excludes_prefix() {
+        // ^tenant_([0-9]+)$ on "tenant_1" captures only the digits "1",
+        // not the full string "tenant_1". Use ^(tenant_[0-9]+)$ to keep the prefix.
+        let re = Regex::new(r"^tenant_([0-9]+)$").unwrap();
+        let claim = MembershipClaim::Regexp("sub".to_string(), re);
         let mut claims = serde_json::Map::new();
-        claims.insert("roles".into(), serde_json::json!(["admin", "viewer"]));
+        claims.insert("sub".into(), serde_json::json!("tenant_1"));
+        let set = claim.extract(&claims).unwrap();
+        assert_eq!(set, ["1"].iter().map(|s| s.to_string()).collect::<HashSet<_>>());
+        assert!(!set.contains("tenant_1"));
+    }
+
+    #[test]
+    fn extract_regexp_whole_value_capture() {
+        // Wrapping the full pattern in a capture group preserves the complete value.
+        let re = Regex::new(r"^(tenant_[0-9]+)$").unwrap();
+        let claim = MembershipClaim::Regexp("sub".to_string(), re);
+        let mut claims = serde_json::Map::new();
+        claims.insert("sub".into(), serde_json::json!("tenant_1"));
+        let set = claim.extract(&claims).unwrap();
+        assert_eq!(set, ["tenant_1"].iter().map(|s| s.to_string()).collect::<HashSet<_>>());
+    }
+
+    #[test]
+    fn extract_regexp_no_match_returns_empty_set() {
+        let re = Regex::new(r"^tenant_([0-9]+)@example\.com$").unwrap();
+        let claim = MembershipClaim::Regexp("email".to_string(), re);
+        let mut claims = serde_json::Map::new();
+        claims.insert("email".into(), serde_json::json!("admin@example.com"));
         let set = claim.extract(&claims).unwrap();
         assert!(set.is_empty());
+    }
+
+    #[test]
+    fn extract_regexp_array_claim_is_error() {
+        // Regexp expects a scalar string claim, not an array.
+        let re = Regex::new(r"^tenant_([0-9]+)$").unwrap();
+        let claim = MembershipClaim::Regexp("ids".to_string(), re);
+        let mut claims = serde_json::Map::new();
+        claims.insert("ids".into(), serde_json::json!(["tenant_1", "tenant_2"]));
+        assert!(matches!(
+            claim.extract(&claims),
+            Err(AuthError::InvalidToken(_)),
+        ));
     }
 
     #[test]
