@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -385,6 +385,10 @@ pub enum Authority {
 }
 
 impl Authority {
+    fn is_jwks(&self) -> bool {
+        matches!(self, Authority::Jwks(_))
+    }
+
     /// Resolve the configured source into a runtime [`KeyStore`].
     ///
     /// For static variants this is a synchronous PEM parse. For [`Self::Jwks`]
@@ -484,12 +488,11 @@ impl JwksCache {
             last_refresh: StdMutex::new(Instant::now()),
             min_reactive_refresh: Duration::from_secs(cfg.min_reactive_refresh_secs),
         });
-        Self::spawn_refresher(&cache, Duration::from_secs(cfg.refresh_interval_secs));
+        Self::spawn_refresher(Arc::downgrade(&cache), Duration::from_secs(cfg.refresh_interval_secs));
         Ok(cache)
     }
 
-    fn spawn_refresher(cache: &Arc<Self>, interval: Duration) {
-        let weak: Weak<Self> = Arc::downgrade(cache);
+    fn spawn_refresher(weak: Weak<Self>, interval: Duration) {
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(interval);
             // Skip the immediate first firing — we already fetched in `new`.
@@ -639,18 +642,15 @@ impl JwksFetcher {
 
 /// Auth configuration for sources.
 ///
-/// `authority` selects the RSA public key source (a bare public key PEM or an
-/// X.509 certificate PEM) and is flattened — its `public_key` / `tls_cert`
-/// variant key sits directly under `[auth]`. The resulting key is parsed once
-/// at source startup, after which per-request validation is purely in-process
-/// with no network calls. When the `authorization` header is absent,
-/// [`Auth::authenticate`] returns `Ok(None)` and the request is accepted
-/// without per-event filtering.
+/// `authority` selects the signing key source — a static PEM (`public_key` /
+/// `tls_cert`) or a live JWKS endpoint — and is flattened so its variant key
+/// sits directly under `[auth]`. Static keys are parsed once at startup;
+/// JWKS keys are fetched at startup and refreshed in the background.
 #[configurable_component]
 #[derive(Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct AuthConfig {
-    /// Source of the RSA public key used to verify auth token signatures.
+    /// Source of the signing key used to verify auth token signatures.
     ///
     /// Required — deserialization fails if no variant key is present.
     #[serde(flatten, deserialize_with = "deserialize_authority_required")]
@@ -753,7 +753,7 @@ impl AuthConfig {
         // `algorithms` is only meaningful for static PEM authorities. The JWKS
         // endpoint is self-describing — accepted algorithms are derived from the
         // published keys, not from config.
-        if matches!(self.authority, Authority::Jwks(_)) && self.algorithms.is_some() {
+        if self.authority.is_jwks() && self.algorithms.is_some() {
             return Err(
                 "auth.algorithms is not applicable with `jwks` authority; \
                  accepted algorithms are derived from the keys published by the \
@@ -765,11 +765,11 @@ impl AuthConfig {
         let key_store = self.authority.build_key_store().await?;
 
         // For static PEM, build a Validation with the configured algorithm
-        // allowlist (defaulting to all RSA variants). For JWKS, the algorithm
-        // is always determined per-decode from the token's `alg` header; seed
-        // with a placeholder that authenticate() overrides on every call.
-        let mut validation = if matches!(self.authority, Authority::Jwks(_)) {
-            Validation::new(Algorithm::RS256) // placeholder; overridden per-decode
+        // allowlist (defaulting to all RSA variants). For JWKS, this is only
+        // used as a template for the per-algorithm map built below — it is
+        // never passed to decode() directly.
+        let mut validation = if self.authority.is_jwks() {
+            Validation::new(Algorithm::RS256) // base for per-alg map; not used directly
         } else {
             let default_algos = default_algorithms();
             let algos: &[AuthAlgorithm] = self.algorithms.as_deref().unwrap_or(&default_algos);
@@ -795,6 +795,30 @@ impl AuthConfig {
             validation.validate_aud = false;
         }
 
+        // For JWKS: precompute one `Validation` per supported algorithm so that
+        // `authenticate` never clones or allocates a `Validation` on the hot path.
+        let jwks_validations: HashMap<Algorithm, Validation> = if self.authority.is_jwks() {
+            [
+                Algorithm::RS256,
+                Algorithm::RS384,
+                Algorithm::RS512,
+                Algorithm::PS256,
+                Algorithm::PS384,
+                Algorithm::PS512,
+                Algorithm::ES256,
+                Algorithm::ES384,
+            ]
+            .into_iter()
+            .map(|alg| {
+                let mut v = validation.clone();
+                v.algorithms = vec![alg];
+                (alg, v)
+            })
+            .collect()
+        } else {
+            HashMap::new()
+        };
+
         let value_path = self
             .value_path
             .as_ref()
@@ -805,6 +829,7 @@ impl AuthConfig {
         Ok(Auth(Arc::new(Inner {
             key_store,
             validation,
+            jwks_validations,
             membership_claim: self.membership_claim.clone(),
             value_path,
             require_token: self.require_token,
@@ -832,6 +857,10 @@ impl AuthorityData {
 struct Inner {
     key_store: KeyStore,
     validation: Validation,
+    /// Per-algorithm `Validation` objects for the JWKS hot path. Built once at
+    /// startup so `authenticate` never allocates a `Validation` per request.
+    /// Empty for static-PEM authorities.
+    jwks_validations: HashMap<Algorithm, Validation>,
     membership_claim: String,
     value_path: Option<CompiledValuePath>,
     require_token: bool,
@@ -842,7 +871,7 @@ struct Inner {
 /// Holds the list of allowed membership values extracted from the JWT claim.
 /// Pass to per-event validation helpers in the source's event-processing loop.
 pub struct AuthContext {
-    pub(crate) allowed_values: BTreeSet<String>,
+    pub(crate) allowed_values: HashSet<String>,
 }
 
 impl AuthContext {
@@ -966,12 +995,13 @@ impl Auth {
     ///
     /// # Returns
     ///
-    /// * `Ok(None)` — `authorization` was absent; request is from a legacy sender and is
-    ///   allowed through for backwards compatibility.
+    /// * `Ok(None)` — `authorization` was absent and `require_token` is `false`; request is
+    ///   accepted without per-event filtering (legacy / migration mode).
     /// * `Ok(Some(ctx))` — token is valid. Use [`AuthContext::is_authorized`] for per-event
     ///   membership checks against the extracted allowed-values list.
-    /// * `Err(AuthError::InvalidToken)` — token is malformed, expired, has a bad signature,
-    ///   wrong issuer/audience, or the membership claim is missing.
+    /// * `Err(AuthError::InvalidToken)` — `authorization` was absent but required, the token
+    ///   is malformed/expired/bad-signature, wrong issuer/audience, unsupported algorithm,
+    ///   or the membership claim is missing.
     pub async fn authenticate(
         &self,
         authorization: Option<&str>,
@@ -993,12 +1023,8 @@ impl Auth {
         let token_data = match &inner.key_store {
             // Static key: single-pointer-deref hot path, no locks.
             KeyStore::Static(key) => {
-                decode::<serde_json::Map<String, Value>>(token, key, &inner.validation).map_err(
-                    |err| {
-                        warn!(message = "Token validation failed.", error = %err);
-                        AuthError::InvalidToken("invalid or expired token")
-                    },
-                )?
+                decode::<serde_json::Map<String, Value>>(token, key, &inner.validation)
+                    .map_err(token_validation_failed)?
             }
             // JWKS: look up by token's `kid`. ArcSwap snapshot is lock-free.
             // On miss, trigger a cooldown-gated reactive refresh and retry once.
@@ -1011,32 +1037,26 @@ impl Auth {
                     "token missing `kid` header",
                 ))?;
 
-                // jsonwebtoken v9 requires every entry in Validation::algorithms
-                // to share the same AlgorithmFamily as the DecodingKey (an RSA key
-                // rejects ES* and vice-versa). Narrow to just the token's claimed
-                // algorithm; decode then enforces that the key type actually matches.
-                let mut per_alg_validation = inner.validation.clone();
-                per_alg_validation.algorithms = vec![header.alg];
+                // jsonwebtoken v9 requires all entries in Validation::algorithms to share
+                // the same AlgorithmFamily as the DecodingKey. Use the precomputed
+                // per-algorithm Validation to avoid any hot-path allocation.
+                let per_alg_validation = inner
+                    .jwks_validations
+                    .get(&header.alg)
+                    .ok_or(AuthError::InvalidToken("unsupported algorithm"))?;
 
                 // Fast path: snapshot, lookup, verify under the same guard.
                 {
                     let snapshot = cache.snapshot();
                     if let Some(key) = snapshot.get(kid) {
-                        let result = decode::<serde_json::Map<String, Value>>(
+                        return decode::<serde_json::Map<String, Value>>(
                             token,
                             key,
-                            &per_alg_validation,
-                        );
-                        match result {
-                            Ok(data) => return Ok(Some(extract_membership(
-                                data,
-                                &inner.membership_claim,
-                            )?)),
-                            Err(err) => {
-                                warn!(message = "Token validation failed.", error = %err);
-                                return Err(AuthError::InvalidToken("invalid or expired token"));
-                            }
-                        }
+                            per_alg_validation,
+                        )
+                        .map_err(token_validation_failed)
+                        .and_then(|data| extract_membership(data, &inner.membership_claim))
+                        .map(Some);
                     }
                 }
 
@@ -1049,17 +1069,18 @@ impl Auth {
                     warn!(message = "Token signed by unknown key.", kid = %kid);
                     AuthError::InvalidToken("unknown signing key")
                 })?;
-                decode::<serde_json::Map<String, Value>>(token, key, &per_alg_validation).map_err(
-                    |err| {
-                        warn!(message = "Token validation failed.", error = %err);
-                        AuthError::InvalidToken("invalid or expired token")
-                    },
-                )?
+                decode::<serde_json::Map<String, Value>>(token, key, per_alg_validation)
+                    .map_err(token_validation_failed)?
             }
         };
 
         Ok(Some(extract_membership(token_data, &inner.membership_claim)?))
     }
+}
+
+fn token_validation_failed(err: jsonwebtoken::errors::Error) -> AuthError {
+    warn!(message = "Token validation failed.", error = %err);
+    AuthError::InvalidToken("invalid or expired token")
 }
 
 /// Extract the membership-claim array from validated token data into an
@@ -1075,7 +1096,7 @@ fn extract_membership(
         .and_then(Value::as_array)
         .ok_or(AuthError::InvalidToken("token missing membership claim"))?;
 
-    let allowed_values: BTreeSet<String> = allowed
+    let allowed_values: HashSet<String> = allowed
         .iter()
         .filter_map(|v| v.as_str().map(str::to_owned))
         .collect();
@@ -1816,25 +1837,7 @@ require_token     = false
     }
 
     fn make_jwks_json(kid: &str, use_sig: bool) -> serde_json::Value {
-        use base64::Engine;
-        use openssl::rsa::Rsa;
-
-        let rsa = Rsa::public_key_from_pem(TEST_PUBLIC_KEY.as_bytes()).unwrap();
-        let n = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rsa.n().to_vec());
-        let e = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rsa.e().to_vec());
-        let use_field = if use_sig { "sig" } else { "enc" };
-        serde_json::json!({
-            "keys": [
-                {
-                    "kid": kid,
-                    "kty": "RSA",
-                    "use": use_field,
-                    "alg": "RS256",
-                    "n": n,
-                    "e": e,
-                }
-            ]
-        })
+        make_jwks_json_full(kid, use_sig, true)
     }
 
     /// Mint a JWT signed by the test private key with an explicit `kid`.
