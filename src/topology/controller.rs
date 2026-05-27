@@ -7,7 +7,7 @@ use tokio::sync::{Mutex, MutexGuard};
 #[cfg(feature = "api")]
 use crate::api;
 use crate::extra_context::ExtraContext;
-use crate::internal_events::{VectorRecoveryError, VectorReloadError, VectorReloaded};
+use crate::internal_events::{VectorRecoveryError, VectorReloadError, VectorReloaded, VectorReloadStarted};
 
 use crate::{config, signal::ShutdownError, topology::RunningTopology};
 
@@ -60,6 +60,7 @@ pub enum ReloadOutcome {
 
 impl TopologyController {
     pub async fn reload(&mut self, mut new_config: config::Config) -> ReloadOutcome {
+        emit!(VectorReloadStarted);
         new_config
             .healthchecks
             .set_require_healthy(self.require_healthy);
