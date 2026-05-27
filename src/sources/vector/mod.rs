@@ -116,7 +116,7 @@ impl Service {
     ///
     /// Shared between `push_events` and `health_check` so both RPCs honor the
     /// same `require_token` enforcement and reject the same set of bad tokens.
-    fn validate_auth_header<T>(
+    async fn validate_auth_header<T>(
         &self,
         request: &Request<T>,
     ) -> Result<Option<AuthContext>, Status> {
@@ -128,6 +128,7 @@ impl Service {
             .get("authorization")
             .and_then(|v| v.to_str().ok());
         auth.authenticate(authorization)
+            .await
             .map_err(|AuthError::InvalidToken(msg)| Status::unauthenticated(msg))
     }
 }
@@ -139,7 +140,7 @@ impl proto::Service for Service {
         request: Request<proto::PushEventsRequest>,
     ) -> Result<Response<proto::PushEventsResponse>, Status> {
         // Request-level JWT validation.
-        let auth_ctx = self.validate_auth_header(&request)?;
+        let auth_ctx = self.validate_auth_header(&request).await?;
 
         // Build the per-event validator once. Present only when auth is configured,
         // a valid token was provided, AND a `value_path` is set for per-event filtering.
@@ -255,7 +256,7 @@ impl proto::Service for Service {
     ) -> Result<Response<proto::HealthCheckResponse>, Status> {
         // Apply the same JWT validation as push_events — same auth posture,
         // including `require_token` enforcement when configured.
-        self.validate_auth_header(&request)?;
+        self.validate_auth_header(&request).await?;
 
         let message = proto::HealthCheckResponse {
             status: proto::ServingStatus::Serving.into(),
@@ -351,7 +352,10 @@ impl SourceConfig for VectorConfig {
         let acknowledgements = cx.do_acknowledgements(self.acknowledgements);
         let log_namespace = cx.log_namespace(self.log_namespace);
 
-        let auth = self.auth.as_ref().map(|cfg| cfg.build()).transpose()?;
+        let auth = match self.auth.as_ref() {
+            Some(cfg) => Some(cfg.build().await?),
+            None => None,
+        };
         let auth_metrics = auth.as_ref().map(|_| AuthMetrics::new());
 
         let service = proto::Server::new(Service {

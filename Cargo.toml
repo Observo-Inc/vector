@@ -709,7 +709,7 @@ sources-utils-net-unix = []
 sources-websocket = ["dep:tokio-tungstenite"]
 sources-wef = ["dep:wef"]
 
-sources-vector = ["dep:prost", "dep:tonic", "dep:jsonwebtoken", "protobuf-build"]
+sources-vector = ["dep:prost", "dep:tonic", "dep:jsonwebtoken", "dep:arc-swap", "protobuf-build"]
 
 # Transforms
 transforms = ["transforms-logs", "transforms-metrics"]

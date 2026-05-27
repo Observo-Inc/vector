@@ -100,7 +100,7 @@ pub fn bearer(token: &str) -> String {
 }
 
 /// Build an `Auth` from the test public key with optional issuer/audience.
-pub fn build_auth(issuer: Option<&str>, audience: Option<Vec<&str>>) -> Auth {
+pub async fn build_auth(issuer: Option<&str>, audience: Option<Vec<&str>>) -> Auth {
     AuthConfig {
         authority: Authority::PublicKey(AuthorityData::Inline {
             value: TEST_PUBLIC_KEY.to_string(),
@@ -113,5 +113,6 @@ pub fn build_auth(issuer: Option<&str>, audience: Option<Vec<&str>>) -> Auth {
         require_token: true,
     }
     .build()
+    .await
     .unwrap()
 }

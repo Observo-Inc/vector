@@ -1,13 +1,18 @@
 use std::borrow::Cow;
-use std::collections::BTreeSet;
-use std::sync::{Arc, LazyLock};
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex, Weak};
+use std::time::{Duration, Instant};
 
-use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+use arc_swap::ArcSwap;
+use jsonwebtoken::jwk::{AlgorithmParameters, JwkSet, KeyAlgorithm, PublicKeyUse};
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use openssl::x509::X509;
 use serde_json::Value;
 use vector_lib::configurable::configurable_component;
 use vector_lib::event::Event;
 use vrl::path::{parse_target_path, OwnedTargetPath};
+
+use crate::http::HttpClient;
 
 /// Pre-parsed path for the `auth_field_name` log/trace metadata field.
 pub(crate) static AUTH_FIELD_NAME_PATH: LazyLock<OwnedTargetPath> =
@@ -103,6 +108,56 @@ pub enum AuthorityData {
         /// Path to the PEM file.
         path: String,
     },
+}
+
+/// JWKS endpoint source (Keycloak / Auth0 / Okta / Cognito / Google / any
+/// OIDC-compliant IdP). The JWKS is fetched at startup, indexed by `kid`,
+/// and refreshed both periodically and reactively when a token arrives with
+/// a `kid` not in the cache.
+///
+/// Selected via the [`Authority::Jwks`] variant on [`AuthConfig`].
+///
+/// ## Example
+///
+/// ```toml
+/// [sources.my_source.auth.jwks]
+/// jwks_url = "https://kc.example/realms/master/protocol/openid-connect/certs"
+/// refresh_interval_secs = 300
+/// ```
+#[configurable_component]
+#[derive(Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct JwksAuthority {
+    /// URL of the JWKS endpoint. Must return a JSON document of the form
+    /// `{"keys": [<JWK>...]}` as defined by RFC 7517.
+    pub jwks_url: String,
+
+    /// Background refresh interval, in seconds. Default: 300 (5 minutes).
+    #[serde(default = "default_jwks_refresh_interval_secs")]
+    pub refresh_interval_secs: u64,
+
+    /// Per-fetch timeout, in seconds. Applies to both the initial fetch
+    /// and subsequent refreshes. Default: 10.
+    #[serde(default = "default_jwks_fetch_timeout_secs")]
+    pub fetch_timeout_secs: u64,
+
+    /// Minimum interval between reactive (on-unknown-kid) refreshes, in
+    /// seconds. Acts as a cooldown to prevent refresh storms triggered by
+    /// adversarial traffic. Default: 30.
+    #[serde(default = "default_jwks_min_reactive_refresh_secs")]
+    pub min_reactive_refresh_secs: u64,
+}
+
+const fn default_jwks_refresh_interval_secs() -> u64 {
+    300
+}
+
+const fn default_jwks_fetch_timeout_secs() -> u64 {
+    10
+}
+
+const fn default_jwks_min_reactive_refresh_secs() -> u64 {
+    30
 }
 
 /// Event field paths used to extract the membership value for per-event auth.
@@ -312,16 +367,39 @@ pub enum Authority {
     /// certificate. Only the public key bytes are kept at runtime — certificate
     /// validity windows, issuer chains, and revocation status are **not** checked.
     TlsCert(AuthorityData),
+    /// JWKS endpoint (Keycloak / Auth0 / Okta / Cognito / any OIDC IdP).
+    /// Multi-key, refreshes both periodically and reactively on unknown `kid`.
+    Jwks(JwksAuthority),
 }
 
 impl Authority {
-    /// Resolve the configured source into the public-key PEM that
-    /// `jsonwebtoken::DecodingKey::from_rsa_pem` accepts.
-    fn load_public_key_pem(&self) -> crate::Result<String> {
+    /// Resolve the configured source into a runtime [`KeyStore`].
+    ///
+    /// For static variants this is a synchronous PEM parse. For [`Self::Jwks`]
+    /// this performs the initial HTTPS fetch and spawns the background
+    /// refresh task — fail-fast if the endpoint is unreachable.
+    async fn build_key_store(
+        &self,
+        algorithms: &[AuthAlgorithm],
+    ) -> crate::Result<KeyStore> {
         match self {
-            Authority::PublicKey(pk) => pk.load("public_key"),
+            Authority::PublicKey(pk) => {
+                let pem = pk.load("public_key")?;
+                let key = DecodingKey::from_rsa_pem(pem.as_bytes()).map_err(|error| {
+                    format!("Failed to parse RSA public key PEM: {error}")
+                })?;
+                Ok(KeyStore::Static(Arc::new(key)))
+            }
             Authority::TlsCert(cert) => {
-                Self::extract_public_key_pem_from_cert_pem(&cert.load("tls_cert")?)
+                let pem = Self::extract_public_key_pem_from_cert_pem(&cert.load("tls_cert")?)?;
+                let key = DecodingKey::from_rsa_pem(pem.as_bytes()).map_err(|error| {
+                    format!("Failed to parse RSA public key PEM: {error}")
+                })?;
+                Ok(KeyStore::Static(Arc::new(key)))
+            }
+            Authority::Jwks(cfg) => {
+                let cache = JwksCache::new(cfg, algorithms).await?;
+                Ok(KeyStore::Jwks(cache))
             }
         }
     }
@@ -340,6 +418,240 @@ impl Authority {
         String::from_utf8(pem_bytes)
             .map_err(|error| format!("Extracted public key PEM was not valid UTF-8: {error}").into())
     }
+}
+
+/// Runtime verification key material. Two shapes:
+///
+/// - [`Self::Static`]: a single [`DecodingKey`] resolved at startup. The hot
+///   path is a single pointer deref — no locks, no allocation.
+/// - [`Self::Jwks`]: an [`ArcSwap`]-backed map keyed by `kid`. Reads are
+///   lock-free atomic pointer loads; the background refresher swaps in a new
+///   map on each successful fetch. Designed for the millions-of-requests-per-
+///   second hot path.
+enum KeyStore {
+    Static(Arc<DecodingKey>),
+    Jwks(Arc<JwksCache>),
+}
+
+/// Decoded JWKS, indexed by `kid` for O(1) per-request lookup.
+type KeyMap = HashMap<String, DecodingKey>;
+
+/// Shared cache backing the [`Authority::Jwks`] variant.
+///
+/// Hot-path reads go through [`Self::snapshot`] which returns a lock-free
+/// [`arc_swap::Guard`] over the current [`KeyMap`]. Refreshes — both periodic
+/// (background tokio task) and reactive (on unknown `kid`) — produce a new
+/// [`KeyMap`] and call [`ArcSwap::store`] to publish it atomically.
+struct JwksCache {
+    keys: ArcSwap<KeyMap>,
+    fetcher: JwksFetcher,
+    /// Last-refresh timestamp guarding the reactive-refresh cooldown. A
+    /// stdlib mutex (uncontended, sub-µs) is sufficient — this gate is hit
+    /// only on the cold path of unknown-kid tokens.
+    last_refresh: StdMutex<Instant>,
+    min_reactive_refresh: Duration,
+}
+
+impl JwksCache {
+    /// Construct, perform the initial fetch (fail-fast), and spawn the
+    /// background refresh task. Returns `Arc<Self>` so the refresh task can
+    /// hold a `Weak` and self-terminate when the [`Auth`] is dropped.
+    async fn new(
+        cfg: &JwksAuthority,
+        algorithms: &[AuthAlgorithm],
+    ) -> crate::Result<Arc<Self>> {
+        let fetcher = JwksFetcher::new(cfg, algorithms)?;
+        let initial = fetcher.fetch().await.map_err(|error| {
+            format!("auth.jwks: initial fetch from '{}' failed: {error}", cfg.jwks_url)
+        })?;
+        if initial.is_empty() {
+            return Err(format!(
+                "auth.jwks: '{}' returned no usable signing keys \
+                 (none matched use=sig and an allowed algorithm)",
+                cfg.jwks_url
+            )
+            .into());
+        }
+        let cache = Arc::new(Self {
+            keys: ArcSwap::new(Arc::new(initial)),
+            fetcher,
+            last_refresh: StdMutex::new(Instant::now()),
+            min_reactive_refresh: Duration::from_secs(cfg.min_reactive_refresh_secs),
+        });
+        Self::spawn_refresher(&cache, Duration::from_secs(cfg.refresh_interval_secs));
+        Ok(cache)
+    }
+
+    fn spawn_refresher(cache: &Arc<Self>, interval: Duration) {
+        let weak: Weak<Self> = Arc::downgrade(cache);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(interval);
+            // Skip the immediate first firing — we already fetched in `new`.
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                let Some(strong) = weak.upgrade() else {
+                    debug!(message = "JWKS refresher exiting: Auth dropped.");
+                    return;
+                };
+                match strong.fetcher.fetch().await {
+                    Ok(map) if map.is_empty() => {
+                        warn!(message = "JWKS periodic refresh returned no usable keys; keeping previous keys.");
+                    }
+                    Ok(map) => {
+                        strong.keys.store(Arc::new(map));
+                        *strong.last_refresh.lock().expect("last_refresh poisoned") =
+                            Instant::now();
+                    }
+                    Err(error) => {
+                        warn!(message = "JWKS periodic refresh failed; keeping previous keys.", %error);
+                    }
+                }
+            }
+        });
+    }
+
+    /// Lock-free snapshot of the current key map. Caller holds the guard for
+    /// the duration of `decode` so the borrow into the map remains valid.
+    fn snapshot(&self) -> arc_swap::Guard<Arc<KeyMap>> {
+        self.keys.load()
+    }
+
+    /// Trigger a one-shot reactive refresh, gated by the cooldown window.
+    ///
+    /// Concurrent callers: the cooldown timestamp is set *before* the network
+    /// fetch, so a second caller that races past the gate sees the updated
+    /// timestamp and returns without firing a duplicate request.
+    async fn refresh_if_due(&self) {
+        {
+            let mut last = self.last_refresh.lock().expect("last_refresh poisoned");
+            if last.elapsed() < self.min_reactive_refresh {
+                return;
+            }
+            *last = Instant::now();
+        }
+        match self.fetcher.fetch().await {
+            Ok(map) if map.is_empty() => {
+                warn!(message = "JWKS reactive refresh returned no usable keys.");
+            }
+            Ok(map) => {
+                self.keys.store(Arc::new(map));
+            }
+            Err(error) => {
+                warn!(message = "JWKS reactive refresh failed.", %error);
+            }
+        }
+    }
+}
+
+/// HTTPS fetcher for the JWKS endpoint.
+///
+/// Uses Vector's standard [`HttpClient`] so it shares TLS/proxy/user-agent
+/// behavior with the rest of the binary. The [`ProxyConfig::from_env`] call
+/// at construction time picks up the standard `HTTPS_PROXY` / `NO_PROXY`
+/// environment variables automatically.
+struct JwksFetcher {
+    url: http::Uri,
+    client: HttpClient,
+    timeout: Duration,
+    algorithms: Vec<Algorithm>,
+}
+
+impl JwksFetcher {
+    fn new(cfg: &JwksAuthority, algorithms: &[AuthAlgorithm]) -> crate::Result<Self> {
+        let url: http::Uri = cfg.jwks_url.parse().map_err(|error| {
+            format!("auth.jwks.jwks_url '{}' is not a valid URL: {error}", cfg.jwks_url)
+        })?;
+        let proxy = vector_lib::config::proxy::ProxyConfig::from_env();
+        let client = HttpClient::new(None, &proxy, &crate::app_info())
+            .map_err(|error| format!("auth.jwks: failed to build HTTP client: {error}"))?;
+        Ok(Self {
+            url,
+            client,
+            timeout: Duration::from_secs(cfg.fetch_timeout_secs),
+            algorithms: algorithms.iter().copied().map(Algorithm::from).collect(),
+        })
+    }
+
+    async fn fetch(&self) -> crate::Result<KeyMap> {
+        let request = http::Request::get(&self.url)
+            .header(http::header::ACCEPT, "application/json")
+            .body(hyper::Body::empty())
+            .map_err(|error| format!("failed to build JWKS request: {error}"))?;
+
+        let response = tokio::time::timeout(self.timeout, self.client.send(request))
+            .await
+            .map_err(|_| format!("timed out after {:?}", self.timeout))?
+            .map_err(|error| format!("HTTP request failed: {error}"))?;
+
+        if !response.status().is_success() {
+            return Err(format!("JWKS endpoint returned HTTP {}", response.status()).into());
+        }
+
+        let bytes = hyper::body::to_bytes(response.into_body())
+            .await
+            .map_err(|error| format!("failed to read JWKS response body: {error}"))?;
+
+        let jwk_set: JwkSet = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("JWKS response is not valid JSON: {error}"))?;
+
+        Ok(self.build_key_map(jwk_set))
+    }
+
+    fn build_key_map(&self, jwk_set: JwkSet) -> KeyMap {
+        let mut map = KeyMap::with_capacity(jwk_set.keys.len());
+        for jwk in &jwk_set.keys {
+            // Skip non-signing keys (Keycloak publishes both `enc` and `sig`).
+            if let Some(use_) = &jwk.common.public_key_use {
+                if !matches!(use_, PublicKeyUse::Signature) {
+                    continue;
+                }
+            }
+            // Skip non-RSA keys; the current Auth only supports RSA.
+            if !matches!(jwk.algorithm, AlgorithmParameters::RSA(_)) {
+                continue;
+            }
+            // Filter to configured algorithm allowlist if `alg` is advertised.
+            if let Some(alg) = jwk.common.key_algorithm {
+                if !key_algorithm_in_allowlist(alg, &self.algorithms) {
+                    continue;
+                }
+            }
+            let Some(kid) = jwk.common.key_id.clone() else {
+                // `kid`-less JWKS entries are unusable: we can't look them up
+                // per token without scanning every key. Skip with a hint.
+                warn!(message = "JWKS entry skipped: missing `kid`.");
+                continue;
+            };
+            match DecodingKey::from_jwk(jwk) {
+                Ok(key) => {
+                    map.insert(kid, key);
+                }
+                Err(error) => {
+                    warn!(message = "JWKS entry skipped: failed to build decoding key.", %error);
+                }
+            }
+        }
+        map
+    }
+}
+
+/// Map a JWK-side [`KeyAlgorithm`] to our [`Algorithm`] allowlist.
+///
+/// jsonwebtoken distinguishes between `Algorithm` (used at verification time)
+/// and `KeyAlgorithm` (advertised on the JWK). They share names but live in
+/// different types with no `From` impl in either direction.
+fn key_algorithm_in_allowlist(jwk_alg: KeyAlgorithm, allowlist: &[Algorithm]) -> bool {
+    let mapped = match jwk_alg {
+        KeyAlgorithm::RS256 => Some(Algorithm::RS256),
+        KeyAlgorithm::RS384 => Some(Algorithm::RS384),
+        KeyAlgorithm::RS512 => Some(Algorithm::RS512),
+        KeyAlgorithm::PS256 => Some(Algorithm::PS256),
+        KeyAlgorithm::PS384 => Some(Algorithm::PS384),
+        KeyAlgorithm::PS512 => Some(Algorithm::PS512),
+        _ => None,
+    };
+    mapped.is_some_and(|a| allowlist.contains(&a))
 }
 
 /// Auth configuration for sources.
@@ -433,7 +745,7 @@ where
         let msg = original.to_string();
         if msg.contains("no variant of enum") {
             D::Error::custom(
-                "auth: must set one of `public_key` or `tls_cert` \
+                "auth: must set one of `public_key`, `tls_cert`, or `jwks` \
                  (e.g. `public_key.type = \"file\"`, `public_key.path = \"/path/to/key.pem\"`)",
             )
         } else {
@@ -444,20 +756,20 @@ where
 
 impl AuthConfig {
     /// Builds the runtime [`Auth`] by resolving the configured [`Authority`]
-    /// (a public key PEM directly, or a TLS cert PEM via SPKI extraction)
-    /// and parsing it into a verifier.
+    /// (a static PEM, a TLS cert via SPKI extraction, or a JWKS endpoint with
+    /// initial fetch + background refresh) and assembling the verifier.
     ///
-    /// All I/O and PEM parsing happen here — once at startup.
-    /// The resulting [`Auth`] is cheap to clone and holds no file handles.
-    pub fn build(&self) -> crate::Result<Auth> {
-        let pem = self.authority.load_public_key_pem()?;
-
-        let decoding_key = DecodingKey::from_rsa_pem(pem.as_bytes())
-            .map_err(|error| format!("Failed to parse RSA public key PEM: {error}"))?;
-
+    /// All I/O and PEM parsing happen here — once at startup. The resulting
+    /// [`Auth`] is cheap to clone and holds no file handles. For the JWKS
+    /// authority, build returns an error if the initial fetch fails so that
+    /// misconfigurations surface at `vector validate` / source startup
+    /// rather than at first-request time.
+    pub async fn build(&self) -> crate::Result<Auth> {
         if self.algorithms.is_empty() {
             return Err("auth.algorithms must contain at least one algorithm".into());
         }
+
+        let key_store = self.authority.build_key_store(&self.algorithms).await?;
 
         // Seed `Validation` with the first algorithm, then overwrite with the
         // full allowlist. jsonwebtoken's verifier checks the token's `alg`
@@ -484,14 +796,13 @@ impl AuthConfig {
             .map_err(|e| format!("Failed to parse auth value_path: {e}"))?;
 
         Ok(Auth(Arc::new(Inner {
-            decoding_key,
+            key_store,
             validation,
             membership_claim: self.membership_claim.clone(),
             value_path,
             require_token: self.require_token,
         })))
     }
-
 }
 
 impl AuthorityData {
@@ -508,10 +819,11 @@ impl AuthorityData {
     }
 }
 
-// Private — holds the parsed key and validation config behind Arc so Auth is
-// cheap to clone across tokio tasks without copying the RSA key bytes.
+// Private — holds the resolved key material and validation config behind Arc
+// so Auth is cheap to clone across tokio tasks without copying RSA key bytes
+// or duplicating the JWKS cache.
 struct Inner {
-    decoding_key: DecodingKey,
+    key_store: KeyStore,
     validation: Validation,
     membership_claim: String,
     value_path: Option<CompiledValuePath>,
@@ -653,7 +965,7 @@ impl Auth {
     ///   membership checks against the extracted allowed-values list.
     /// * `Err(AuthError::InvalidToken)` — token is malformed, expired, has a bad signature,
     ///   wrong issuer/audience, or the membership claim is missing.
-    pub fn authenticate(
+    pub async fn authenticate(
         &self,
         authorization: Option<&str>,
     ) -> Result<Option<AuthContext>, AuthError> {
@@ -671,27 +983,90 @@ impl Auth {
             .ok_or(AuthError::InvalidToken("authorization must use Bearer scheme"))?;
 
         let inner = &self.0;
-
-        let token_data =
-            decode::<serde_json::Map<String, Value>>(token, &inner.decoding_key, &inner.validation)
-                .map_err(|err| {
-                    warn!(message = "Token validation failed.", error = %err);
-                    AuthError::InvalidToken("invalid or expired token")
+        let token_data = match &inner.key_store {
+            // Static key: single-pointer-deref hot path, no locks.
+            KeyStore::Static(key) => {
+                decode::<serde_json::Map<String, Value>>(token, key, &inner.validation).map_err(
+                    |err| {
+                        warn!(message = "Token validation failed.", error = %err);
+                        AuthError::InvalidToken("invalid or expired token")
+                    },
+                )?
+            }
+            // JWKS: look up by token's `kid`. ArcSwap snapshot is lock-free.
+            // On miss, trigger a cooldown-gated reactive refresh and retry once.
+            KeyStore::Jwks(cache) => {
+                let header = decode_header(token).map_err(|err| {
+                    warn!(message = "JWT header parse failed.", error = %err);
+                    AuthError::InvalidToken("invalid token header")
                 })?;
+                let kid = header.kid.as_deref().ok_or(AuthError::InvalidToken(
+                    "token missing `kid` header",
+                ))?;
 
-        let allowed = token_data
-            .claims
-            .get(&inner.membership_claim)
-            .and_then(Value::as_array)
-            .ok_or(AuthError::InvalidToken("token missing membership claim"))?;
+                // Fast path: snapshot, lookup, verify under the same guard.
+                {
+                    let snapshot = cache.snapshot();
+                    if let Some(key) = snapshot.get(kid) {
+                        let result = decode::<serde_json::Map<String, Value>>(
+                            token,
+                            key,
+                            &inner.validation,
+                        );
+                        match result {
+                            Ok(data) => return Ok(Some(extract_membership(
+                                data,
+                                &inner.membership_claim,
+                            )?)),
+                            Err(err) => {
+                                warn!(message = "Token validation failed.", error = %err);
+                                return Err(AuthError::InvalidToken("invalid or expired token"));
+                            }
+                        }
+                    }
+                }
 
-        let allowed_values: BTreeSet<String> = allowed
-            .iter()
-            .filter_map(|v| v.as_str().map(str::to_owned))
-            .collect();
+                // Slow path: unknown kid → reactive refresh (cooldown-gated)
+                // → look up again. If still missing, the kid is genuinely
+                // not served by this IdP.
+                cache.refresh_if_due().await;
+                let snapshot = cache.snapshot();
+                let key = snapshot.get(kid).ok_or_else(|| {
+                    warn!(message = "Token signed by unknown key.", kid = %kid);
+                    AuthError::InvalidToken("unknown signing key")
+                })?;
+                decode::<serde_json::Map<String, Value>>(token, key, &inner.validation).map_err(
+                    |err| {
+                        warn!(message = "Token validation failed.", error = %err);
+                        AuthError::InvalidToken("invalid or expired token")
+                    },
+                )?
+            }
+        };
 
-        Ok(Some(AuthContext { allowed_values }))
+        Ok(Some(extract_membership(token_data, &inner.membership_claim)?))
     }
+}
+
+/// Extract the membership-claim array from validated token data into an
+/// [`AuthContext`]. Returns `InvalidToken` if the claim is missing or not
+/// a JSON array.
+fn extract_membership(
+    token_data: jsonwebtoken::TokenData<serde_json::Map<String, Value>>,
+    membership_claim: &str,
+) -> Result<AuthContext, AuthError> {
+    let allowed = token_data
+        .claims
+        .get(membership_claim)
+        .and_then(Value::as_array)
+        .ok_or(AuthError::InvalidToken("token missing membership claim"))?;
+
+    let allowed_values: BTreeSet<String> = allowed
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+
+    Ok(AuthContext { allowed_values })
 }
 
 /// Strip the `Bearer` auth scheme from a header value, case-insensitively and
@@ -754,87 +1129,88 @@ mod tests {
 
     // ── AuthConfig::build ────────────────────────────────────────────────────
 
-    #[test]
-    fn build_from_inline_pem_succeeds() {
-        assert!(cfg_with(inline_public_key()).build().is_ok());
+    #[tokio::test]
+    async fn build_from_inline_pem_succeeds() {
+        assert!(cfg_with(inline_public_key()).build().await.is_ok());
     }
 
-    #[test]
-    fn build_from_file_pem_succeeds() {
+    #[tokio::test]
+    async fn build_from_file_pem_succeeds() {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         f.write_all(TEST_PUBLIC_KEY.as_bytes()).unwrap();
 
         let cfg = cfg_with(Authority::PublicKey(AuthorityData::File {
             path: f.path().to_str().unwrap().into(),
         }));
-        assert!(cfg.build().is_ok());
+        assert!(cfg.build().await.is_ok());
     }
 
-    #[test]
-    fn build_with_invalid_pem_fails() {
+    #[tokio::test]
+    async fn build_with_invalid_pem_fails() {
         let cfg = cfg_with(Authority::PublicKey(AuthorityData::Inline {
             value: "this is not a PEM".to_string(),
         }));
-        assert!(cfg.build().is_err());
+        assert!(cfg.build().await.is_err());
     }
 
-    #[test]
-    fn build_with_missing_pem_file_fails() {
+    #[tokio::test]
+    async fn build_with_missing_pem_file_fails() {
         let cfg = cfg_with(Authority::PublicKey(AuthorityData::File {
             path: "/nonexistent/path/key.pem".to_string(),
         }));
-        assert!(cfg.build().is_err());
+        assert!(cfg.build().await.is_err());
     }
 
-    #[test]
-    fn build_with_missing_tls_cert_file_fails() {
+    #[tokio::test]
+    async fn build_with_missing_tls_cert_file_fails() {
         let cfg = cfg_with(Authority::TlsCert(AuthorityData::File {
             path: "/nonexistent/path/auth.crt".to_string(),
         }));
-        assert!(cfg.build().is_err());
+        assert!(cfg.build().await.is_err());
     }
 
-    #[test]
-    fn build_from_inline_tls_cert_succeeds() {
+    #[tokio::test]
+    async fn build_from_inline_tls_cert_succeeds() {
         let auth = cfg_with(inline_tls_cert())
             .build()
+            .await
             .expect("AuthConfig::build should accept an X.509 certificate PEM via tls_cert");
 
         // The public key extracted from the cert must actually verify tokens
         // signed by the matching test private key — not just parse cleanly.
         let token = make_token(HashMap::new());
-        let ctx = auth.authenticate(Some(&bearer(&token))).unwrap().unwrap();
+        let ctx = auth.authenticate(Some(&bearer(&token))).await.unwrap().unwrap();
         assert!(ctx.is_authorized("site-123"));
     }
 
-    #[test]
-    fn build_from_tls_cert_file_succeeds() {
+    #[tokio::test]
+    async fn build_from_tls_cert_file_succeeds() {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         f.write_all(TEST_CERT.as_bytes()).unwrap();
 
         let cfg = cfg_with(Authority::TlsCert(AuthorityData::File {
             path: f.path().to_str().unwrap().into(),
         }));
-        assert!(cfg.build().is_ok());
+        assert!(cfg.build().await.is_ok());
     }
 
-    #[test]
-    fn build_with_malformed_tls_cert_pem_fails() {
+    #[tokio::test]
+    async fn build_with_malformed_tls_cert_pem_fails() {
         let cfg = cfg_with(Authority::TlsCert(AuthorityData::Inline {
             value: "-----BEGIN CERTIFICATE-----\nnot-base64\n-----END CERTIFICATE-----\n"
                 .to_string(),
         }));
-        assert!(cfg.build().is_err());
+        assert!(cfg.build().await.is_err());
     }
 
-    #[test]
-    fn build_with_public_key_pem_in_tls_cert_field_fails() {
+    #[tokio::test]
+    async fn build_with_public_key_pem_in_tls_cert_field_fails() {
         // tls_cert is strictly X.509 — feeding it a bare RSA public key
         // PEM must surface the cert parser's failure, not silently accept it.
         let cfg = cfg_with(Authority::TlsCert(AuthorityData::Inline {
             value: TEST_PUBLIC_KEY.to_string(),
         }));
-        assert!(cfg.build().is_err());
+        assert!(cfg.build().await.is_err());
     }
 
     // No symmetric `cert PEM in public_key field` negative test: jsonwebtoken's
@@ -851,142 +1227,142 @@ mod tests {
 
     // ── Auth::authenticate ───────────────────────────────────────────────────
 
-    #[test]
-    fn no_auth_header_allows_legacy_client_when_require_token_false() {
+    #[tokio::test]
+    async fn no_auth_header_allows_legacy_client_when_require_token_false() {
         // The shared `build_auth` helper now matches production default
         // (require_token = true), so explicitly opt out to test legacy mode.
-        let auth = build_auth_with_require_token(false);
-        let result = auth.authenticate(None);
+        let auth = build_auth_with_require_token(false).await;
+        let result = auth.authenticate(None).await;
         assert!(matches!(result, Ok(None)));
     }
 
-    #[test]
-    fn valid_token_returns_allowed_values() {
-        let auth = build_auth(None, None);
+    #[tokio::test]
+    async fn valid_token_returns_allowed_values() {
+        let auth = build_auth(None, None).await;
         let token = make_token(HashMap::new());
-        let ctx = auth.authenticate(Some(&bearer(&token))).unwrap().unwrap();
+        let ctx = auth.authenticate(Some(&bearer(&token))).await.unwrap().unwrap();
         assert!(ctx.is_authorized("site-123"));
         assert!(ctx.is_authorized("site-456"));
         assert!(!ctx.is_authorized("site-other"));
     }
 
-    #[test]
-    fn non_bearer_scheme_rejected() {
-        let auth = build_auth(None, None);
+    #[tokio::test]
+    async fn non_bearer_scheme_rejected() {
+        let auth = build_auth(None, None).await;
         let token = make_token(HashMap::new());
-        let result = auth.authenticate(Some(&format!("Basic {token}")));
+        let result = auth.authenticate(Some(&format!("Basic {token}"))).await;
         assert!(matches!(result, Err(AuthError::InvalidToken(_))));
     }
 
-    #[test]
-    fn malformed_token_rejected() {
-        let auth = build_auth(None, None);
-        let result = auth.authenticate(Some("Bearer not.a.jwt"));
+    #[tokio::test]
+    async fn malformed_token_rejected() {
+        let auth = build_auth(None, None).await;
+        let result = auth.authenticate(Some("Bearer not.a.jwt")).await;
         assert!(matches!(result, Err(AuthError::InvalidToken(_))));
     }
 
-    #[test]
-    fn expired_token_rejected() {
-        let auth = build_auth(None, None);
+    #[tokio::test]
+    async fn expired_token_rejected() {
+        let auth = build_auth(None, None).await;
         let mut extra = HashMap::new();
         extra.insert("exp", serde_json::json!(now_secs() - 3600));
         let token = make_token(extra);
-        let result = auth.authenticate(Some(&bearer(&token)));
+        let result = auth.authenticate(Some(&bearer(&token))).await;
         assert!(matches!(result, Err(AuthError::InvalidToken(_))));
     }
 
-    #[test]
-    fn wrong_issuer_rejected() {
-        let auth = build_auth(Some("https://expected.example.com/"), None);
+    #[tokio::test]
+    async fn wrong_issuer_rejected() {
+        let auth = build_auth(Some("https://expected.example.com/"), None).await;
         let mut extra = HashMap::new();
         extra.insert("iss", serde_json::json!("https://other.example.com/"));
         let token = make_token(extra);
-        let result = auth.authenticate(Some(&bearer(&token)));
+        let result = auth.authenticate(Some(&bearer(&token))).await;
         assert!(matches!(result, Err(AuthError::InvalidToken(_))));
     }
 
-    #[test]
-    fn matching_issuer_passes() {
-        let auth = build_auth(Some("https://expected.example.com/"), None);
+    #[tokio::test]
+    async fn matching_issuer_passes() {
+        let auth = build_auth(Some("https://expected.example.com/"), None).await;
         let mut extra = HashMap::new();
         extra.insert("iss", serde_json::json!("https://expected.example.com/"));
         let token = make_token(extra);
-        let result = auth.authenticate(Some(&bearer(&token)));
+        let result = auth.authenticate(Some(&bearer(&token))).await;
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn wrong_audience_rejected() {
-        let auth = build_auth(None, Some(vec!["https://expected-api/"]));
+    #[tokio::test]
+    async fn wrong_audience_rejected() {
+        let auth = build_auth(None, Some(vec!["https://expected-api/"])).await;
         let mut extra = HashMap::new();
         extra.insert("aud", serde_json::json!(["https://other-api/"]));
         let token = make_token(extra);
-        let result = auth.authenticate(Some(&bearer(&token)));
+        let result = auth.authenticate(Some(&bearer(&token))).await;
         assert!(matches!(result, Err(AuthError::InvalidToken(_))));
     }
 
-    #[test]
-    fn matching_audience_passes() {
-        let auth = build_auth(None, Some(vec!["https://expected-api/"]));
+    #[tokio::test]
+    async fn matching_audience_passes() {
+        let auth = build_auth(None, Some(vec!["https://expected-api/"])).await;
         let mut extra = HashMap::new();
         extra.insert("aud", serde_json::json!(["https://expected-api/"]));
         let token = make_token(extra);
-        let result = auth.authenticate(Some(&bearer(&token)));
+        let result = auth.authenticate(Some(&bearer(&token))).await;
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn missing_membership_claim_in_token_rejected() {
-        let auth = build_auth(None, None);
+    #[tokio::test]
+    async fn missing_membership_claim_in_token_rejected() {
+        let auth = build_auth(None, None).await;
         // Token has no site_ids claim at all.
         let mut claims = serde_json::Map::new();
         claims.insert("sub".into(), serde_json::json!("user"));
         claims.insert("exp".into(), serde_json::json!(now_secs() + 3600));
         let key = EncodingKey::from_rsa_pem(TEST_PRIVATE_KEY.as_bytes()).unwrap();
         let token = encode(&Header::new(Algorithm::RS256), &claims, &key).unwrap();
-        let result = auth.authenticate(Some(&bearer(&token)));
+        let result = auth.authenticate(Some(&bearer(&token))).await;
         assert!(matches!(result, Err(AuthError::InvalidToken(_))));
     }
 
-    #[test]
-    fn wrong_type_membership_claim_in_token_rejected() {
+    #[tokio::test]
+    async fn wrong_type_membership_claim_in_token_rejected() {
         // The claim is present but is a plain string instead of the required
         // array-of-strings. Must be rejected at `authenticate` rather than
         // silently treated as an empty allowlist.
-        let auth = build_auth(None, None);
+        let auth = build_auth(None, None).await;
         let mut extra = HashMap::new();
         extra.insert("site_ids", serde_json::json!("site-123"));
         let token = make_token(extra);
-        let result = auth.authenticate(Some(&bearer(&token)));
+        let result = auth.authenticate(Some(&bearer(&token))).await;
         assert!(matches!(result, Err(AuthError::InvalidToken(_))));
     }
 
-    #[test]
-    fn custom_membership_claim_is_checked() {
+    #[tokio::test]
+    async fn custom_membership_claim_is_checked() {
         let mut cfg = cfg_with(inline_public_key());
         cfg.membership_claim = "allowed_tenants".to_string();
-        let auth = cfg.build().unwrap();
+        let auth = cfg.build().await.unwrap();
 
         let mut extra = HashMap::new();
         extra.insert("allowed_tenants", serde_json::json!(["tenant-abc"]));
         let token = make_token(extra);
 
-        let ctx = auth.authenticate(Some(&bearer(&token))).unwrap().unwrap();
+        let ctx = auth.authenticate(Some(&bearer(&token))).await.unwrap().unwrap();
         assert!(ctx.is_authorized("tenant-abc"));
         assert!(!ctx.is_authorized("site-123")); // site-123 is in site_ids, not allowed_tenants
     }
 
     // ── algorithm allowlist ──────────────────────────────────────────────────
 
-    #[test]
-    fn empty_algorithms_list_fails_build() {
+    #[tokio::test]
+    async fn empty_algorithms_list_fails_build() {
         let mut cfg = cfg_with(inline_public_key());
         cfg.algorithms = vec![];
-        assert!(cfg.build().is_err());
+        assert!(cfg.build().await.is_err());
     }
 
-    #[test]
-    fn build_fails_on_invalid_value_path_expression() {
+    #[tokio::test]
+    async fn build_fails_on_invalid_value_path_expression() {
         // `CompiledValuePath::try_from` runs `parse_target_path` on each
         // configured string. A malformed path must surface as a build
         // failure with the documented `Failed to parse auth value_path`
@@ -998,7 +1374,7 @@ mod tests {
             metric_tag: None,
             trace: None,
         });
-        let err = cfg.build().unwrap_err().to_string();
+        let err = cfg.build().await.unwrap_err().to_string();
         assert!(
             err.contains("Failed to parse auth value_path"),
             "expected value_path parse error, got: {err}",
@@ -1017,58 +1393,58 @@ mod tests {
         assert_eq!(AuthEventError::Forbidden.label(), "forbidden");
     }
 
-    #[test]
-    fn token_with_algorithm_not_in_allowlist_is_rejected() {
+    #[tokio::test]
+    async fn token_with_algorithm_not_in_allowlist_is_rejected() {
         // Allowlist only RS512; sign the token with RS256 → must be rejected.
         let mut cfg = cfg_with(inline_public_key());
         cfg.algorithms = vec![AuthAlgorithm::Rs512];
-        let auth = cfg.build().unwrap();
+        let auth = cfg.build().await.unwrap();
         let token = make_token(HashMap::new()); // signed with RS256 by helper
-        let result = auth.authenticate(Some(&bearer(&token)));
+        let result = auth.authenticate(Some(&bearer(&token))).await;
         assert!(matches!(result, Err(AuthError::InvalidToken(_))));
     }
 
-    #[test]
-    fn token_with_algorithm_in_allowlist_is_accepted() {
+    #[tokio::test]
+    async fn token_with_algorithm_in_allowlist_is_accepted() {
         let mut cfg = cfg_with(inline_public_key());
         cfg.algorithms = vec![AuthAlgorithm::Rs256, AuthAlgorithm::Rs512];
-        let auth = cfg.build().unwrap();
+        let auth = cfg.build().await.unwrap();
         let token = make_token(HashMap::new()); // signed with RS256
-        assert!(auth.authenticate(Some(&bearer(&token))).is_ok());
+        assert!(auth.authenticate(Some(&bearer(&token))).await.is_ok());
     }
 
     // ── require_token enforcement ────────────────────────────────────────────
 
-    fn build_auth_with_require_token(require: bool) -> Auth {
+    async fn build_auth_with_require_token(require: bool) -> Auth {
         let mut cfg = cfg_with(inline_public_key());
         cfg.require_token = require;
-        cfg.build().unwrap()
+        cfg.build().await.unwrap()
     }
 
-    #[test]
-    fn require_token_false_allows_missing_authorization() {
-        let auth = build_auth_with_require_token(false);
-        assert!(matches!(auth.authenticate(None), Ok(None)));
+    #[tokio::test]
+    async fn require_token_false_allows_missing_authorization() {
+        let auth = build_auth_with_require_token(false).await;
+        assert!(matches!(auth.authenticate(None).await, Ok(None)));
     }
 
-    #[test]
-    fn require_token_true_rejects_missing_authorization() {
-        let auth = build_auth_with_require_token(true);
-        let result = auth.authenticate(None);
+    #[tokio::test]
+    async fn require_token_true_rejects_missing_authorization() {
+        let auth = build_auth_with_require_token(true).await;
+        let result = auth.authenticate(None).await;
         assert!(matches!(result, Err(AuthError::InvalidToken(_))));
     }
 
-    #[test]
-    fn require_token_true_accepts_valid_token() {
-        let auth = build_auth_with_require_token(true);
+    #[tokio::test]
+    async fn require_token_true_accepts_valid_token() {
+        let auth = build_auth_with_require_token(true).await;
         let token = make_token(HashMap::new());
-        assert!(auth.authenticate(Some(&bearer(&token))).is_ok());
+        assert!(auth.authenticate(Some(&bearer(&token))).await.is_ok());
     }
 
-    #[test]
-    fn require_token_true_still_rejects_invalid_token() {
-        let auth = build_auth_with_require_token(true);
-        let result = auth.authenticate(Some("Bearer not.a.jwt"));
+    #[tokio::test]
+    async fn require_token_true_still_rejects_invalid_token() {
+        let auth = build_auth_with_require_token(true).await;
+        let result = auth.authenticate(Some("Bearer not.a.jwt")).await;
         assert!(matches!(result, Err(AuthError::InvalidToken(_))));
     }
 
@@ -1312,7 +1688,7 @@ membership_claim = "tenants"
         let toml = r#"membership_claim = "site_ids""#;
         let err = toml::from_str::<AuthConfig>(toml).unwrap_err().to_string();
         assert!(
-            err.contains("must set one of `public_key` or `tls_cert`"),
+            err.contains("must set one of `public_key`, `tls_cert`, or `jwks`"),
             "expected friendly message, got: {err}",
         );
     }
@@ -1328,7 +1704,7 @@ pubic_key.value = "pem"
 "#;
         let err = toml::from_str::<AuthConfig>(toml).unwrap_err().to_string();
         assert!(
-            err.contains("must set one of `public_key` or `tls_cert`"),
+            err.contains("must set one of `public_key`, `tls_cert`, or `jwks`"),
             "expected friendly message, got: {err}",
         );
     }
@@ -1393,5 +1769,324 @@ require_token     = false
         assert_eq!(cfg.membership_claim, "tenants");
         assert_eq!(cfg.issuer.as_deref(), Some("https://issuer.example.com/"));
         assert!(!cfg.require_token);
+    }
+
+    // ── JWKS / Keycloak authority ────────────────────────────────────────────
+
+    const TEST_KID: &str = "test-kid";
+
+    /// Build a single-entry JWKS JSON from the test public key.
+    fn make_jwks_json(kid: &str, use_sig: bool) -> serde_json::Value {
+        use base64::Engine;
+        use openssl::rsa::Rsa;
+
+        let rsa = Rsa::public_key_from_pem(TEST_PUBLIC_KEY.as_bytes()).unwrap();
+        let n = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rsa.n().to_vec());
+        let e = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rsa.e().to_vec());
+        let use_field = if use_sig { "sig" } else { "enc" };
+        serde_json::json!({
+            "keys": [
+                {
+                    "kid": kid,
+                    "kty": "RSA",
+                    "use": use_field,
+                    "alg": "RS256",
+                    "n": n,
+                    "e": e,
+                }
+            ]
+        })
+    }
+
+    /// Mint a JWT signed by the test private key with an explicit `kid`.
+    fn make_token_with_kid(kid: &str) -> String {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(kid.to_string());
+        let mut claims = serde_json::Map::new();
+        claims.insert("sub".into(), serde_json::json!("test-subject"));
+        claims.insert("exp".into(), serde_json::json!(now_secs() + 3600));
+        claims.insert("site_ids".into(), serde_json::json!(["site-123"]));
+        let key = EncodingKey::from_rsa_pem(TEST_PRIVATE_KEY.as_bytes()).unwrap();
+        encode(&header, &claims, &key).unwrap()
+    }
+
+    fn jwks_cfg(jwks_url: String) -> AuthConfig {
+        AuthConfig {
+            authority: Authority::Jwks(JwksAuthority {
+                jwks_url,
+                refresh_interval_secs: 3600, // long; periodic refresh shouldn't fire during test
+                fetch_timeout_secs: 5,
+                min_reactive_refresh_secs: 0, // allow reactive refresh without cooldown wait
+            }),
+            issuer: None,
+            audience: None,
+            membership_claim: "site_ids".to_string(),
+            value_path: None,
+            algorithms: default_algorithms(),
+            require_token: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn jwks_build_succeeds_with_mock_endpoint() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_jwks_json(TEST_KID, true)))
+            .mount(&server)
+            .await;
+
+        let cfg = jwks_cfg(format!("{}/jwks", server.uri()));
+        assert!(cfg.build().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn jwks_build_fails_when_endpoint_unreachable() {
+        // Port 1 is reserved and refuses connections — guaranteed failure
+        // without depending on a mock server lifecycle.
+        let cfg = jwks_cfg("http://127.0.0.1:1/jwks".to_string());
+        let err = cfg.build().await.unwrap_err().to_string();
+        assert!(
+            err.contains("initial fetch") && err.contains("failed"),
+            "got: {err}",
+        );
+    }
+
+    #[tokio::test]
+    async fn jwks_build_fails_when_endpoint_returns_no_signing_keys() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"keys": []})))
+            .mount(&server)
+            .await;
+
+        let cfg = jwks_cfg(format!("{}/jwks", server.uri()));
+        let err = cfg.build().await.unwrap_err().to_string();
+        assert!(err.contains("no usable signing keys"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn jwks_authenticate_valid_token() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_jwks_json(TEST_KID, true)))
+            .mount(&server)
+            .await;
+
+        let auth = jwks_cfg(format!("{}/jwks", server.uri())).build().await.unwrap();
+        let token = make_token_with_kid(TEST_KID);
+        let ctx = auth.authenticate(Some(&bearer(&token))).await.unwrap().unwrap();
+        assert!(ctx.is_authorized("site-123"));
+    }
+
+    #[tokio::test]
+    async fn jwks_authenticate_unknown_kid_triggers_refresh() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // First two fetches (initial build + the unknown-kid token will come
+        // before any refresh fires) return a JWKS with the WRONG kid. The
+        // third onwards (reactive refresh after unknown-kid) returns the
+        // correct one.
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_jwks_json("stale-kid", true)))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_jwks_json(TEST_KID, true)))
+            .mount(&server)
+            .await;
+
+        let auth = jwks_cfg(format!("{}/jwks", server.uri())).build().await.unwrap();
+        let token = make_token_with_kid(TEST_KID);
+        // First authenticate: initial cache has stale-kid only; unknown-kid
+        // miss triggers reactive refresh which fetches the corrected JWKS.
+        let ctx = auth.authenticate(Some(&bearer(&token))).await.unwrap().unwrap();
+        assert!(ctx.is_authorized("site-123"));
+    }
+
+    #[tokio::test]
+    async fn jwks_token_without_kid_is_rejected() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_jwks_json(TEST_KID, true)))
+            .mount(&server)
+            .await;
+
+        let auth = jwks_cfg(format!("{}/jwks", server.uri())).build().await.unwrap();
+        // Mint a kid-less token directly (helper that adds kid bypassed).
+        let token = make_token(HashMap::new());
+        let result = auth.authenticate(Some(&bearer(&token))).await;
+        assert!(matches!(result, Err(AuthError::InvalidToken(_))));
+    }
+
+    #[tokio::test]
+    async fn jwks_skips_use_enc_entries() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Only a use=enc entry — must be filtered out, leaving an empty key
+        // map which the build() rejects with "no usable signing keys".
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_jwks_json(TEST_KID, false)))
+            .mount(&server)
+            .await;
+
+        let cfg = jwks_cfg(format!("{}/jwks", server.uri()));
+        let err = cfg.build().await.unwrap_err().to_string();
+        assert!(err.contains("no usable signing keys"), "got: {err}");
+    }
+
+    // ── concurrent / race-condition tests ────────────────────────────────────
+
+    /// N concurrent requests with an unknown `kid` must trigger exactly ONE
+    /// reactive HTTP fetch, not N. The cooldown gate (`min_reactive_refresh_secs`)
+    /// must hold under real concurrency — the timestamp is stamped inside the
+    /// mutex before the fetch begins so racing callers see it and bail out.
+    ///
+    /// Note: `last_refresh` is stamped at build time (initial fetch). We sleep
+    /// past the cooldown before spawning requests so the gate is actually open
+    /// when the concurrent calls arrive — otherwise they'd all be blocked by
+    /// the build-time stamp and no reactive fetch would fire at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn jwks_concurrent_unknown_kid_triggers_exactly_one_refresh() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // First fetch (initial build): stale-kid only.
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_jwks_json("stale-kid", true)))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        // All subsequent fetches return the correct kid.
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_jwks_json(TEST_KID, true)))
+            .mount(&server)
+            .await;
+
+        // 1-second cooldown — short enough to expire in the test, non-zero so
+        // the gate logic is actually exercised by the concurrent callers.
+        let mut cfg = jwks_cfg(format!("{}/jwks", server.uri()));
+        if let Authority::Jwks(ref mut j) = cfg.authority {
+            j.min_reactive_refresh_secs = 1;
+        }
+        let auth = cfg.build().await.unwrap();
+
+        // Sleep past the cooldown window so it is open when the 20 requests race.
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+
+        let token = make_token_with_kid(TEST_KID);
+
+        // Spawn 20 concurrent authenticate calls, all with the unknown kid.
+        let mut handles = Vec::new();
+        for _ in 0..20 {
+            let auth = auth.clone();
+            let bearer = bearer(&token);
+            handles.push(tokio::spawn(async move {
+                // Result is intentionally ignored — we only care about HTTP call count.
+                let _ = auth.authenticate(Some(&bearer)).await;
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // Exactly 2 HTTP calls: 1 initial build + 1 reactive refresh.
+        // The StdMutex gate ensures only the first caller past the cooldown
+        // fires a fetch; the remaining 19 see the freshly-stamped timestamp
+        // and return early without issuing their own requests.
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            2,
+            "expected exactly 1 initial + 1 reactive fetch; cooldown gate failed to suppress duplicates"
+        );
+    }
+
+    /// Concurrent readers must all see a consistent key map — either the old
+    /// snapshot or the new one — never a partially-written state. Spawn many
+    /// readers while a refresh is swapping in a new key map and assert that
+    /// every reader either validates correctly or gets a clean "unknown key"
+    /// error; no panics, no partial reads.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn jwks_concurrent_readers_see_consistent_snapshot_during_swap() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // Alternate between two valid key sets on successive fetches so that
+        // the periodic refresher swaps the map while readers are running.
+        let kid_a = "kid-a";
+        let kid_b = "kid-b";
+
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_jwks_json(kid_a, true)))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_jwks_json(kid_b, true)))
+            .mount(&server)
+            .await;
+
+        // Very short periodic refresh so it fires during the test.
+        let mut cfg = jwks_cfg(format!("{}/jwks", server.uri()));
+        if let Authority::Jwks(ref mut j) = cfg.authority {
+            j.refresh_interval_secs = 1;
+            j.min_reactive_refresh_secs = 0;
+        }
+        let auth = cfg.build().await.unwrap();
+
+        // Token for kid_a (in the initial cache).
+        let token_a = make_token_with_kid(kid_a);
+        // Token for kid_b (arrives after the swap).
+        let token_b = make_token_with_kid(kid_b);
+
+        // Hammer with 50 concurrent readers across both kids for ~1.5 seconds,
+        // spanning at least one periodic swap. Every result must be either a
+        // clean Ok or a clean InvalidToken — no panics, no corrupted state.
+        let mut handles = Vec::new();
+        for i in 0..50 {
+            let auth = auth.clone();
+            let token = if i % 2 == 0 { token_a.clone() } else { token_b.clone() };
+            handles.push(tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(i * 30)).await;
+                let bearer = bearer(&token);
+                // Must be Ok or InvalidToken — no panic, no partial read.
+                let _ = auth.authenticate(Some(&bearer)).await;
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
     }
 }
