@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use jsonwebtoken::jwk::{AlgorithmParameters, JwkSet, PublicKeyUse};
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, TokenData, Validation};
 use openssl::x509::X509;
 use regex::Regex;
 use serde_json::Value;
@@ -155,15 +155,15 @@ impl MembershipClaim {
 ///
 /// Inline (use Vector's `${VAR}` interpolation for env vars):
 /// ```toml
-/// public_key.type  = "inline"
-/// public_key.value = "${RSA_PUBLIC_KEY}"
+/// pub_key.type  = "inline"
+/// pub_key.value = "${RSA_PUBLIC_KEY}"
 /// ```
 ///
 /// File path (preferred for Kubernetes ConfigMap / secret volume mounts — the
 /// file is read once at source startup):
 /// ```toml
-/// public_key.type = "file"
-/// public_key.path = "/etc/certs/auth.pem"
+/// pub_key.type = "file"
+/// pub_key.path = "/etc/certs/auth.pem"
 /// ```
 #[configurable_component]
 #[derive(Clone, Debug)]
@@ -231,7 +231,7 @@ const fn default_jwks_refresh_interval_secs() -> u64 {
 }
 
 const fn default_jwks_fetch_timeout_secs() -> u64 {
-    30
+    60
 }
 
 const fn default_jwks_min_reactive_refresh_secs() -> u64 {
@@ -358,7 +358,7 @@ pub fn add_auth_metadata(event: &mut Event, name: &str, value: &str) {
 
 /// JWT signing algorithm.
 ///
-/// Only applicable when `authority` is `public_key` or `tls_cert`. For the
+/// Only applicable when `authority` is `pub_key` or `tls_cert`. For the
 /// `jwks` authority, accepted algorithms are derived automatically from the
 /// keys published by the JWKS endpoint — setting `algorithms` together with
 /// `jwks` is a configuration error.
@@ -434,8 +434,8 @@ pub(crate) fn default_algorithms() -> Vec<AuthAlgorithm> {
 ///
 /// ```toml
 /// [auth]
-/// public_key.type  = "inline"
-/// public_key.value = "${RSA_PUBLIC_KEY}"
+/// pub_key.type  = "inline"
+/// pub_key.value = "${RSA_PUBLIC_KEY}"
 /// ```
 ///
 /// or
@@ -450,6 +450,7 @@ pub(crate) fn default_algorithms() -> Vec<AuthAlgorithm> {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Authority {
     /// Bare RSA public key PEM (`BEGIN PUBLIC KEY` / `BEGIN RSA PUBLIC KEY`).
+    #[serde(rename = "pub_key")]
     PublicKey(AuthorityData),
     /// X.509 certificate PEM; the embedded public key is extracted at startup.
     ///
@@ -470,7 +471,7 @@ impl Authority {
     /// refresh task — fail-fast if the endpoint is unreachable.
     async fn build_key_store(&self) -> crate::Result<KeyStore> {
         match self {
-            Authority::PublicKey(pk) => Self::static_key_from_pem(&pk.load("public_key")?),
+            Authority::PublicKey(pk) => Self::static_key_from_pem(&pk.load("pub_key")?),
             Authority::TlsCert(cert) => {
                 let pem = Self::extract_public_key_pem_from_cert_pem(&cert.load("tls_cert")?)?;
                 Self::static_key_from_pem(&pem)
@@ -825,7 +826,7 @@ impl MembershipClaimConfig {
 
 /// Auth configuration for sources.
 ///
-/// `authority` selects the signing key source — a static PEM (`public_key` /
+/// `authority` selects the signing key source — a static PEM (`pub_key` /
 /// `tls_cert`) or a live JWKS endpoint — and is flattened so its variant key
 /// sits directly under `[auth]`. Static keys are parsed once at startup;
 /// JWKS keys are fetched at startup and refreshed in the background.
@@ -841,7 +842,7 @@ pub struct AuthConfig {
 
     /// JWT signing algorithms accepted for token verification.
     ///
-    /// Only applicable when `authority` is `public_key` or `tls_cert`. Tokens
+    /// Only applicable when `authority` is `pub_key` or `tls_cert`. Tokens
     /// whose `alg` header is not in this list are rejected. Pinning the
     /// algorithm at the validator prevents `alg: none` and RS↔HS key-confusion
     /// attacks.
@@ -914,8 +915,8 @@ where
         let msg = original.to_string();
         if msg.contains("no variant of enum") {
             D::Error::custom(
-                "auth: must set one of `public_key`, `tls_cert`, or `jwks` \
-                 (e.g. `public_key.type = \"file\"`, `public_key.path = \"/path/to/key.pem\"`)",
+                "auth: must set one of `pub_key`, `tls_cert`, or `jwks` \
+                 (e.g. `pub_key.type = \"file\"`, `pub_key.path = \"/path/to/key.pem\"`)",
             )
         } else {
             D::Error::custom(format!("auth.authority: {msg}"))
@@ -978,7 +979,7 @@ impl AuthConfig {
 
 impl AuthorityData {
     /// Resolve to the PEM string. `kind` is the configuration field name
-    /// (`"public_key"` or `"tls_cert"`) used to make I/O failures point at
+    /// (`"pub_key"` or `"tls_cert"`) used to make I/O failures point at
     /// the right config field.
     fn load(&self, kind: &str) -> crate::Result<String> {
         match self {
@@ -1172,10 +1173,7 @@ impl Auth {
         let inner = &self.0;
         let token_data = match &inner.key_store {
             // Static key: single-pointer-deref hot path, no locks.
-            KeyStore::Static(key) => {
-                decode::<Claims>(token, key, &inner.validation)
-                    .map_err(token_validation_failed)?
-            }
+            KeyStore::Static(key) => decode_claims(token, key, &inner.validation)?,
             // JWKS: look up by token's `kid`. ArcSwap snapshot is lock-free.
             // On miss, trigger a cooldown-gated reactive refresh and retry once.
             KeyStore::Jwks(cache) => {
@@ -1195,35 +1193,29 @@ impl Auth {
                     .get(&header.alg)
                     .ok_or(AuthError::InvalidToken("unsupported algorithm"))?;
 
-                // Fast path: snapshot, lookup, verify under the same guard.
-                {
+                // Fast path: key already in snapshot — no network needed.
+                let fast_path_data = {
                     let snapshot = cache.snapshot();
-                    if let Some(key) = snapshot.get(kid) {
-                        let data = decode::<Claims>(
-                            token,
-                            key,
-                            per_alg_validation,
-                        )
-                        .map_err(token_validation_failed)?;
-                        let allowed_values = inner.membership_claim
-                            .as_ref()
-                            .map(|c| c.extract(&data.claims))
-                            .transpose()?;
-                        return Ok(Some(AuthContext { allowed_values }));
-                    }
-                }
+                    snapshot
+                        .get(kid)
+                        .map(|key| decode_claims(token, key, per_alg_validation))
+                        .transpose()?
+                };
 
-                // Slow path: unknown kid → reactive refresh (cooldown-gated)
-                // → look up again. If still missing, the kid is genuinely
-                // not served by this IdP.
-                cache.refresh_if_due().await;
-                let snapshot = cache.snapshot();
-                let key = snapshot.get(kid).ok_or_else(|| {
-                    warn!(message = "Token signed by unknown key.", kid = %kid);
-                    AuthError::InvalidToken("unknown signing key")
-                })?;
-                decode::<Claims>(token, key, per_alg_validation)
-                    .map_err(token_validation_failed)?
+                if let Some(data) = fast_path_data {
+                    data
+                } else {
+                    // Slow path: unknown kid → reactive refresh (cooldown-gated)
+                    // → look up again. If still missing, the kid is genuinely
+                    // not served by this IdP.
+                    cache.refresh_if_due().await;
+                    let snapshot = cache.snapshot();
+                    let key = snapshot.get(kid).ok_or_else(|| {
+                        warn!(message = "Token signed by unknown key.", kid = %kid);
+                        AuthError::InvalidToken("unknown signing key")
+                    })?;
+                    decode_claims(token, key, per_alg_validation)?
+                }
             }
         };
 
@@ -1238,6 +1230,14 @@ impl Auth {
 fn token_validation_failed(err: jsonwebtoken::errors::Error) -> AuthError {
     warn!(message = "Token validation failed.", error = %err);
     AuthError::InvalidToken("invalid or expired token")
+}
+
+fn decode_claims(
+    token: &str,
+    key: &DecodingKey,
+    validation: &Validation,
+) -> Result<TokenData<Claims>, AuthError> {
+    decode::<Claims>(token, key, validation).map_err(token_validation_failed)
 }
 
 /// Strip the `Bearer` auth scheme from a header value, case-insensitively and
@@ -1384,7 +1384,7 @@ mod tests {
         assert!(cfg.build().await.is_err());
     }
 
-    // No symmetric `cert PEM in public_key field` negative test: jsonwebtoken's
+    // No symmetric `cert PEM in pub_key field` negative test: jsonwebtoken's
     // `DecodingKey::from_rsa_pem` will *sometimes* accept a `BEGIN CERTIFICATE`
     // PEM (it extracts the first ASN.1 BitString, which is the SPKI bitstring
     // for simple RSA certs) and *sometimes* reject it (`InvalidKeyFormat`,
@@ -1890,7 +1890,7 @@ path = "/etc/certs/auth.pem""#;
 
     #[test]
     fn authority_public_key_deserializes() {
-        let toml = r#"public_key = { type = "inline", value = "pem" }"#;
+        let toml = r#"pub_key = { type = "inline", value = "pem" }"#;
         let a: Authority = toml::from_str(toml).unwrap();
         assert!(matches!(
             a,
@@ -1926,7 +1926,7 @@ path = "/etc/certs/auth.pem""#;
         // Externally-tagged enums accept exactly one key. Specifying both
         // `public_key` and `tls_cert` under `[authority]` must be rejected.
         let toml = r#"
-public_key = { type = "inline", value = "pem" }
+pub_key = { type = "inline", value = "pem" }
 tls_cert   = { type = "inline", value = "cert" }
 "#;
         assert!(toml::from_str::<Authority>(toml).is_err());
@@ -1946,8 +1946,8 @@ tls_cert   = { type = "inline", value = "cert" }
         // Flat form: variant key sits directly under [auth] thanks to
         // #[serde(flatten)] on AuthConfig.authority.
         let toml = r#"
-public_key.type  = "inline"
-public_key.value = "pem"
+pub_key.type  = "inline"
+pub_key.value = "pem"
 "#;
         let cfg: AuthConfig = toml::from_str(toml).unwrap();
         assert!(matches!(
@@ -1976,8 +1976,8 @@ tls_cert.path = "/etc/pki/tls/certs/auth.crt"
         // `membership_claim`) at parse time, so the configured value is
         // never silently lost.
         let toml = r#"
-public_key.type  = "inline"
-public_key.value = "pem"
+pub_key.type  = "inline"
+pub_key.value = "pem"
 mempership_claim = "tenants"
 "#;
         let err = toml::from_str::<AuthConfig>(toml).unwrap_err().to_string();
@@ -2009,12 +2009,12 @@ membership_claim = "tenants"
 
     #[test]
     fn auth_config_missing_authority_variant_gives_friendly_error() {
-        // No `public_key` or `tls_cert` at all — replaces serde's opaque
+        // No `pub_key` or `tls_cert` at all — replaces serde's opaque
         // "no variant of enum Authority found in flattened data".
         let toml = r#"membership_claim = "site_ids""#;
         let err = toml::from_str::<AuthConfig>(toml).unwrap_err().to_string();
         assert!(
-            err.contains("must set one of `public_key`, `tls_cert`, or `jwks`"),
+            err.contains("must set one of `pub_key`, `tls_cert`, or `jwks`"),
             "expected friendly message, got: {err}",
         );
     }
@@ -2030,7 +2030,7 @@ pubic_key.value = "pem"
 "#;
         let err = toml::from_str::<AuthConfig>(toml).unwrap_err().to_string();
         assert!(
-            err.contains("must set one of `public_key`, `tls_cert`, or `jwks`"),
+            err.contains("must set one of `pub_key`, `tls_cert`, or `jwks`"),
             "expected friendly message, got: {err}",
         );
     }
@@ -2041,8 +2041,8 @@ pubic_key.value = "pem"
         // unknown. The original serde "unknown variant" message must
         // survive — only prefixed with the field path.
         let toml = r#"
-public_key.type  = "env"
-public_key.value = "pem"
+pub_key.type  = "env"
+pub_key.value = "pem"
 "#;
         let err = toml::from_str::<AuthConfig>(toml).unwrap_err().to_string();
         assert!(
@@ -2061,8 +2061,8 @@ public_key.value = "pem"
         // rejects the misspelled `paht`. Want the `auth.authority:` prefix
         // in front of serde's "unknown field" detail.
         let toml = r#"
-public_key.type = "file"
-public_key.paht = "/etc/key.pem"
+pub_key.type = "file"
+pub_key.paht = "/etc/key.pem"
 "#;
         let err = toml::from_str::<AuthConfig>(toml).unwrap_err().to_string();
         assert!(
@@ -2081,8 +2081,8 @@ public_key.paht = "/etc/key.pem"
         // top-level fields — `issuer`, `membership_claim` etc. coexist with
         // the flattened variant key.
         let toml = r#"
-public_key.type   = "inline"
-public_key.value  = "pem"
+pub_key.type   = "inline"
+pub_key.value  = "pem"
 membership_claim  = "tenants"
 issuer            = "https://issuer.example.com/"
 require_token     = false
@@ -2102,8 +2102,8 @@ require_token     = false
     #[test]
     fn membership_claim_config_plain_string_deserializes_as_identity() {
         let toml = r#"
-public_key.type  = "inline"
-public_key.value = "pem"
+pub_key.type  = "inline"
+pub_key.value = "pem"
 membership_claim = "site_ids"
 "#;
         let cfg: AuthConfig = toml::from_str(toml).unwrap();
@@ -2116,8 +2116,8 @@ membership_claim = "site_ids"
     #[test]
     fn membership_claim_config_inline_table_deserializes_as_regexp() {
         let toml = r#"
-public_key.type  = "inline"
-public_key.value = "pem"
+pub_key.type  = "inline"
+pub_key.value = "pem"
 membership_claim = { claim = "roles", pattern = "^tenant:[^:]+$" }
 "#;
         let cfg: AuthConfig = toml::from_str(toml).unwrap();
@@ -2133,8 +2133,8 @@ membership_claim = { claim = "roles", pattern = "^tenant:[^:]+$" }
     #[test]
     fn membership_claim_config_section_table_deserializes_as_regexp() {
         let toml = r#"
-public_key.type       = "inline"
-public_key.value      = "pem"
+pub_key.type       = "inline"
+pub_key.value      = "pem"
 membership_claim.claim   = "roles"
 membership_claim.pattern = "^tenant:.+"
 "#;
@@ -2151,8 +2151,8 @@ membership_claim.pattern = "^tenant:.+"
     #[test]
     fn membership_claim_config_absent_means_none() {
         let toml = r#"
-public_key.type  = "inline"
-public_key.value = "pem"
+pub_key.type  = "inline"
+pub_key.value = "pem"
 "#;
         let cfg: AuthConfig = toml::from_str(toml).unwrap();
         assert_eq!(cfg.membership_claim, None);

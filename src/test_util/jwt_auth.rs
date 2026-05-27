@@ -6,7 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 
-use crate::sources::util::{Auth, AuthConfig, Authority, AuthorityData, MembershipClaimConfig};
+use crate::sources::util::jwt_auth::{
+    Auth, AuthConfig, Authority, AuthorityData, MembershipClaimConfig,
+};
 
 // RSA-2048 test key pair (not used outside of tests).
 pub const TEST_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----

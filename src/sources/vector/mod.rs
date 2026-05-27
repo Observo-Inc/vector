@@ -466,7 +466,8 @@ mod auth_unit_tests {
     use vector_lib::event::{LogEvent, Metric, MetricKind, MetricValue, TraceEvent};
 
     use super::*;
-    use crate::sources::util::{AuthContext, AuthValuePath, CompiledValuePath};
+    use crate::sources::util::jwt_auth::{AuthValuePath, CompiledValuePath};
+    use crate::sources::util::AuthContext;
 
     fn make_validator<'a>(
         ctx: &'a AuthContext,
