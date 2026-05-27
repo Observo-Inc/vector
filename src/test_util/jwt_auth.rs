@@ -107,7 +107,7 @@ pub async fn build_auth(issuer: Option<&str>, audience: Option<Vec<&str>>) -> Au
         }),
         issuer: issuer.map(str::to_string),
         audience: audience.map(|v| v.iter().map(|s| s.to_string()).collect()),
-        membership_claim: MembershipClaimConfig::Identity("site_ids".to_string()),
+        membership_claim: Some(MembershipClaimConfig::Identity("site_ids".to_string())),
         value_path: None,
         algorithms: None,
         require_token: true,

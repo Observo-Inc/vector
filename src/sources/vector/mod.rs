@@ -477,7 +477,7 @@ mod auth_unit_tests {
 
     fn make_auth_ctx(values: &[&str]) -> AuthContext {
         AuthContext {
-            allowed_values: values.iter().map(|s| s.to_string()).collect(),
+            allowed_values: Some(values.iter().map(|s| s.to_string()).collect()),
         }
     }
 

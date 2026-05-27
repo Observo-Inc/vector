@@ -863,13 +863,16 @@ pub struct AuthConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audience: Option<Vec<String>>,
 
-    /// JWT claim used for membership checks.
+    /// JWT claim used for membership checks and per-event field stamping.
     ///
     /// Accepts a plain claim name (`"site_ids"`) or a claim name with a regex
     /// pattern (`{ claim = "roles", pattern = "^tenant:[^:]+$" }`). See
-    /// [`MembershipClaimConfig`] for the full format. Defaults to `"site_ids"`.
-    #[serde(default = "default_membership_claim")]
-    pub membership_claim: MembershipClaimConfig,
+    /// [`MembershipClaimConfig`] for the full format.
+    ///
+    /// When absent, membership checking and field stamping are both skipped —
+    /// all events are accepted regardless of their field values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub membership_claim: Option<MembershipClaimConfig>,
 
     /// Event field paths used to extract the membership value for per-event auth.
     ///
@@ -895,10 +898,6 @@ pub struct AuthConfig {
 
 fn default_require_token() -> bool {
     true
-}
-
-fn default_membership_claim() -> MembershipClaimConfig {
-    MembershipClaimConfig::Identity("site_ids".to_string())
 }
 
 /// Replace serde's flattened-enum error with an actionable message naming the
@@ -962,7 +961,10 @@ impl AuthConfig {
             .transpose()
             .map_err(|error| format!("Failed to parse auth value_path: {error}"))?;
 
-        let membership_claim = self.membership_claim.build()?;
+        let membership_claim = self.membership_claim
+            .as_ref()
+            .map(MembershipClaimConfig::build)
+            .transpose()?;
 
         Ok(Auth(Arc::new(Inner {
             key_store,
@@ -999,7 +1001,7 @@ struct Inner {
     /// startup so `authenticate` never allocates a `Validation` per request.
     /// Empty for static-PEM authorities.
     jwks_validations: HashMap<Algorithm, Validation>,
-    membership_claim: MembershipClaim,
+    membership_claim: Option<MembershipClaim>,
     value_path: Option<CompiledValuePath>,
     require_token: bool,
 }
@@ -1009,13 +1011,20 @@ struct Inner {
 /// Holds the list of allowed membership values extracted from the JWT claim.
 /// Pass to per-event validation helpers in the source's event-processing loop.
 pub struct AuthContext {
-    pub(crate) allowed_values: BTreeSet<String>,
+    /// `None` when `membership_claim` is absent — all events are admitted and
+    /// field stamping is skipped. `Some` holds the extracted allowed-values set.
+    pub(crate) allowed_values: Option<BTreeSet<String>>,
 }
 
 impl AuthContext {
-    /// Returns `true` if `value` is present in the token's membership claim array.
+    /// Returns `true` if `value` is present in the token's membership claim.
+    ///
+    /// Always returns `true` when no membership claim is configured.
     pub fn is_authorized(&self, value: &str) -> bool {
-        self.allowed_values.contains(value)
+        match &self.allowed_values {
+            Some(values) => values.contains(value),
+            None => true,
+        }
     }
 
     /// Bind this context to a [`CompiledValuePath`], producing an [`EventValidator`]
@@ -1120,7 +1129,11 @@ impl std::fmt::Debug for Auth {
 
 impl Auth {
     /// Returns the configured event field path config, if any.
+    ///
+    /// Returns `None` when no membership claim is configured — field stamping
+    /// is skipped alongside membership checking in that case.
     pub fn value_path(&self) -> Option<&CompiledValuePath> {
+        self.0.membership_claim.as_ref()?;
         self.0.value_path.as_ref()
     }
 
@@ -1193,7 +1206,10 @@ impl Auth {
                             per_alg_validation,
                         )
                         .map_err(token_validation_failed)?;
-                        let allowed_values = inner.membership_claim.extract(&data.claims)?;
+                        let allowed_values = inner.membership_claim
+                            .as_ref()
+                            .map(|c| c.extract(&data.claims))
+                            .transpose()?;
                         return Ok(Some(AuthContext { allowed_values }));
                     }
                 }
@@ -1212,7 +1228,10 @@ impl Auth {
             }
         };
 
-        let allowed_values = inner.membership_claim.extract(&token_data.claims)?;
+        let allowed_values = inner.membership_claim
+            .as_ref()
+            .map(|c| c.extract(&token_data.claims))
+            .transpose()?;
         Ok(Some(AuthContext { allowed_values }))
     }
 }
@@ -1261,7 +1280,7 @@ mod tests {
             authority,
             issuer: None,
             audience: None,
-            membership_claim: MembershipClaimConfig::Identity("site_ids".to_string()),
+            membership_claim: Some(MembershipClaimConfig::Identity("site_ids".to_string())),
             value_path: None,
             algorithms: None,
             require_token: false,
@@ -1493,7 +1512,7 @@ mod tests {
     #[tokio::test]
     async fn custom_membership_claim_is_checked() {
         let mut cfg = cfg_with(inline_public_key());
-        cfg.membership_claim = MembershipClaimConfig::Identity("allowed_tenants".to_string());
+        cfg.membership_claim = Some(MembershipClaimConfig::Identity("allowed_tenants".to_string()));
         let auth = cfg.build().await.unwrap();
 
         let mut extra = HashMap::new();
@@ -1508,10 +1527,10 @@ mod tests {
     #[tokio::test]
     async fn invalid_regexp_pattern_fails_build() {
         let mut cfg = cfg_with(inline_public_key());
-        cfg.membership_claim = MembershipClaimConfig::Regexp {
+        cfg.membership_claim = Some(MembershipClaimConfig::Regexp {
             claim: "roles".to_string(),
             pattern: "[unclosed".to_string(),
-        };
+        });
         let err = cfg.build().await.unwrap_err().to_string();
         assert!(
             err.contains("auth.membership_claim pattern"),
@@ -1524,10 +1543,10 @@ mod tests {
         // Pattern extracts the tenant ID from an email claim string.
         // Capture group 1 ("42") becomes the authorized value — not the full email.
         let mut cfg = cfg_with(inline_public_key());
-        cfg.membership_claim = MembershipClaimConfig::Regexp {
+        cfg.membership_claim = Some(MembershipClaimConfig::Regexp {
             claim: "email".to_string(),
             pattern: r"^tenant_([0-9]+)@example\.com$".to_string(),
-        };
+        });
         let auth = cfg.build().await.unwrap();
 
         let mut extra = HashMap::new();
@@ -1544,10 +1563,10 @@ mod tests {
     async fn regexp_membership_claim_multiple_capture_groups() {
         // Both capture groups enter the set independently.
         let mut cfg = cfg_with(inline_public_key());
-        cfg.membership_claim = MembershipClaimConfig::Regexp {
+        cfg.membership_claim = Some(MembershipClaimConfig::Regexp {
             claim: "email".to_string(),
             pattern: r"^(tenant)_([0-9]+)@example\.com$".to_string(),
-        };
+        });
         let auth = cfg.build().await.unwrap();
 
         let mut extra = HashMap::new();
@@ -1564,10 +1583,10 @@ mod tests {
         // Token is valid and the claim exists, but the pattern does not match.
         // The request is hard-rejected — same error as a missing claim.
         let mut cfg = cfg_with(inline_public_key());
-        cfg.membership_claim = MembershipClaimConfig::Regexp {
+        cfg.membership_claim = Some(MembershipClaimConfig::Regexp {
             claim: "email".to_string(),
             pattern: r"^tenant_([0-9]+)@example\.com$".to_string(),
-        };
+        });
         let auth = cfg.build().await.unwrap();
 
         let mut extra = HashMap::new();
@@ -1693,11 +1712,91 @@ mod tests {
     #[test]
     fn auth_context_is_authorized_checks_membership() {
         let ctx = AuthContext {
-            allowed_values: ["foo", "bar"].into_iter().map(String::from).collect(),
+            allowed_values: Some(["foo", "bar"].into_iter().map(String::from).collect::<BTreeSet<_>>()),
         };
         assert!(ctx.is_authorized("foo"));
         assert!(ctx.is_authorized("bar"));
         assert!(!ctx.is_authorized("baz"));
+    }
+
+    // ── no membership_claim (token-only mode) ───────────────────────────────
+    //
+    // When `membership_claim` is `None` the auth module runs in token-only
+    // mode: the token is fully validated (signature, expiry, issuer, audience)
+    // but no claim is extracted for membership filtering, `AuthContext`
+    // carries `allowed_values: None` (→ `is_authorized` always true), and
+    // `Auth::value_path()` returns `None` so the caller never stamps events.
+
+    async fn build_no_membership_auth() -> Auth {
+        let mut cfg = cfg_with(inline_public_key());
+        cfg.membership_claim = None;
+        cfg.require_token = true;
+        cfg.build().await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn no_membership_claim_valid_token_accepted() {
+        // A token that has no site_ids claim at all must be accepted when
+        // `membership_claim` is not configured — there is nothing to extract.
+        let auth = build_no_membership_auth().await;
+        let mut claims = serde_json::Map::new();
+        claims.insert("sub".into(), serde_json::json!("user"));
+        claims.insert("exp".into(), serde_json::json!(now_secs() + 3600));
+        let key = EncodingKey::from_rsa_pem(TEST_PRIVATE_KEY.as_bytes()).unwrap();
+        let token = encode(&Header::new(Algorithm::RS256), &claims, &key).unwrap();
+        let ctx = auth.authenticate(Some(&bearer(&token))).await.unwrap().unwrap();
+        assert_eq!(ctx.allowed_values, None);
+    }
+
+    #[tokio::test]
+    async fn no_membership_claim_auth_context_allows_all_values() {
+        // `allowed_values: None` means no filtering — `is_authorized` must
+        // return true for every string, including arbitrary values that would
+        // never appear in a real claim.
+        let auth = build_no_membership_auth().await;
+        let token = make_token(HashMap::new());
+        let ctx = auth.authenticate(Some(&bearer(&token))).await.unwrap().unwrap();
+        assert!(ctx.is_authorized("site-123"));
+        assert!(ctx.is_authorized("anything"));
+        assert!(ctx.is_authorized(""));
+    }
+
+    #[tokio::test]
+    async fn no_membership_claim_invalid_token_still_rejected() {
+        let auth = build_no_membership_auth().await;
+        assert!(matches!(
+            auth.authenticate(Some("Bearer not.a.jwt")).await,
+            Err(AuthError::InvalidToken(_)),
+        ));
+    }
+
+    #[tokio::test]
+    async fn no_membership_claim_expired_token_still_rejected() {
+        let auth = build_no_membership_auth().await;
+        let mut extra = HashMap::new();
+        extra.insert("exp", serde_json::json!(now_secs() - 3600));
+        let token = make_token(extra);
+        assert!(matches!(
+            auth.authenticate(Some(&bearer(&token))).await,
+            Err(AuthError::InvalidToken(_)),
+        ));
+    }
+
+    #[tokio::test]
+    async fn no_membership_claim_value_path_is_none_skipping_stamping() {
+        // Even when `value_path` is explicitly configured, `Auth::value_path()`
+        // must return `None` when `membership_claim` is absent — the caller
+        // guards all stamping logic on `auth.value_path().is_some()`.
+        let mut cfg = cfg_with(inline_public_key());
+        cfg.membership_claim = None;
+        cfg.value_path = Some(AuthValuePath {
+            default: "tenant_id".into(),
+            log: None,
+            metric_tag: None,
+            trace: None,
+        });
+        let auth = cfg.build().await.unwrap();
+        assert!(auth.value_path().is_none());
     }
 
     // ── strip_bearer_prefix ──────────────────────────────────────────────────
@@ -1994,7 +2093,7 @@ require_token     = false
             cfg.authority,
             Authority::PublicKey(AuthorityData::Inline { value }) if value == "pem"
         ));
-        assert_eq!(cfg.membership_claim, MembershipClaimConfig::Identity("tenants".to_string()));
+        assert_eq!(cfg.membership_claim, Some(MembershipClaimConfig::Identity("tenants".to_string())));
         assert_eq!(cfg.issuer.as_deref(), Some("https://issuer.example.com/"));
         assert!(!cfg.require_token);
     }
@@ -2011,7 +2110,7 @@ membership_claim = "site_ids"
         let cfg: AuthConfig = toml::from_str(toml).unwrap();
         assert_eq!(
             cfg.membership_claim,
-            MembershipClaimConfig::Identity("site_ids".to_string()),
+            Some(MembershipClaimConfig::Identity("site_ids".to_string())),
         );
     }
 
@@ -2025,10 +2124,10 @@ membership_claim = { claim = "roles", pattern = "^tenant:[^:]+$" }
         let cfg: AuthConfig = toml::from_str(toml).unwrap();
         assert_eq!(
             cfg.membership_claim,
-            MembershipClaimConfig::Regexp {
+            Some(MembershipClaimConfig::Regexp {
                 claim: "roles".to_string(),
                 pattern: "^tenant:[^:]+$".to_string(),
-            },
+            }),
         );
     }
 
@@ -2043,24 +2142,21 @@ membership_claim.pattern = "^tenant:.+"
         let cfg: AuthConfig = toml::from_str(toml).unwrap();
         assert_eq!(
             cfg.membership_claim,
-            MembershipClaimConfig::Regexp {
+            Some(MembershipClaimConfig::Regexp {
                 claim: "roles".to_string(),
                 pattern: "^tenant:.+".to_string(),
-            },
+            }),
         );
     }
 
     #[test]
-    fn membership_claim_config_defaults_to_site_ids_identity() {
+    fn membership_claim_config_absent_means_none() {
         let toml = r#"
 public_key.type  = "inline"
 public_key.value = "pem"
 "#;
         let cfg: AuthConfig = toml::from_str(toml).unwrap();
-        assert_eq!(
-            cfg.membership_claim,
-            MembershipClaimConfig::Identity("site_ids".to_string()),
-        );
+        assert_eq!(cfg.membership_claim, None);
     }
 
     // ── MembershipClaim::extract ────────────────────────────────────────
@@ -2288,7 +2384,7 @@ public_key.value = "pem"
             }),
             issuer: None,
             audience: None,
-            membership_claim: MembershipClaimConfig::Identity("site_ids".to_string()),
+            membership_claim: Some(MembershipClaimConfig::Identity("site_ids".to_string())),
             value_path: None,
             algorithms: None,
             require_token: false,
