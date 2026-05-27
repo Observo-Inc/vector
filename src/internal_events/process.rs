@@ -1,8 +1,12 @@
-use metrics::counter;
+use metrics::{counter, gauge};
 use vector_lib::internal_event::InternalEvent;
 use vector_lib::internal_event::{error_stage, error_type};
 
 use crate::{built_info, config};
+
+const CONFIG_LOAD_SUCCEEDED: &str = "config_load_succeeded";
+const RELOAD_IN_PROGRESS: &str = "reload_in_progress";
+const LAST_RELOAD_STARTED_TIMESTAMP_SECONDS: &str = "last_reload_started_timestamp_seconds";
 
 #[derive(Debug)]
 pub struct VectorStarted;
@@ -18,6 +22,18 @@ impl InternalEvent for VectorStarted {
             revision = built_info::VECTOR_BUILD_DESC.unwrap_or(""),
         );
         counter!("started_total").increment(1);
+        gauge!(CONFIG_LOAD_SUCCEEDED).set(1.0);
+    }
+}
+
+#[derive(Debug)]
+pub struct VectorReloadStarted;
+
+impl InternalEvent for VectorReloadStarted {
+    fn emit(self) {
+        debug!(target: "vector", message = "Vector is reloading configuration.");
+        gauge!(RELOAD_IN_PROGRESS).set(1.0);
+        gauge!(LAST_RELOAD_STARTED_TIMESTAMP_SECONDS).set(chrono::Utc::now().timestamp() as f64);
     }
 }
 
@@ -34,6 +50,8 @@ impl InternalEvent for VectorReloaded<'_> {
             path = ?self.config_paths
         );
         counter!("reloaded_total").increment(1);
+        gauge!(CONFIG_LOAD_SUCCEEDED).set(1.0);
+        gauge!(RELOAD_IN_PROGRESS).set(0.0);
     }
 }
 
@@ -82,6 +100,8 @@ impl InternalEvent for VectorReloadError {
             "stage" => error_stage::PROCESSING,
         )
         .increment(1);
+        gauge!(CONFIG_LOAD_SUCCEEDED).set(0.0);
+        gauge!(RELOAD_IN_PROGRESS).set(0.0);
     }
 }
 
@@ -104,6 +124,7 @@ impl InternalEvent for VectorConfigLoadError {
             "stage" => error_stage::PROCESSING,
         )
         .increment(1);
+        gauge!(CONFIG_LOAD_SUCCEEDED).set(0.0);
     }
 }
 
