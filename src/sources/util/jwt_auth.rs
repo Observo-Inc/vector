@@ -15,6 +15,9 @@ use vrl::path::{parse_target_path, OwnedTargetPath};
 
 use crate::http::HttpClient;
 
+/// Shorthand for the decoded JWT claims map used throughout this module.
+type Claims = serde_json::Map<String, Value>;
+
 /// Pre-parsed path for the `auth_field_name` log/trace metadata field.
 pub(crate) static AUTH_FIELD_NAME_PATH: LazyLock<OwnedTargetPath> =
     LazyLock::new(|| parse_target_path("auth_field_name").expect("valid static path"));
@@ -92,12 +95,12 @@ impl MembershipClaim {
 
     /// Extract the allowed-values set from a decoded token's claims map.
     ///
-    /// Returns `Err(InvalidToken)` if the named claim is absent or is not a
-    /// JSON array. For [`Self::Regexp`] each array element is tested against
-    /// the compiled pattern; only the matched substring is collected.
+    /// Returns `Err(InvalidToken)` if the named claim is absent, has the wrong
+    /// type (`Identity` requires a JSON array; `Regexp` requires a JSON string),
+    /// or yields an empty set (empty array, no-match, all-optional groups unmatched).
     pub fn extract(
         &self,
-        claims: &serde_json::Map<String, Value>,
+        claims: &Claims,
     ) -> Result<HashSet<String>, AuthError> {
         let value = claims
             .get(self.claim_name())
@@ -105,8 +108,7 @@ impl MembershipClaim {
 
         let set = match self {
             MembershipClaim::Identity(_) => {
-                // Expects a JSON array — standard for custom multi-value claims
-                // like `site_ids`. Pre-allocate to the array length to avoid
+                // Expects a JSON array. Pre-allocate to the array length to avoid
                 // rehashing on the hot path.
                 let array = value
                     .as_array()
@@ -128,7 +130,7 @@ impl MembershipClaim {
                 let caps = re
                     .captures(s)
                     .ok_or(AuthError::InvalidToken("token missing membership claim"))?;
-                let mut set = HashSet::new();
+                let mut set = HashSet::with_capacity(re.captures_len().saturating_sub(1));
                 for m in caps.iter().skip(1).flatten() {
                     set.insert(m.as_str().to_owned());
                 }
@@ -555,7 +557,12 @@ impl JwksCache {
         let cache = Arc::new(Self {
             keys: ArcSwap::new(Arc::new(initial)),
             fetcher,
-            last_refresh: StdMutex::new(Instant::now()),
+            // Subtract the cooldown so the very first reactive refresh is never
+            // blocked. Without this, a key rotated right before startup would be
+            // unreachable for `min_reactive_refresh_secs` seconds.
+            last_refresh: StdMutex::new(
+                Instant::now() - Duration::from_secs(cfg.min_reactive_refresh_secs),
+            ),
             min_reactive_refresh: Duration::from_secs(cfg.min_reactive_refresh_secs),
         });
         Self::spawn_refresher(Arc::downgrade(&cache), Duration::from_secs(cfg.refresh_interval_secs));
@@ -736,10 +743,10 @@ pub enum MembershipClaimConfig {
     /// Only claim values that match `pattern` are admitted; the matched
     /// substring enters the allowed-values set.
     Regexp {
-        /// Name of the JWT claim whose array value is filtered.
+        /// Name of the JWT claim whose string value is matched against `pattern`.
         claim: String,
-        /// Regex pattern applied to each value. Values that match are admitted;
-        /// the matched substring (not the full value) enters the set.
+        /// Regex pattern applied to the claim string. All capture groups from a
+        /// successful match enter the allowed-values set; group 0 (full match) is excluded.
         pattern: String,
     },
 }
@@ -930,7 +937,7 @@ impl AuthConfig {
             .as_ref()
             .map(CompiledValuePath::try_from)
             .transpose()
-            .map_err(|e| format!("Failed to parse auth value_path: {e}"))?;
+            .map_err(|error| format!("Failed to parse auth value_path: {error}"))?;
 
         let membership_claim = match &self.membership_claim {
             MembershipClaimConfig::Identity(name) => MembershipClaim::Identity(name.clone()),
@@ -1139,14 +1146,14 @@ impl Auth {
         let token_data = match &inner.key_store {
             // Static key: single-pointer-deref hot path, no locks.
             KeyStore::Static(key) => {
-                decode::<serde_json::Map<String, Value>>(token, key, &inner.validation)
+                decode::<Claims>(token, key, &inner.validation)
                     .map_err(token_validation_failed)?
             }
             // JWKS: look up by token's `kid`. ArcSwap snapshot is lock-free.
             // On miss, trigger a cooldown-gated reactive refresh and retry once.
             KeyStore::Jwks(cache) => {
-                let header = decode_header(token).map_err(|err| {
-                    warn!(message = "JWT header parse failed.", error = %err);
+                let header = decode_header(token).map_err(|error| {
+                    warn!(message = "JWT header parse failed.", %error);
                     AuthError::InvalidToken("invalid token header")
                 })?;
                 let kid = header.kid.as_deref().ok_or(AuthError::InvalidToken(
@@ -1165,7 +1172,7 @@ impl Auth {
                 {
                     let snapshot = cache.snapshot();
                     if let Some(key) = snapshot.get(kid) {
-                        let data = decode::<serde_json::Map<String, Value>>(
+                        let data = decode::<Claims>(
                             token,
                             key,
                             per_alg_validation,
@@ -1185,7 +1192,7 @@ impl Auth {
                     warn!(message = "Token signed by unknown key.", kid = %kid);
                     AuthError::InvalidToken("unknown signing key")
                 })?;
-                decode::<serde_json::Map<String, Value>>(token, key, per_alg_validation)
+                decode::<Claims>(token, key, per_alg_validation)
                     .map_err(token_validation_failed)?
             }
         };
@@ -2451,40 +2458,50 @@ public_key.value = "pem"
         assert!(matches!(result, Err(AuthError::InvalidToken(_))));
     }
 
-    /// When an unknown `kid` arrives within the reactive-refresh cooldown window
-    /// the cooldown gate suppresses the HTTP fetch. The response must still be
-    /// `InvalidToken` (key not found) and exactly one HTTP request must have
-    /// been made (the initial build fetch only).
+    /// The cooldown gate suppresses a *second* reactive refresh that arrives
+    /// within the cooldown window. The first unknown-kid request after startup
+    /// always triggers a refresh (startup initialises the cooldown clock to
+    /// "already elapsed"). Only subsequent requests within the window are gated.
     #[tokio::test]
     async fn jwks_reactive_refresh_skipped_within_cooldown() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
+        // The JWKS never contains "never-published-kid", so every reactive
+        // refresh still leaves the cache without the requested kid.
         Mock::given(method("GET"))
             .and(path("/jwks"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(make_jwks_json(TEST_KID, true)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_jwks_json("stale-kid", true)))
             .mount(&server)
             .await;
 
-        // 60-second cooldown — will not expire during this test.
+        // 60-second cooldown — expires only once (right at startup), then gates
+        // further requests for 60 s.
         let mut cfg = jwks_cfg(format!("{}/jwks", server.uri()));
         if let Authority::Jwks(ref mut j) = cfg.authority {
             j.min_reactive_refresh_secs = 60;
         }
         let auth = cfg.build().await.unwrap();
 
-        // Present a token with an unknown kid immediately after build.
-        // The cooldown stamp was set during the initial fetch, so the gate
-        // should block the reactive refresh.
         let token = make_token_with_kid("never-published-kid");
+
+        // First request: cooldown has already elapsed at startup, so a reactive
+        // refresh fires — total requests = 2 (build + reactive).
         let result = auth.authenticate(Some(&bearer(&token))).await;
         assert!(matches!(result, Err(AuthError::InvalidToken(_))));
-
-        // Only the build-time fetch — no reactive refresh.
         assert_eq!(
             server.received_requests().await.unwrap().len(),
-            1,
+            2,
+            "first unknown-kid request must trigger a reactive refresh"
+        );
+
+        // Second request immediately after: cooldown now in effect — no fetch.
+        let result = auth.authenticate(Some(&bearer(&token))).await;
+        assert!(matches!(result, Err(AuthError::InvalidToken(_))));
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            2,
             "reactive refresh must be suppressed within the cooldown window"
         );
     }
@@ -2748,7 +2765,7 @@ public_key.value = "pem"
             .up_to_n_times(1)
             .mount(&server)
             .await;
-        // Periodic refresh onwards: only TEST_KID.
+        // Periodic refresh onwards: only TEST_KID (old-kid has been rotated out).
         Mock::given(method("GET"))
             .and(path("/jwks"))
             .respond_with(ResponseTemplate::new(200).set_body_json(make_jwks_json(TEST_KID, true)))
@@ -2758,26 +2775,28 @@ public_key.value = "pem"
         let mut cfg = jwks_cfg(format!("{}/jwks", server.uri()));
         if let Authority::Jwks(ref mut j) = cfg.authority {
             j.refresh_interval_secs = 1;
-            // Long cooldown prevents reactive refresh from firing so the key
-            // update is attributable solely to the background task.
-            j.min_reactive_refresh_secs = 3600;
+            j.min_reactive_refresh_secs = 0; // reactive refresh allowed immediately
         }
         let auth = cfg.build().await.unwrap();
 
-        // Before the background task fires, TEST_KID is not in the cache.
-        // The cooldown prevents a reactive fetch, so we get "unknown signing key".
-        let token = make_token_with_kid(TEST_KID);
+        // old-kid is in the initial cache — tokens signed by it must work.
+        let old_token = make_token_with_kid("old-kid");
         assert!(
-            auth.authenticate(Some(&bearer(&token))).await.is_err(),
-            "TEST_KID should not be in the cache before the first periodic refresh"
+            auth.authenticate(Some(&bearer(&old_token))).await.is_ok(),
+            "old-kid should be valid before periodic rotation"
         );
 
         // Wait for the periodic refresh (1 s interval + 500 ms buffer).
         tokio::time::sleep(Duration::from_millis(1500)).await;
 
-        // After the background swap, TEST_KID is in the new key map.
+        // After the background swap old-kid has been removed; TEST_KID is now the only key.
+        assert!(
+            auth.authenticate(Some(&bearer(&old_token))).await.is_err(),
+            "old-kid should be invalid after periodic rotation"
+        );
+        let new_token = make_token_with_kid(TEST_KID);
         let ctx = auth
-            .authenticate(Some(&bearer(&token)))
+            .authenticate(Some(&bearer(&new_token)))
             .await
             .unwrap()
             .unwrap();
@@ -2791,10 +2810,10 @@ public_key.value = "pem"
     /// must hold under real concurrency — the timestamp is stamped inside the
     /// mutex before the fetch begins so racing callers see it and bail out.
     ///
-    /// Note: `last_refresh` is stamped at build time (initial fetch). We sleep
-    /// past the cooldown before spawning requests so the gate is actually open
-    /// when the concurrent calls arrive — otherwise they'd all be blocked by
-    /// the build-time stamp and no reactive fetch would fire at all.
+    /// Note: the startup clock is pre-wound so the first reactive refresh is
+    /// always allowed. We use `min_reactive_refresh_secs = 1` and sleep past it
+    /// so the gate is open when the concurrent calls race, but any second wave
+    /// within 1 s would be suppressed.
     #[tokio::test(flavor = "multi_thread")]
     async fn jwks_concurrent_unknown_kid_triggers_exactly_one_refresh() {
         use wiremock::matchers::{method, path};
