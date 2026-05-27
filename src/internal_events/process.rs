@@ -4,13 +4,6 @@ use vector_lib::internal_event::{error_stage, error_type};
 
 use crate::{built_info, config};
 
-fn unix_now() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64()
-}
-
 #[derive(Debug)]
 pub struct VectorStarted;
 
@@ -36,7 +29,7 @@ impl InternalEvent for VectorReloadStarted {
     fn emit(self) {
         debug!(target: "vector", message = "Vector is reloading configuration.");
         gauge!("reload_in_progress").set(1.0);
-        gauge!("last_reload_started_timestamp_seconds").set(unix_now());
+        gauge!("last_reload_started_timestamp_seconds").set(chrono::Utc::now().timestamp() as f64);
     }
 }
 
