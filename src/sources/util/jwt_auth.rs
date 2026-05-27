@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -101,19 +101,20 @@ impl MembershipClaim {
     pub fn extract(
         &self,
         claims: &Claims,
-    ) -> Result<HashSet<String>, AuthError> {
+    ) -> Result<BTreeSet<String>, AuthError> {
         let value = claims
             .get(self.claim_name())
             .ok_or(AuthError::InvalidToken("token missing membership claim"))?;
 
         let set = match self {
             MembershipClaim::Identity(_) => {
-                // Expects a JSON array. Pre-allocate to the array length to avoid
-                // rehashing on the hot path.
+                // Expects a JSON array.
                 let array = value
                     .as_array()
-                    .ok_or(AuthError::InvalidToken("token missing membership claim"))?;
-                let mut set = HashSet::with_capacity(array.len());
+                    .ok_or(AuthError::InvalidToken(
+                        "token missing membership claim (or is not a list of strings)",
+                    ))?;
+                let mut set = BTreeSet::new();
                 for v in array.iter().filter_map(Value::as_str) {
                     set.insert(v.to_owned());
                 }
@@ -121,16 +122,14 @@ impl MembershipClaim {
             }
             MembershipClaim::Regexp(_, re) => {
                 // Expects a JSON string — standard for scalar claims like `email`.
-                // All capture groups from a successful match are admitted; the
-                // full match (group 0) is excluded so the caller receives only
-                // the explicitly captured sub-values.
                 let s = value
                     .as_str()
-                    .ok_or(AuthError::InvalidToken("regexp membership claim must be a string"))?;
+                    .ok_or(AuthError::InvalidToken("membership claim must be a string"))?;
                 let caps = re
                     .captures(s)
                     .ok_or(AuthError::InvalidToken("token missing membership claim"))?;
-                let mut set = HashSet::with_capacity(re.captures_len().saturating_sub(1));
+                let mut set = BTreeSet::new();
+                // skip(1): index 0 is the full match; only explicit capture groups enter the set.
                 for m in caps.iter().skip(1).flatten() {
                     set.insert(m.as_str().to_owned());
                 }
@@ -227,15 +226,15 @@ pub struct JwksAuthority {
 }
 
 const fn default_jwks_refresh_interval_secs() -> u64 {
-    300
+    86400 // 1 day
 }
 
 const fn default_jwks_fetch_timeout_secs() -> u64 {
-    10
+    30
 }
 
 const fn default_jwks_min_reactive_refresh_secs() -> u64 {
-    30
+    900 // 15 minutes
 }
 
 /// Event field paths used to extract the membership value for per-event auth.
@@ -463,10 +462,6 @@ pub enum Authority {
 }
 
 impl Authority {
-    fn is_jwks(&self) -> bool {
-        matches!(self, Authority::Jwks(_))
-    }
-
     /// Resolve the configured source into a runtime [`KeyStore`].
     ///
     /// For static variants this is a synchronous PEM parse. For [`Self::Jwks`]
@@ -474,12 +469,84 @@ impl Authority {
     /// refresh task — fail-fast if the endpoint is unreachable.
     async fn build_key_store(&self) -> crate::Result<KeyStore> {
         match self {
-            Authority::PublicKey(pk) => pem_to_static_key(&pk.load("public_key")?),
+            Authority::PublicKey(pk) => Self::static_key_from_pem(&pk.load("public_key")?),
             Authority::TlsCert(cert) => {
                 let pem = Self::extract_public_key_pem_from_cert_pem(&cert.load("tls_cert")?)?;
-                pem_to_static_key(&pem)
+                Self::static_key_from_pem(&pem)
             }
             Authority::Jwks(cfg) => Ok(KeyStore::Jwks(JwksCache::new(cfg).await?)),
+        }
+    }
+
+    fn static_key_from_pem(pem: &str) -> crate::Result<KeyStore> {
+        let key = DecodingKey::from_rsa_pem(pem.as_bytes())
+            .map_err(|error| format!("Failed to parse RSA public key PEM: {error}"))?;
+        Ok(KeyStore::Static(Arc::new(key)))
+    }
+
+    /// Build the [`Validation`] for this authority.
+    ///
+    /// For static PEM authorities, validates the algorithm allowlist and builds a
+    /// `Validation` pinned to the configured (or default) algorithms. For JWKS,
+    /// rejects an explicit `algorithms` field (they are derived from the endpoint)
+    /// and returns a base `Validation` used as a template for the per-alg map.
+    fn build_validation(
+        &self,
+        algorithms: Option<&[AuthAlgorithm]>,
+    ) -> crate::Result<Validation> {
+        match self {
+            Authority::Jwks(_) => {
+                if algorithms.is_some() {
+                    return Err(
+                        "auth.algorithms is not applicable with `jwks` authority; \
+                         accepted algorithms are derived from the keys published by the \
+                         JWKS endpoint"
+                            .into(),
+                    );
+                }
+                Ok(Validation::new(Algorithm::RS256)) // base for per-alg map; not used directly
+            }
+            _ => {
+                let default_algos = default_algorithms();
+                let algos = algorithms.unwrap_or(&default_algos);
+                if algos.is_empty() {
+                    return Err("auth.algorithms must contain at least one algorithm".into());
+                }
+                // Seed with the first algorithm, then overwrite with the full list.
+                // jsonwebtoken checks the token's `alg` header against this list and
+                // rejects anything not present — this is what prevents alg:none and
+                // RS↔HS confusion attacks.
+                let mut v = Validation::new(algos[0].into());
+                v.algorithms = algos.iter().copied().map(Algorithm::from).collect();
+                Ok(v)
+            }
+        }
+    }
+
+    /// Build per-algorithm [`Validation`] objects for the JWKS hot path.
+    ///
+    /// Returns a non-empty map only for [`Self::Jwks`]; all other variants return
+    /// an empty map (static PEM uses `validation` directly).
+    fn expand_jwks_validations(&self, base: &Validation) -> HashMap<Algorithm, Validation> {
+        match self {
+            Authority::Jwks(_) => [
+                Algorithm::RS256,
+                Algorithm::RS384,
+                Algorithm::RS512,
+                Algorithm::PS256,
+                Algorithm::PS384,
+                Algorithm::PS512,
+                Algorithm::ES256,
+                Algorithm::ES384,
+            ]
+            .into_iter()
+            .map(|alg| {
+                let mut v = base.clone();
+                v.algorithms = vec![alg];
+                (alg, v)
+            })
+            .collect(),
+            _ => HashMap::new(),
         }
     }
 
@@ -499,12 +566,6 @@ impl Authority {
     }
 }
 
-fn pem_to_static_key(pem: &str) -> crate::Result<KeyStore> {
-    let key = DecodingKey::from_rsa_pem(pem.as_bytes())
-        .map_err(|error| format!("Failed to parse RSA public key PEM: {error}"))?;
-    Ok(KeyStore::Static(Arc::new(key)))
-}
-
 /// Runtime verification key material. Two shapes:
 ///
 /// - [`Self::Static`]: a single [`DecodingKey`] resolved at startup. The hot
@@ -518,8 +579,8 @@ enum KeyStore {
     Jwks(Arc<JwksCache>),
 }
 
-/// Decoded JWKS, indexed by `kid` for O(1) per-request lookup.
-type KeyMap = HashMap<String, DecodingKey>;
+/// Decoded JWKS, indexed by `kid`.
+type KeyMap = BTreeMap<String, DecodingKey>;
 
 /// Shared cache backing the [`Authority::Jwks`] variant.
 ///
@@ -580,19 +641,7 @@ impl JwksCache {
                     debug!(message = "JWKS refresher exiting: Auth dropped.");
                     return;
                 };
-                match strong.fetcher.fetch().await {
-                    Ok(map) if map.is_empty() => {
-                        warn!(message = "JWKS periodic refresh returned no usable keys; keeping previous keys.");
-                    }
-                    Ok(map) => {
-                        strong.keys.store(Arc::new(map));
-                        *strong.last_refresh.lock().expect("last_refresh poisoned") =
-                            Instant::now();
-                    }
-                    Err(error) => {
-                        warn!(message = "JWKS periodic refresh failed; keeping previous keys.", %error);
-                    }
-                }
+                strong.try_update_keys().await;
             }
         });
     }
@@ -616,15 +665,22 @@ impl JwksCache {
             }
             *last = Instant::now();
         }
+        self.try_update_keys().await;
+    }
+
+    /// Fetch a fresh key map and atomically swap it in on success.
+    /// On empty response or error, keeps the previous keys and logs a warning.
+    async fn try_update_keys(&self) {
         match self.fetcher.fetch().await {
             Ok(map) if map.is_empty() => {
-                warn!(message = "JWKS reactive refresh returned no usable keys.");
+                warn!(message = "JWKS refresh returned no usable keys; keeping previous keys.");
             }
             Ok(map) => {
                 self.keys.store(Arc::new(map));
+                *self.last_refresh.lock().expect("last_refresh poisoned") = Instant::now();
             }
             Err(error) => {
-                warn!(message = "JWKS reactive refresh failed.", %error);
+                warn!(message = "JWKS refresh failed; keeping previous keys.", %error);
             }
         }
     }
@@ -683,7 +739,7 @@ impl JwksFetcher {
     }
 
     fn build_key_map(&self, jwk_set: JwkSet) -> KeyMap {
-        let mut map = KeyMap::with_capacity(jwk_set.keys.len());
+        let mut map = KeyMap::new();
         for jwk in &jwk_set.keys {
             // Skip non-signing keys (Keycloak publishes both `enc` and `sig`).
             if let Some(use_) = &jwk.common.public_key_use {
@@ -720,7 +776,7 @@ impl JwksFetcher {
 /// Config-layer representation of the membership claim.
 ///
 /// Accepts either a plain claim name (string) or a claim name paired with a
-/// regex pattern. The compiled [`MembershipClaim`] is built once in
+/// regex pattern. The compiled [`MembershipClaimConfig`] is built once in
 /// [`AuthConfig::build`] so no regex compilation happens on the hot path.
 ///
 /// ## TOML examples
@@ -749,6 +805,23 @@ pub enum MembershipClaimConfig {
         /// successful match enter the allowed-values set; group 0 (full match) is excluded.
         pattern: String,
     },
+}
+
+impl MembershipClaimConfig {
+    /// Compile the config-layer claim into its runtime form.
+    ///
+    /// Validates and compiles the regex pattern once at startup so the hot
+    /// path (`MembershipClaim::extract`) never allocates or compiles.
+    pub fn build(&self) -> crate::Result<MembershipClaim> {
+        match self {
+            Self::Identity(name) => Ok(MembershipClaim::Identity(name.clone())),
+            Self::Regexp { claim, pattern } => {
+                let re = Regex::new(pattern)
+                    .map_err(|error| format!("auth.membership_claim pattern: {error}"))?;
+                Ok(MembershipClaim::Regexp(claim.clone(), re))
+            }
+        }
+    }
 }
 
 /// Auth configuration for sources.
@@ -863,40 +936,10 @@ impl AuthConfig {
     /// misconfigurations surface at `vector validate` / source startup
     /// rather than at first-request time.
     pub async fn build(&self) -> crate::Result<Auth> {
-        // `algorithms` is only meaningful for static PEM authorities. The JWKS
-        // endpoint is self-describing — accepted algorithms are derived from the
-        // published keys, not from config.
-        if self.authority.is_jwks() && self.algorithms.is_some() {
-            return Err(
-                "auth.algorithms is not applicable with `jwks` authority; \
-                 accepted algorithms are derived from the keys published by the \
-                 JWKS endpoint"
-                    .into(),
-            );
-        }
+        // Validate config (algorithm/authority compatibility) before any I/O.
+        let mut validation = self.authority.build_validation(self.algorithms.as_deref())?;
 
         let key_store = self.authority.build_key_store().await?;
-
-        // For static PEM, build a Validation with the configured algorithm
-        // allowlist (defaulting to all RSA variants). For JWKS, this is only
-        // used as a template for the per-algorithm map built below — it is
-        // never passed to decode() directly.
-        let mut validation = if self.authority.is_jwks() {
-            Validation::new(Algorithm::RS256) // base for per-alg map; not used directly
-        } else {
-            let default_algos = default_algorithms();
-            let algos: &[AuthAlgorithm] = self.algorithms.as_deref().unwrap_or(&default_algos);
-            if algos.is_empty() {
-                return Err("auth.algorithms must contain at least one algorithm".into());
-            }
-            // Seed with the first algorithm, then overwrite with the full list.
-            // jsonwebtoken checks the token's `alg` header against this list and
-            // rejects anything not present — this is what prevents alg:none and
-            // RS↔HS confusion attacks.
-            let mut v = Validation::new(algos[0].into());
-            v.algorithms = algos.iter().copied().map(Algorithm::from).collect();
-            v
-        };
 
         if let Some(issuer) = &self.issuer {
             validation.set_issuer(&[issuer]);
@@ -910,27 +953,7 @@ impl AuthConfig {
 
         // For JWKS: precompute one `Validation` per supported algorithm so that
         // `authenticate` never clones or allocates a `Validation` on the hot path.
-        let jwks_validations: HashMap<Algorithm, Validation> = if self.authority.is_jwks() {
-            [
-                Algorithm::RS256,
-                Algorithm::RS384,
-                Algorithm::RS512,
-                Algorithm::PS256,
-                Algorithm::PS384,
-                Algorithm::PS512,
-                Algorithm::ES256,
-                Algorithm::ES384,
-            ]
-            .into_iter()
-            .map(|alg| {
-                let mut v = validation.clone();
-                v.algorithms = vec![alg];
-                (alg, v)
-            })
-            .collect()
-        } else {
-            HashMap::new()
-        };
+        let jwks_validations = self.authority.expand_jwks_validations(&validation);
 
         let value_path = self
             .value_path
@@ -939,15 +962,7 @@ impl AuthConfig {
             .transpose()
             .map_err(|error| format!("Failed to parse auth value_path: {error}"))?;
 
-        let membership_claim = match &self.membership_claim {
-            MembershipClaimConfig::Identity(name) => MembershipClaim::Identity(name.clone()),
-            MembershipClaimConfig::Regexp { claim, pattern } => {
-                let re = Regex::new(pattern).map_err(|error| {
-                    format!("auth.membership_claim pattern: {error}")
-                })?;
-                MembershipClaim::Regexp(claim.clone(), re)
-            }
-        };
+        let membership_claim = self.membership_claim.build()?;
 
         Ok(Auth(Arc::new(Inner {
             key_store,
@@ -994,7 +1009,7 @@ struct Inner {
 /// Holds the list of allowed membership values extracted from the JWT claim.
 /// Pass to per-event validation helpers in the source's event-processing loop.
 pub struct AuthContext {
-    pub(crate) allowed_values: HashSet<String>,
+    pub(crate) allowed_values: BTreeSet<String>,
 }
 
 impl AuthContext {
@@ -1228,7 +1243,7 @@ fn strip_bearer_prefix(value: &str) -> Option<&str> {
 
 #[cfg(all(test, feature = "sources-vector"))]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{BTreeSet, HashMap};
     use std::io::Write;
 
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
@@ -2048,7 +2063,7 @@ public_key.value = "pem"
         );
     }
 
-    // ── MembershipClaim::extract ─────────────────────────────────────────────
+    // ── MembershipClaim::extract ────────────────────────────────────────
 
     #[test]
     fn extract_identity_returns_all_string_values() {
@@ -2056,7 +2071,7 @@ public_key.value = "pem"
         let mut claims = serde_json::Map::new();
         claims.insert("ids".into(), serde_json::json!(["alpha", "beta"]));
         let set = claim.extract(&claims).unwrap();
-        let expected: HashSet<String> = ["alpha", "beta"].iter().map(|s| s.to_string()).collect();
+        let expected: BTreeSet<String> = ["alpha", "beta"].iter().map(|s| s.to_string()).collect();
         assert_eq!(set, expected);
     }
 
@@ -2067,7 +2082,7 @@ public_key.value = "pem"
         let mut claims = serde_json::Map::new();
         claims.insert("ids".into(), serde_json::json!(["alpha", 42, null, "beta"]));
         let set = claim.extract(&claims).unwrap();
-        let expected: HashSet<String> = ["alpha", "beta"].iter().map(|s| s.to_string()).collect();
+        let expected: BTreeSet<String> = ["alpha", "beta"].iter().map(|s| s.to_string()).collect();
         assert_eq!(set, expected);
     }
 
@@ -2126,7 +2141,7 @@ public_key.value = "pem"
         let mut claims = serde_json::Map::new();
         claims.insert("email".into(), serde_json::json!("tenant_42@example.com"));
         let set = claim.extract(&claims).unwrap();
-        let expected: HashSet<String> = ["tenant", "42"].iter().map(|s| s.to_string()).collect();
+        let expected: BTreeSet<String> = ["tenant", "42"].iter().map(|s| s.to_string()).collect();
         assert_eq!(set, expected);
     }
 
@@ -2138,7 +2153,7 @@ public_key.value = "pem"
         let mut claims = serde_json::Map::new();
         claims.insert("email".into(), serde_json::json!("tenant_42@example.com"));
         let set = claim.extract(&claims).unwrap();
-        let expected: HashSet<String> = ["42"].iter().map(|s| s.to_string()).collect();
+        let expected: BTreeSet<String> = ["42"].iter().map(|s| s.to_string()).collect();
         assert_eq!(set, expected);
     }
 
@@ -2151,7 +2166,7 @@ public_key.value = "pem"
         let mut claims = serde_json::Map::new();
         claims.insert("sub".into(), serde_json::json!("tenant_1"));
         let set = claim.extract(&claims).unwrap();
-        assert_eq!(set, ["1"].iter().map(|s| s.to_string()).collect::<HashSet<_>>());
+        assert_eq!(set, ["1"].iter().map(|s| s.to_string()).collect::<BTreeSet<_>>());
         assert!(!set.contains("tenant_1"));
     }
 
@@ -2163,7 +2178,7 @@ public_key.value = "pem"
         let mut claims = serde_json::Map::new();
         claims.insert("sub".into(), serde_json::json!("tenant_1"));
         let set = claim.extract(&claims).unwrap();
-        assert_eq!(set, ["tenant_1"].iter().map(|s| s.to_string()).collect::<HashSet<_>>());
+        assert_eq!(set, ["tenant_1"].iter().map(|s| s.to_string()).collect::<BTreeSet<_>>());
     }
 
     #[test]
