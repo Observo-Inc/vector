@@ -4,7 +4,7 @@ use std::sync::{Arc, LazyLock, Mutex as StdMutex, Weak};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
-use jsonwebtoken::jwk::{AlgorithmParameters, JwkSet, KeyAlgorithm, PublicKeyUse};
+use jsonwebtoken::jwk::{AlgorithmParameters, JwkSet, PublicKeyUse};
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use openssl::x509::X509;
 use serde_json::Value;
@@ -280,8 +280,10 @@ pub fn add_auth_metadata(event: &mut Event, name: &str, value: &str) {
 
 /// JWT signing algorithm.
 ///
-/// All variants verify against an RSA public key, so a single configured
-/// PEM works for any combination of these.
+/// Only applicable when `authority` is `public_key` or `tls_cert`. For the
+/// `jwks` authority, accepted algorithms are derived automatically from the
+/// keys published by the JWKS endpoint — setting `algorithms` together with
+/// `jwks` is a configuration error.
 #[configurable_component]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthAlgorithm {
@@ -303,6 +305,12 @@ pub enum AuthAlgorithm {
     /// RSASSA-PSS using SHA-512.
     #[serde(rename = "PS512")]
     Ps512,
+    /// ECDSA using P-256 and SHA-256. Requires `jwks` authority.
+    #[serde(rename = "ES256")]
+    Es256,
+    /// ECDSA using P-384 and SHA-384. Requires `jwks` authority.
+    #[serde(rename = "ES384")]
+    Es384,
 }
 
 impl From<AuthAlgorithm> for Algorithm {
@@ -314,17 +322,21 @@ impl From<AuthAlgorithm> for Algorithm {
             AuthAlgorithm::Ps256 => Algorithm::PS256,
             AuthAlgorithm::Ps384 => Algorithm::PS384,
             AuthAlgorithm::Ps512 => Algorithm::PS512,
+            AuthAlgorithm::Es256 => Algorithm::ES256,
+            AuthAlgorithm::Es384 => Algorithm::ES384,
         }
     }
 }
 
 /// Default allowlist: full RSA family.
 ///
-/// All six algorithms verify against the same RSA public key. Including all
-/// of them lets a single source config accept tokens from any IdP using
-/// RSA-based signing (RSxxx for PKCS1-v1_5, PSxxx for PSS). Excludes:
-/// - HMAC (`HS*`): wrong key type, plus the well-known RS↔HS confusion attack
-/// - ECDSA (`ES*`) and EdDSA: incompatible with the RSA-only PEM loader
+/// Covers all real-world IdPs using RSA public keys. EC variants (`ES*`) are
+/// intentionally excluded from the default — they require the `jwks` authority
+/// and must be opted into explicitly so that existing static-PEM configurations
+/// are not silently affected.
+///
+/// Excludes:
+/// - HMAC (`HS*`): wrong key type; enables the well-known RS↔HS confusion attack
 /// - `none`: never accepted by jsonwebtoken regardless
 pub(crate) fn default_algorithms() -> Vec<AuthAlgorithm> {
     vec![
@@ -378,10 +390,7 @@ impl Authority {
     /// For static variants this is a synchronous PEM parse. For [`Self::Jwks`]
     /// this performs the initial HTTPS fetch and spawns the background
     /// refresh task — fail-fast if the endpoint is unreachable.
-    async fn build_key_store(
-        &self,
-        algorithms: &[AuthAlgorithm],
-    ) -> crate::Result<KeyStore> {
+    async fn build_key_store(&self) -> crate::Result<KeyStore> {
         match self {
             Authority::PublicKey(pk) => {
                 let pem = pk.load("public_key")?;
@@ -398,7 +407,7 @@ impl Authority {
                 Ok(KeyStore::Static(Arc::new(key)))
             }
             Authority::Jwks(cfg) => {
-                let cache = JwksCache::new(cfg, algorithms).await?;
+                let cache = JwksCache::new(cfg).await?;
                 Ok(KeyStore::Jwks(cache))
             }
         }
@@ -456,18 +465,15 @@ impl JwksCache {
     /// Construct, perform the initial fetch (fail-fast), and spawn the
     /// background refresh task. Returns `Arc<Self>` so the refresh task can
     /// hold a `Weak` and self-terminate when the [`Auth`] is dropped.
-    async fn new(
-        cfg: &JwksAuthority,
-        algorithms: &[AuthAlgorithm],
-    ) -> crate::Result<Arc<Self>> {
-        let fetcher = JwksFetcher::new(cfg, algorithms)?;
+    async fn new(cfg: &JwksAuthority) -> crate::Result<Arc<Self>> {
+        let fetcher = JwksFetcher::new(cfg)?;
         let initial = fetcher.fetch().await.map_err(|error| {
             format!("auth.jwks: initial fetch from '{}' failed: {error}", cfg.jwks_url)
         })?;
         if initial.is_empty() {
             return Err(format!(
                 "auth.jwks: '{}' returned no usable signing keys \
-                 (none matched use=sig and an allowed algorithm)",
+                 (none with `use=sig` and an RSA or EC key type)",
                 cfg.jwks_url
             )
             .into());
@@ -554,11 +560,10 @@ struct JwksFetcher {
     url: http::Uri,
     client: HttpClient,
     timeout: Duration,
-    algorithms: Vec<Algorithm>,
 }
 
 impl JwksFetcher {
-    fn new(cfg: &JwksAuthority, algorithms: &[AuthAlgorithm]) -> crate::Result<Self> {
+    fn new(cfg: &JwksAuthority) -> crate::Result<Self> {
         let url: http::Uri = cfg.jwks_url.parse().map_err(|error| {
             format!("auth.jwks.jwks_url '{}' is not a valid URL: {error}", cfg.jwks_url)
         })?;
@@ -569,7 +574,6 @@ impl JwksFetcher {
             url,
             client,
             timeout: Duration::from_secs(cfg.fetch_timeout_secs),
-            algorithms: algorithms.iter().copied().map(Algorithm::from).collect(),
         })
     }
 
@@ -607,15 +611,12 @@ impl JwksFetcher {
                     continue;
                 }
             }
-            // Skip non-RSA keys; the current Auth only supports RSA.
-            if !matches!(jwk.algorithm, AlgorithmParameters::RSA(_)) {
+            // Accept RSA and EC keys; skip symmetric (oct) and other key types.
+            if !matches!(
+                jwk.algorithm,
+                AlgorithmParameters::RSA(_) | AlgorithmParameters::EllipticCurve(_)
+            ) {
                 continue;
-            }
-            // Filter to configured algorithm allowlist if `alg` is advertised.
-            if let Some(alg) = jwk.common.key_algorithm {
-                if !key_algorithm_in_allowlist(alg, &self.algorithms) {
-                    continue;
-                }
             }
             let Some(kid) = jwk.common.key_id.clone() else {
                 // `kid`-less JWKS entries are unusable: we can't look them up
@@ -634,24 +635,6 @@ impl JwksFetcher {
         }
         map
     }
-}
-
-/// Map a JWK-side [`KeyAlgorithm`] to our [`Algorithm`] allowlist.
-///
-/// jsonwebtoken distinguishes between `Algorithm` (used at verification time)
-/// and `KeyAlgorithm` (advertised on the JWK). They share names but live in
-/// different types with no `From` impl in either direction.
-fn key_algorithm_in_allowlist(jwk_alg: KeyAlgorithm, allowlist: &[Algorithm]) -> bool {
-    let mapped = match jwk_alg {
-        KeyAlgorithm::RS256 => Some(Algorithm::RS256),
-        KeyAlgorithm::RS384 => Some(Algorithm::RS384),
-        KeyAlgorithm::RS512 => Some(Algorithm::RS512),
-        KeyAlgorithm::PS256 => Some(Algorithm::PS256),
-        KeyAlgorithm::PS384 => Some(Algorithm::PS384),
-        KeyAlgorithm::PS512 => Some(Algorithm::PS512),
-        _ => None,
-    };
-    mapped.is_some_and(|a| allowlist.contains(&a))
 }
 
 /// Auth configuration for sources.
@@ -675,16 +658,18 @@ pub struct AuthConfig {
 
     /// JWT signing algorithms accepted for token verification.
     ///
-    /// Tokens whose `alg` header is not in this list are rejected. Pinning
-    /// the algorithm at the validator is critical: a token's own `alg` claim
-    /// is not trusted alone, which is what prevents `alg: none` and
-    /// RS↔HS key-confusion attacks.
+    /// Only applicable when `authority` is `public_key` or `tls_cert`. Tokens
+    /// whose `alg` header is not in this list are rejected. Pinning the
+    /// algorithm at the validator prevents `alg: none` and RS↔HS key-confusion
+    /// attacks.
     ///
     /// Defaults to the full RSA family
-    /// (`RS256`/`RS384`/`RS512` + `PS256`/`PS384`/`PS512`), which covers
-    /// effectively all real-world IdPs using RSA public keys.
-    #[serde(default = "default_algorithms")]
-    pub algorithms: Vec<AuthAlgorithm>,
+    /// (`RS256`/`RS384`/`RS512` + `PS256`/`PS384`/`PS512`) when omitted.
+    ///
+    /// Must not be set when `authority` is `jwks` — accepted algorithms are
+    /// derived automatically from the JWKS endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub algorithms: Option<Vec<AuthAlgorithm>>,
 
     /// Expected `iss` (issuer) claim.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -765,18 +750,40 @@ impl AuthConfig {
     /// misconfigurations surface at `vector validate` / source startup
     /// rather than at first-request time.
     pub async fn build(&self) -> crate::Result<Auth> {
-        if self.algorithms.is_empty() {
-            return Err("auth.algorithms must contain at least one algorithm".into());
+        // `algorithms` is only meaningful for static PEM authorities. The JWKS
+        // endpoint is self-describing — accepted algorithms are derived from the
+        // published keys, not from config.
+        if matches!(self.authority, Authority::Jwks(_)) && self.algorithms.is_some() {
+            return Err(
+                "auth.algorithms is not applicable with `jwks` authority; \
+                 accepted algorithms are derived from the keys published by the \
+                 JWKS endpoint"
+                    .into(),
+            );
         }
 
-        let key_store = self.authority.build_key_store(&self.algorithms).await?;
+        let key_store = self.authority.build_key_store().await?;
 
-        // Seed `Validation` with the first algorithm, then overwrite with the
-        // full allowlist. jsonwebtoken's verifier checks the token's `alg`
-        // header against `validation.algorithms` and rejects anything not on
-        // the list, regardless of which one was used to seed `new`.
-        let mut validation = Validation::new(self.algorithms[0].into());
-        validation.algorithms = self.algorithms.iter().copied().map(Algorithm::from).collect();
+        // For static PEM, build a Validation with the configured algorithm
+        // allowlist (defaulting to all RSA variants). For JWKS, the algorithm
+        // is always determined per-decode from the token's `alg` header; seed
+        // with a placeholder that authenticate() overrides on every call.
+        let mut validation = if matches!(self.authority, Authority::Jwks(_)) {
+            Validation::new(Algorithm::RS256) // placeholder; overridden per-decode
+        } else {
+            let default_algos = default_algorithms();
+            let algos: &[AuthAlgorithm] = self.algorithms.as_deref().unwrap_or(&default_algos);
+            if algos.is_empty() {
+                return Err("auth.algorithms must contain at least one algorithm".into());
+            }
+            // Seed with the first algorithm, then overwrite with the full list.
+            // jsonwebtoken checks the token's `alg` header against this list and
+            // rejects anything not present — this is what prevents alg:none and
+            // RS↔HS confusion attacks.
+            let mut v = Validation::new(algos[0].into());
+            v.algorithms = algos.iter().copied().map(Algorithm::from).collect();
+            v
+        };
 
         if let Some(issuer) = &self.issuer {
             validation.set_issuer(&[issuer]);
@@ -1004,6 +1011,13 @@ impl Auth {
                     "token missing `kid` header",
                 ))?;
 
+                // jsonwebtoken v9 requires every entry in Validation::algorithms
+                // to share the same AlgorithmFamily as the DecodingKey (an RSA key
+                // rejects ES* and vice-versa). Narrow to just the token's claimed
+                // algorithm; decode then enforces that the key type actually matches.
+                let mut per_alg_validation = inner.validation.clone();
+                per_alg_validation.algorithms = vec![header.alg];
+
                 // Fast path: snapshot, lookup, verify under the same guard.
                 {
                     let snapshot = cache.snapshot();
@@ -1011,7 +1025,7 @@ impl Auth {
                         let result = decode::<serde_json::Map<String, Value>>(
                             token,
                             key,
-                            &inner.validation,
+                            &per_alg_validation,
                         );
                         match result {
                             Ok(data) => return Ok(Some(extract_membership(
@@ -1035,7 +1049,7 @@ impl Auth {
                     warn!(message = "Token signed by unknown key.", kid = %kid);
                     AuthError::InvalidToken("unknown signing key")
                 })?;
-                decode::<serde_json::Map<String, Value>>(token, key, &inner.validation).map_err(
+                decode::<serde_json::Map<String, Value>>(token, key, &per_alg_validation).map_err(
                     |err| {
                         warn!(message = "Token validation failed.", error = %err);
                         AuthError::InvalidToken("invalid or expired token")
@@ -1110,7 +1124,7 @@ mod tests {
             audience: None,
             membership_claim: "site_ids".to_string(),
             value_path: None,
-            algorithms: default_algorithms(),
+            algorithms: None,
             require_token: false,
         }
     }
@@ -1357,7 +1371,7 @@ mod tests {
     #[tokio::test]
     async fn empty_algorithms_list_fails_build() {
         let mut cfg = cfg_with(inline_public_key());
-        cfg.algorithms = vec![];
+        cfg.algorithms = Some(vec![]);
         assert!(cfg.build().await.is_err());
     }
 
@@ -1397,7 +1411,7 @@ mod tests {
     async fn token_with_algorithm_not_in_allowlist_is_rejected() {
         // Allowlist only RS512; sign the token with RS256 → must be rejected.
         let mut cfg = cfg_with(inline_public_key());
-        cfg.algorithms = vec![AuthAlgorithm::Rs512];
+        cfg.algorithms = Some(vec![AuthAlgorithm::Rs512]);
         let auth = cfg.build().await.unwrap();
         let token = make_token(HashMap::new()); // signed with RS256 by helper
         let result = auth.authenticate(Some(&bearer(&token))).await;
@@ -1407,7 +1421,7 @@ mod tests {
     #[tokio::test]
     async fn token_with_algorithm_in_allowlist_is_accepted() {
         let mut cfg = cfg_with(inline_public_key());
-        cfg.algorithms = vec![AuthAlgorithm::Rs256, AuthAlgorithm::Rs512];
+        cfg.algorithms = Some(vec![AuthAlgorithm::Rs256, AuthAlgorithm::Rs512]);
         let auth = cfg.build().await.unwrap();
         let token = make_token(HashMap::new()); // signed with RS256
         assert!(auth.authenticate(Some(&bearer(&token))).await.is_ok());
@@ -1776,6 +1790,31 @@ require_token     = false
     const TEST_KID: &str = "test-kid";
 
     /// Build a single-entry JWKS JSON from the test public key.
+    ///
+    /// When `include_alg` is false the `alg` field is omitted, matching the
+    /// Auth0 behaviour when "Include Signing Algorithms in JSON Web Key Set"
+    /// is toggled off in the tenant advanced settings.
+    fn make_jwks_json_full(kid: &str, use_sig: bool, include_alg: bool) -> serde_json::Value {
+        use base64::Engine;
+        use openssl::rsa::Rsa;
+
+        let rsa = Rsa::public_key_from_pem(TEST_PUBLIC_KEY.as_bytes()).unwrap();
+        let n = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rsa.n().to_vec());
+        let e = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rsa.e().to_vec());
+        let use_field = if use_sig { "sig" } else { "enc" };
+        let mut key = serde_json::json!({
+            "kid": kid,
+            "kty": "RSA",
+            "use": use_field,
+            "n": n,
+            "e": e,
+        });
+        if include_alg {
+            key["alg"] = serde_json::json!("RS256");
+        }
+        serde_json::json!({ "keys": [key] })
+    }
+
     fn make_jwks_json(kid: &str, use_sig: bool) -> serde_json::Value {
         use base64::Engine;
         use openssl::rsa::Rsa;
@@ -1822,9 +1861,67 @@ require_token     = false
             audience: None,
             membership_claim: "site_ids".to_string(),
             value_path: None,
-            algorithms: default_algorithms(),
+            algorithms: None,
             require_token: false,
         }
+    }
+
+    /// Generate a fresh P-256 key pair and return (jwks_json, encoding_key).
+    ///
+    /// jsonwebtoken requires PKCS8 PEM (`BEGIN PRIVATE KEY`) for EC keys —
+    /// SEC1 (`BEGIN EC PRIVATE KEY`) is not accepted.
+    fn make_ec_p256_test_key(kid: &str) -> (serde_json::Value, EncodingKey) {
+        use base64::Engine;
+        use openssl::bn::{BigNum, BigNumContext};
+        use openssl::ec::{EcGroup, EcKey};
+        use openssl::nid::Nid;
+        use openssl::pkey::PKey;
+
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+        let key = EcKey::generate(&group).unwrap();
+
+        let mut ctx = BigNumContext::new().unwrap();
+        let mut x_bn = BigNum::new().unwrap();
+        let mut y_bn = BigNum::new().unwrap();
+        key.public_key()
+            .affine_coordinates_gfp(&group, &mut x_bn, &mut y_bn, &mut ctx)
+            .unwrap();
+
+        // P-256 coordinates must be exactly 32 bytes; pad with leading zeros.
+        let encode_coord = |bn: &BigNum| {
+            let bytes = bn.to_vec();
+            let mut padded = vec![0u8; 32usize.saturating_sub(bytes.len())];
+            padded.extend_from_slice(&bytes);
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&padded)
+        };
+
+        let jwks = serde_json::json!({
+            "keys": [{
+                "kty": "EC",
+                "crv": "P-256",
+                "use": "sig",
+                "alg": "ES256",
+                "kid": kid,
+                "x": encode_coord(&x_bn),
+                "y": encode_coord(&y_bn),
+            }]
+        });
+
+        let pkey = PKey::from_ec_key(key).unwrap();
+        let pem = pkey.private_key_to_pem_pkcs8().unwrap();
+        let encoding_key = EncodingKey::from_ec_pem(&pem).unwrap();
+
+        (jwks, encoding_key)
+    }
+
+    fn make_ec_token_with_kid(kid: &str, encoding_key: &EncodingKey) -> String {
+        let mut header = Header::new(Algorithm::ES256);
+        header.kid = Some(kid.to_string());
+        let mut claims = serde_json::Map::new();
+        claims.insert("sub".into(), serde_json::json!("test-subject"));
+        claims.insert("exp".into(), serde_json::json!(now_secs() + 3600));
+        claims.insert("site_ids".into(), serde_json::json!(["site-123"]));
+        encode(&header, &claims, encoding_key).unwrap()
     }
 
     #[tokio::test]
@@ -1921,6 +2018,70 @@ require_token     = false
         assert!(ctx.is_authorized("site-123"));
     }
 
+    /// When the reactive refresh fires but the IdP still does not publish the
+    /// requested `kid`, the slow path must return `InvalidToken("unknown signing
+    /// key")` rather than panic or loop.
+    #[tokio::test]
+    async fn jwks_unknown_kid_after_refresh_is_rejected() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // Both the initial fetch and every subsequent refresh return only
+        // "other-kid" — the token's kid is never published.
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(make_jwks_json("other-kid", true)),
+            )
+            .mount(&server)
+            .await;
+
+        let auth = jwks_cfg(format!("{}/jwks", server.uri())).build().await.unwrap();
+        let token = make_token_with_kid("never-published-kid");
+        let result = auth.authenticate(Some(&bearer(&token))).await;
+        assert!(matches!(result, Err(AuthError::InvalidToken(_))));
+    }
+
+    /// When an unknown `kid` arrives within the reactive-refresh cooldown window
+    /// the cooldown gate suppresses the HTTP fetch. The response must still be
+    /// `InvalidToken` (key not found) and exactly one HTTP request must have
+    /// been made (the initial build fetch only).
+    #[tokio::test]
+    async fn jwks_reactive_refresh_skipped_within_cooldown() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_jwks_json(TEST_KID, true)))
+            .mount(&server)
+            .await;
+
+        // 60-second cooldown — will not expire during this test.
+        let mut cfg = jwks_cfg(format!("{}/jwks", server.uri()));
+        if let Authority::Jwks(ref mut j) = cfg.authority {
+            j.min_reactive_refresh_secs = 60;
+        }
+        let auth = cfg.build().await.unwrap();
+
+        // Present a token with an unknown kid immediately after build.
+        // The cooldown stamp was set during the initial fetch, so the gate
+        // should block the reactive refresh.
+        let token = make_token_with_kid("never-published-kid");
+        let result = auth.authenticate(Some(&bearer(&token))).await;
+        assert!(matches!(result, Err(AuthError::InvalidToken(_))));
+
+        // Only the build-time fetch — no reactive refresh.
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "reactive refresh must be suppressed within the cooldown window"
+        );
+    }
+
     #[tokio::test]
     async fn jwks_token_without_kid_is_rejected() {
         use wiremock::matchers::{method, path};
@@ -1940,6 +2101,32 @@ require_token     = false
         assert!(matches!(result, Err(AuthError::InvalidToken(_))));
     }
 
+    /// The JWKS authenticate path calls `decode_header` explicitly before any
+    /// key lookup to extract the `kid`. A token with a malformed header must be
+    /// rejected before the cache is consulted — not confused with an expired or
+    /// bad-signature error. This code path is distinct from the static-PEM path
+    /// which calls `decode` directly.
+    #[tokio::test]
+    async fn jwks_malformed_token_header_rejected() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_jwks_json(TEST_KID, true)))
+            .mount(&server)
+            .await;
+
+        let auth = jwks_cfg(format!("{}/jwks", server.uri())).build().await.unwrap();
+        // "not.a.jwt" has three segments but the header part ("not") is not
+        // valid base64url JSON — `decode_header` will fail before any key lookup.
+        let result = auth.authenticate(Some("Bearer not.a.jwt")).await;
+        assert!(matches!(result, Err(AuthError::InvalidToken(_))));
+        // No reactive refresh should have been triggered.
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
     #[tokio::test]
     async fn jwks_skips_use_enc_entries() {
         use wiremock::matchers::{method, path};
@@ -1957,6 +2144,237 @@ require_token     = false
         let cfg = jwks_cfg(format!("{}/jwks", server.uri()));
         let err = cfg.build().await.unwrap_err().to_string();
         assert!(err.contains("no usable signing keys"), "got: {err}");
+    }
+
+    /// A JWK entry without a `kid` field cannot be looked up per-token (we
+    /// index by kid) and must be skipped with a warning. Other valid entries in
+    /// the same response must still be indexed and usable for authentication.
+    #[tokio::test]
+    async fn jwks_kidless_entry_skipped_other_keys_still_indexed() {
+        use base64::Engine;
+        use openssl::rsa::Rsa;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let rsa = Rsa::public_key_from_pem(TEST_PUBLIC_KEY.as_bytes()).unwrap();
+        let n = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rsa.n().to_vec());
+        let e = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rsa.e().to_vec());
+
+        let jwks = serde_json::json!({
+            "keys": [
+                // Entry without `kid` — must be skipped.
+                { "kty": "RSA", "use": "sig", "alg": "RS256", "n": n, "e": e },
+                // Entry with `kid` — must be indexed.
+                { "kid": TEST_KID, "kty": "RSA", "use": "sig", "alg": "RS256", "n": n, "e": e },
+            ]
+        });
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jwks))
+            .mount(&server)
+            .await;
+
+        // Build must succeed despite the kid-less entry.
+        let auth = jwks_cfg(format!("{}/jwks", server.uri())).build().await.unwrap();
+
+        // Token signed with the keyed entry must authenticate.
+        let token = make_token_with_kid(TEST_KID);
+        let ctx = auth.authenticate(Some(&bearer(&token))).await.unwrap().unwrap();
+        assert!(ctx.is_authorized("site-123"));
+    }
+
+    // ── EC key (ES256 / ES384) tests ─────────────────────────────────────────
+
+    /// EC-only JWKS is accepted without any `algorithms` config — the JWKS
+    /// endpoint is the authority on which key types are valid.
+    #[tokio::test]
+    async fn jwks_ec_only_accepted_without_algorithm_config() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let (ec_jwks, ec_enc_key) = make_ec_p256_test_key(TEST_KID);
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ec_jwks))
+            .mount(&server)
+            .await;
+
+        let auth = jwks_cfg(format!("{}/jwks", server.uri())).build().await.unwrap();
+        let token = make_ec_token_with_kid(TEST_KID, &ec_enc_key);
+        let ctx = auth.authenticate(Some(&bearer(&token))).await.unwrap().unwrap();
+        assert!(ctx.is_authorized("site-123"));
+    }
+
+    /// Setting `algorithms` alongside `jwks` authority is a configuration error —
+    /// the JWKS endpoint is self-describing and no algorithm config is needed.
+    #[tokio::test]
+    async fn jwks_algorithms_field_is_config_error() {
+        let mut cfg = jwks_cfg("http://unused/jwks".to_string());
+        cfg.algorithms = Some(vec![AuthAlgorithm::Rs256]);
+        let err = cfg.build().await.unwrap_err().to_string();
+        assert!(err.contains("not applicable with"), "got: {err}");
+    }
+
+    /// A JWKS with both RSA and EC keys validates tokens for each key type
+    /// independently — no algorithm configuration required.
+    #[tokio::test]
+    async fn jwks_mixed_rsa_and_ec_keys_both_validate() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let ec_kid = "ec-key";
+
+        let rsa_entry = make_jwks_json(TEST_KID, true)["keys"][0].clone();
+        let (ec_jwks_single, ec_enc_key) = make_ec_p256_test_key(ec_kid);
+        let ec_entry = ec_jwks_single["keys"][0].clone();
+        let combined = serde_json::json!({"keys": [rsa_entry, ec_entry]});
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(combined))
+            .mount(&server)
+            .await;
+
+        let auth = jwks_cfg(format!("{}/jwks", server.uri())).build().await.unwrap();
+
+        // RSA-signed token (kid = TEST_KID).
+        let rsa_token = make_token_with_kid(TEST_KID);
+        let ctx = auth.authenticate(Some(&bearer(&rsa_token))).await.unwrap().unwrap();
+        assert!(ctx.is_authorized("site-123"));
+
+        // EC-signed token (kid = ec_kid).
+        let ec_token = make_ec_token_with_kid(ec_kid, &ec_enc_key);
+        let ctx = auth.authenticate(Some(&bearer(&ec_token))).await.unwrap().unwrap();
+        assert!(ctx.is_authorized("site-123"));
+    }
+
+    // ── IdP compatibility tests ───────────────────────────────────────────────
+
+    /// Auth0 allows administrators to disable "Include Signing Algorithms in
+    /// JSON Web Key Set", which removes the `alg` field from every JWK entry.
+    /// Keys without an `alg` must still be accepted and must validate tokens.
+    #[tokio::test]
+    async fn jwks_auth0_key_without_alg_field_is_accepted() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(make_jwks_json_full(TEST_KID, true, false)),
+            )
+            .mount(&server)
+            .await;
+
+        let auth = jwks_cfg(format!("{}/jwks", server.uri())).build().await.unwrap();
+        let token = make_token_with_kid(TEST_KID);
+        let ctx = auth.authenticate(Some(&bearer(&token))).await.unwrap().unwrap();
+        assert!(ctx.is_authorized("site-123"));
+    }
+
+    /// Keycloak publishes both a `use=sig` signing key and a `use=enc`
+    /// encryption key in the same JWKS response. Only the signing key must
+    /// enter the cache; the encryption key must be silently skipped.
+    #[tokio::test]
+    async fn jwks_keycloak_enc_key_alongside_sig_key_is_filtered() {
+        use base64::Engine;
+        use openssl::rsa::Rsa;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let rsa = Rsa::public_key_from_pem(TEST_PUBLIC_KEY.as_bytes()).unwrap();
+        let n = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rsa.n().to_vec());
+        let e = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rsa.e().to_vec());
+
+        // Keycloak-style response: one sig key + one enc key, same RSA material.
+        let jwks = serde_json::json!({
+            "keys": [
+                { "kid": TEST_KID, "kty": "RSA", "use": "sig", "alg": "RS256", "n": n, "e": e },
+                { "kid": "enc-key", "kty": "RSA", "use": "enc", "alg": "RSA-OAEP", "n": n, "e": e },
+            ]
+        });
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jwks))
+            .mount(&server)
+            .await;
+
+        let auth = jwks_cfg(format!("{}/jwks", server.uri())).build().await.unwrap();
+        let token = make_token_with_kid(TEST_KID);
+        // Token signed with the sig key must validate.
+        let ctx = auth.authenticate(Some(&bearer(&token))).await.unwrap().unwrap();
+        assert!(ctx.is_authorized("site-123"));
+        // Token claiming the enc kid must be rejected (enc key not in cache).
+        let enc_token = make_token_with_kid("enc-key");
+        let result = auth.authenticate(Some(&bearer(&enc_token))).await;
+        assert!(matches!(result, Err(AuthError::InvalidToken(_))));
+    }
+
+    // ── periodic-refresh tests ───────────────────────────────────────────────
+
+    /// The background refresher must atomically swap in a new key map when the
+    /// periodic interval fires. A key that was absent at build time must become
+    /// usable after the refresh without any reactive (on-unknown-kid) fetch.
+    ///
+    /// Pinning `min_reactive_refresh_secs` to a large value ensures that the
+    /// key becomes available only through the periodic path, not the reactive
+    /// one. The test waits 1.5× the refresh interval for the task to fire.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn jwks_periodic_refresh_rotates_keys() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // Initial fetch: only "old-kid".
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_jwks_json("old-kid", true)))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        // Periodic refresh onwards: only TEST_KID.
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(make_jwks_json(TEST_KID, true)))
+            .mount(&server)
+            .await;
+
+        let mut cfg = jwks_cfg(format!("{}/jwks", server.uri()));
+        if let Authority::Jwks(ref mut j) = cfg.authority {
+            j.refresh_interval_secs = 1;
+            // Long cooldown prevents reactive refresh from firing so the key
+            // update is attributable solely to the background task.
+            j.min_reactive_refresh_secs = 3600;
+        }
+        let auth = cfg.build().await.unwrap();
+
+        // Before the background task fires, TEST_KID is not in the cache.
+        // The cooldown prevents a reactive fetch, so we get "unknown signing key".
+        let token = make_token_with_kid(TEST_KID);
+        assert!(
+            auth.authenticate(Some(&bearer(&token))).await.is_err(),
+            "TEST_KID should not be in the cache before the first periodic refresh"
+        );
+
+        // Wait for the periodic refresh (1 s interval + 500 ms buffer).
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        // After the background swap, TEST_KID is in the new key map.
+        let ctx = auth
+            .authenticate(Some(&bearer(&token)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(ctx.is_authorized("site-123"));
     }
 
     // ── concurrent / race-condition tests ────────────────────────────────────

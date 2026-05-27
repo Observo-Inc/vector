@@ -109,7 +109,7 @@ pub async fn build_auth(issuer: Option<&str>, audience: Option<Vec<&str>>) -> Au
         audience: audience.map(|v| v.iter().map(|s| s.to_string()).collect()),
         membership_claim: "site_ids".to_string(),
         value_path: None,
-        algorithms: crate::sources::util::jwt_auth::default_algorithms(),
+        algorithms: None,
         require_token: true,
     }
     .build()
