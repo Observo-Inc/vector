@@ -103,7 +103,7 @@ impl MembershipClaim {
             .get(self.claim_name())
             .ok_or(AuthError::InvalidToken("token missing membership claim"))?;
 
-        match self {
+        let set = match self {
             MembershipClaim::Identity(_) => {
                 // Expects a JSON array — standard for custom multi-value claims
                 // like `site_ids`. Pre-allocate to the array length to avoid
@@ -115,7 +115,7 @@ impl MembershipClaim {
                 for v in array.iter().filter_map(Value::as_str) {
                     set.insert(v.to_owned());
                 }
-                Ok(set)
+                set
             }
             MembershipClaim::Regexp(_, re) => {
                 // Expects a JSON string — standard for scalar claims like `email`.
@@ -125,15 +125,20 @@ impl MembershipClaim {
                 let s = value
                     .as_str()
                     .ok_or(AuthError::InvalidToken("regexp membership claim must be a string"))?;
+                let caps = re
+                    .captures(s)
+                    .ok_or(AuthError::InvalidToken("token missing membership claim"))?;
                 let mut set = HashSet::new();
-                if let Some(caps) = re.captures(s) {
-                    for m in caps.iter().skip(1).flatten() {
-                        set.insert(m.as_str().to_owned());
-                    }
+                for m in caps.iter().skip(1).flatten() {
+                    set.insert(m.as_str().to_owned());
                 }
-                Ok(set)
+                set
             }
+        };
+        if set.is_empty() {
+            return Err(AuthError::InvalidToken("token missing membership claim"));
         }
+        Ok(set)
     }
 }
 
@@ -295,6 +300,15 @@ pub struct CompiledPath {
     pub(crate) path: OwnedTargetPath,
 }
 
+impl CompiledPath {
+    fn new(s: &str) -> Result<Self, vrl::path::PathParseError> {
+        Ok(Self {
+            name: s.to_string(),
+            path: parse_target_path(s)?,
+        })
+    }
+}
+
 /// Runtime form of [`AuthValuePath`] with paths pre-parsed.
 ///
 /// Built once by [`AuthConfig::build`]; held inside the `Arc<Inner>` so every
@@ -311,19 +325,10 @@ impl TryFrom<&AuthValuePath> for CompiledValuePath {
     type Error = vrl::path::PathParseError;
 
     fn try_from(vp: &AuthValuePath) -> Result<Self, Self::Error> {
-        let log_str = vp.log.as_deref().unwrap_or(&vp.default);
-        let metric_str = vp.metric_tag.as_deref().unwrap_or(&vp.default);
-        let trace_str = vp.trace.as_deref().unwrap_or(&vp.default);
         Ok(Self {
-            log: CompiledPath {
-                name: log_str.to_string(),
-                path: parse_target_path(log_str)?,
-            },
-            metric_tag: metric_str.to_string(),
-            trace: CompiledPath {
-                name: trace_str.to_string(),
-                path: parse_target_path(trace_str)?,
-            },
+            log: CompiledPath::new(vp.log.as_deref().unwrap_or(&vp.default))?,
+            metric_tag: vp.metric_tag.as_deref().unwrap_or(&vp.default).to_string(),
+            trace: CompiledPath::new(vp.trace.as_deref().unwrap_or(&vp.default))?,
         })
     }
 }
@@ -467,24 +472,12 @@ impl Authority {
     /// refresh task — fail-fast if the endpoint is unreachable.
     async fn build_key_store(&self) -> crate::Result<KeyStore> {
         match self {
-            Authority::PublicKey(pk) => {
-                let pem = pk.load("public_key")?;
-                let key = DecodingKey::from_rsa_pem(pem.as_bytes()).map_err(|error| {
-                    format!("Failed to parse RSA public key PEM: {error}")
-                })?;
-                Ok(KeyStore::Static(Arc::new(key)))
-            }
+            Authority::PublicKey(pk) => pem_to_static_key(&pk.load("public_key")?),
             Authority::TlsCert(cert) => {
                 let pem = Self::extract_public_key_pem_from_cert_pem(&cert.load("tls_cert")?)?;
-                let key = DecodingKey::from_rsa_pem(pem.as_bytes()).map_err(|error| {
-                    format!("Failed to parse RSA public key PEM: {error}")
-                })?;
-                Ok(KeyStore::Static(Arc::new(key)))
+                pem_to_static_key(&pem)
             }
-            Authority::Jwks(cfg) => {
-                let cache = JwksCache::new(cfg).await?;
-                Ok(KeyStore::Jwks(cache))
-            }
+            Authority::Jwks(cfg) => Ok(KeyStore::Jwks(JwksCache::new(cfg).await?)),
         }
     }
 
@@ -502,6 +495,12 @@ impl Authority {
         String::from_utf8(pem_bytes)
             .map_err(|error| format!("Extracted public key PEM was not valid UTF-8: {error}").into())
     }
+}
+
+fn pem_to_static_key(pem: &str) -> crate::Result<KeyStore> {
+    let key = DecodingKey::from_rsa_pem(pem.as_bytes())
+        .map_err(|error| format!("Failed to parse RSA public key PEM: {error}"))?;
+    Ok(KeyStore::Static(Arc::new(key)))
 }
 
 /// Runtime verification key material. Two shapes:
@@ -1166,18 +1165,14 @@ impl Auth {
                 {
                     let snapshot = cache.snapshot();
                     if let Some(key) = snapshot.get(kid) {
-                        return decode::<serde_json::Map<String, Value>>(
+                        let data = decode::<serde_json::Map<String, Value>>(
                             token,
                             key,
                             per_alg_validation,
                         )
-                        .map_err(token_validation_failed)
-                        .and_then(|data| {
-                            inner.membership_claim.extract(&data.claims).map(
-                                |allowed_values| AuthContext { allowed_values },
-                            )
-                        })
-                        .map(Some);
+                        .map_err(token_validation_failed)?;
+                        let allowed_values = inner.membership_claim.extract(&data.claims)?;
+                        return Ok(Some(AuthContext { allowed_values }));
                     }
                 }
 
@@ -1543,9 +1538,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn regexp_membership_claim_no_match_yields_empty_context() {
+    async fn regexp_membership_claim_no_match_is_rejected() {
         // Token is valid and the claim exists, but the pattern does not match.
-        // authenticate() succeeds; the AuthContext admits nothing.
+        // The request is hard-rejected — same error as a missing claim.
         let mut cfg = cfg_with(inline_public_key());
         cfg.membership_claim = MembershipClaimConfig::Regexp {
             claim: "email".to_string(),
@@ -1557,8 +1552,10 @@ mod tests {
         extra.insert("email", serde_json::json!("admin@example.com"));
         let token = make_token(extra);
 
-        let ctx = auth.authenticate(Some(&bearer(&token))).await.unwrap().unwrap();
-        assert!(!ctx.is_authorized("admin"));
+        assert!(matches!(
+            auth.authenticate(Some(&bearer(&token))).await,
+            Err(AuthError::InvalidToken(_)),
+        ));
     }
 
     // ── algorithm allowlist ──────────────────────────────────────────────────
@@ -2058,12 +2055,37 @@ public_key.value = "pem"
 
     #[test]
     fn extract_identity_skips_non_string_elements() {
+        // Mixed array: string elements are collected; non-strings are dropped.
         let claim = MembershipClaim::Identity("ids".to_string());
         let mut claims = serde_json::Map::new();
         claims.insert("ids".into(), serde_json::json!(["alpha", 42, null, "beta"]));
         let set = claim.extract(&claims).unwrap();
         let expected: HashSet<String> = ["alpha", "beta"].iter().map(|s| s.to_string()).collect();
         assert_eq!(set, expected);
+    }
+
+    #[test]
+    fn extract_identity_all_non_string_elements_is_error() {
+        // Array with no string elements yields an empty set — treat as missing claim.
+        let claim = MembershipClaim::Identity("ids".to_string());
+        let mut claims = serde_json::Map::new();
+        claims.insert("ids".into(), serde_json::json!([42, null, true]));
+        assert!(matches!(
+            claim.extract(&claims),
+            Err(AuthError::InvalidToken(_)),
+        ));
+    }
+
+    #[test]
+    fn extract_identity_empty_array_is_error() {
+        // An empty array yields no membership values — treat as missing claim.
+        let claim = MembershipClaim::Identity("ids".to_string());
+        let mut claims = serde_json::Map::new();
+        claims.insert("ids".into(), serde_json::json!([]));
+        assert!(matches!(
+            claim.extract(&claims),
+            Err(AuthError::InvalidToken(_)),
+        ));
     }
 
     #[test]
@@ -2138,13 +2160,15 @@ public_key.value = "pem"
     }
 
     #[test]
-    fn extract_regexp_no_match_returns_empty_set() {
+    fn extract_regexp_no_match_is_error() {
         let re = Regex::new(r"^tenant_([0-9]+)@example\.com$").unwrap();
         let claim = MembershipClaim::Regexp("email".to_string(), re);
         let mut claims = serde_json::Map::new();
         claims.insert("email".into(), serde_json::json!("admin@example.com"));
-        let set = claim.extract(&claims).unwrap();
-        assert!(set.is_empty());
+        assert!(matches!(
+            claim.extract(&claims),
+            Err(AuthError::InvalidToken(_)),
+        ));
     }
 
     #[test]
@@ -2165,6 +2189,21 @@ public_key.value = "pem"
         let re = Regex::new(r".*").unwrap();
         let claim = MembershipClaim::Regexp("roles".to_string(), re);
         let claims = serde_json::Map::new();
+        assert!(matches!(
+            claim.extract(&claims),
+            Err(AuthError::InvalidToken(_)),
+        ));
+    }
+
+    #[test]
+    fn extract_regexp_all_optional_groups_unmatched_is_error() {
+        // Pattern matches but all capture groups are optional and none fired —
+        // the resulting set would be empty, so this is treated as missing claim.
+        let re = Regex::new(r"^value(?:-(foo))?(?:-(bar))?$").unwrap();
+        let claim = MembershipClaim::Regexp("role".to_string(), re);
+        let mut claims = serde_json::Map::new();
+        // Matches the outer pattern but neither optional group fires.
+        claims.insert("role".into(), serde_json::json!("value"));
         assert!(matches!(
             claim.extract(&claims),
             Err(AuthError::InvalidToken(_)),
