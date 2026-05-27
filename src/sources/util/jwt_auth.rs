@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, LazyLock, Mutex as StdMutex, Weak};
+use std::sync::{Arc, LazyLock, Weak};
+use tokio::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
@@ -591,10 +592,8 @@ type KeyMap = BTreeMap<String, DecodingKey>;
 struct JwksCache {
     keys: ArcSwap<KeyMap>,
     fetcher: JwksFetcher,
-    /// Last-refresh timestamp guarding the reactive-refresh cooldown. A
-    /// stdlib mutex (uncontended, sub-µs) is sufficient — this gate is hit
-    /// only on the cold path of unknown-kid tokens.
-    last_refresh: StdMutex<Instant>,
+    /// Last-refresh timestamp guarding the reactive-refresh cooldown.
+    last_refresh: Mutex<Instant>,
     min_reactive_refresh: Duration,
 }
 
@@ -621,7 +620,7 @@ impl JwksCache {
             // Subtract the cooldown so the very first reactive refresh is never
             // blocked. Without this, a key rotated right before startup would be
             // unreachable for `min_reactive_refresh_secs` seconds.
-            last_refresh: StdMutex::new(
+            last_refresh: Mutex::new(
                 Instant::now() - Duration::from_secs(cfg.min_reactive_refresh_secs),
             ),
             min_reactive_refresh: Duration::from_secs(cfg.min_reactive_refresh_secs),
@@ -659,7 +658,7 @@ impl JwksCache {
     /// timestamp and returns without firing a duplicate request.
     async fn refresh_if_due(&self) {
         {
-            let mut last = self.last_refresh.lock().expect("last_refresh poisoned");
+            let mut last = self.last_refresh.lock().await;
             if last.elapsed() < self.min_reactive_refresh {
                 return;
             }
@@ -677,7 +676,7 @@ impl JwksCache {
             }
             Ok(map) => {
                 self.keys.store(Arc::new(map));
-                *self.last_refresh.lock().expect("last_refresh poisoned") = Instant::now();
+                *self.last_refresh.lock().await = Instant::now();
             }
             Err(error) => {
                 warn!(message = "JWKS refresh failed; keeping previous keys.", %error);
@@ -2974,7 +2973,7 @@ public_key.value = "pem"
         }
 
         // Exactly 2 HTTP calls: 1 initial build + 1 reactive refresh.
-        // The StdMutex gate ensures only the first caller past the cooldown
+        // The Mutex gate ensures only the first caller past the cooldown
         // fires a fetch; the remaining 19 see the freshly-stamped timestamp
         // and return early without issuing their own requests.
         assert_eq!(
