@@ -7,6 +7,7 @@ use arc_swap::ArcSwap;
 use jsonwebtoken::jwk::{AlgorithmParameters, JwkSet, PublicKeyUse};
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use openssl::x509::X509;
+use regex::Regex;
 use serde_json::Value;
 use vector_lib::configurable::configurable_component;
 use vector_lib::event::Event;
@@ -63,6 +64,64 @@ impl AuthEventError {
             AuthEventError::AuthorizationMissing => "authorization_missing",
             AuthEventError::Forbidden => "forbidden",
         }
+    }
+}
+
+/// Compiled form of the JWT membership-claim configuration.
+///
+/// Built once in [`AuthConfig::build`] from the raw config strings and stored
+/// in [`Inner`] so the hot path (per-request token extraction) pays no
+/// allocation or compilation cost.
+#[derive(Clone, Debug)]
+pub enum MembershipClaim {
+    /// Direct array lookup: all string values in the named claim are returned
+    /// as the allowed-values set.
+    Identity(String),
+    /// Regex-filtered lookup: only values from the named claim that produce a
+    /// match under the compiled pattern are included in the allowed-values set.
+    /// The matched substring (not the full value) is what enters the set.
+    Regexp(String, Regex),
+}
+
+impl MembershipClaim {
+    fn claim_name(&self) -> &str {
+        match self {
+            MembershipClaim::Identity(name) | MembershipClaim::Regexp(name, _) => name.as_str(),
+        }
+    }
+
+    /// Extract the allowed-values set from a decoded token's claims map.
+    ///
+    /// Returns `Err(InvalidToken)` if the named claim is absent or is not a
+    /// JSON array. For [`Self::Regexp`] each array element is tested against
+    /// the compiled pattern; only the matched substring is collected.
+    pub fn extract(
+        &self,
+        claims: &serde_json::Map<String, Value>,
+    ) -> Result<HashSet<String>, AuthError> {
+        let array = claims
+            .get(self.claim_name())
+            .and_then(Value::as_array)
+            .ok_or(AuthError::InvalidToken("token missing membership claim"))?;
+
+        // Pre-allocate to the claim array length so the hot path never rehashes.
+        let mut set = HashSet::with_capacity(array.len());
+        match self {
+            MembershipClaim::Identity(_) => {
+                for v in array.iter().filter_map(Value::as_str) {
+                    set.insert(v.to_owned());
+                }
+            }
+            MembershipClaim::Regexp(_, re) => {
+                for v in array.iter().filter_map(Value::as_str) {
+                    if let Some(m) = re.find(v) {
+                        set.insert(m.as_str().to_owned());
+                    }
+                }
+            }
+        }
+
+        Ok(set)
     }
 }
 
@@ -640,6 +699,40 @@ impl JwksFetcher {
     }
 }
 
+/// Config-layer representation of the membership claim.
+///
+/// Accepts either a plain claim name (string) or a claim name paired with a
+/// regex pattern. The compiled [`MembershipClaim`] is built once in
+/// [`AuthConfig::build`] so no regex compilation happens on the hot path.
+///
+/// ## TOML examples
+///
+/// Plain (identity):
+/// ```toml
+/// membership_claim = "site_ids"
+/// ```
+///
+/// Regex-filtered:
+/// ```toml
+/// membership_claim = { claim = "roles", pattern = "^tenant:[^:]+$" }
+/// ```
+#[configurable_component]
+#[derive(Clone, Debug, PartialEq)]
+#[serde(untagged)]
+pub enum MembershipClaimConfig {
+    /// All string values in the named claim array are admitted as-is.
+    Identity(String),
+    /// Only claim values that match `pattern` are admitted; the matched
+    /// substring enters the allowed-values set.
+    Regexp {
+        /// Name of the JWT claim whose array value is filtered.
+        claim: String,
+        /// Regex pattern applied to each value. Values that match are admitted;
+        /// the matched substring (not the full value) enters the set.
+        pattern: String,
+    },
+}
+
 /// Auth configuration for sources.
 ///
 /// `authority` selects the signing key source — a static PEM (`public_key` /
@@ -679,11 +772,13 @@ pub struct AuthConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audience: Option<Vec<String>>,
 
-    /// Name of the JWT claim whose array value is checked for membership.
+    /// JWT claim used for membership checks.
     ///
-    /// Defaults to `"site_ids"`.
+    /// Accepts a plain claim name (`"site_ids"`) or a claim name with a regex
+    /// pattern (`{ claim = "roles", pattern = "^tenant:[^:]+$" }`). See
+    /// [`MembershipClaimConfig`] for the full format. Defaults to `"site_ids"`.
     #[serde(default = "default_membership_claim")]
-    pub membership_claim: String,
+    pub membership_claim: MembershipClaimConfig,
 
     /// Event field paths used to extract the membership value for per-event auth.
     ///
@@ -711,8 +806,8 @@ fn default_require_token() -> bool {
     true
 }
 
-fn default_membership_claim() -> String {
-    "site_ids".to_string()
+fn default_membership_claim() -> MembershipClaimConfig {
+    MembershipClaimConfig::Identity("site_ids".to_string())
 }
 
 /// Replace serde's flattened-enum error with an actionable message naming the
@@ -826,11 +921,21 @@ impl AuthConfig {
             .transpose()
             .map_err(|e| format!("Failed to parse auth value_path: {e}"))?;
 
+        let membership_claim = match &self.membership_claim {
+            MembershipClaimConfig::Identity(name) => MembershipClaim::Identity(name.clone()),
+            MembershipClaimConfig::Regexp { claim, pattern } => {
+                let re = Regex::new(pattern).map_err(|error| {
+                    format!("auth.membership_claim pattern: {error}")
+                })?;
+                MembershipClaim::Regexp(claim.clone(), re)
+            }
+        };
+
         Ok(Auth(Arc::new(Inner {
             key_store,
             validation,
             jwks_validations,
-            membership_claim: self.membership_claim.clone(),
+            membership_claim,
             value_path,
             require_token: self.require_token,
         })))
@@ -861,7 +966,7 @@ struct Inner {
     /// startup so `authenticate` never allocates a `Validation` per request.
     /// Empty for static-PEM authorities.
     jwks_validations: HashMap<Algorithm, Validation>,
-    membership_claim: String,
+    membership_claim: MembershipClaim,
     value_path: Option<CompiledValuePath>,
     require_token: bool,
 }
@@ -1055,7 +1160,11 @@ impl Auth {
                             per_alg_validation,
                         )
                         .map_err(token_validation_failed)
-                        .and_then(|data| extract_membership(data, &inner.membership_claim))
+                        .and_then(|data| {
+                            inner.membership_claim.extract(&data.claims).map(
+                                |allowed_values| AuthContext { allowed_values },
+                            )
+                        })
                         .map(Some);
                     }
                 }
@@ -1074,34 +1183,14 @@ impl Auth {
             }
         };
 
-        Ok(Some(extract_membership(token_data, &inner.membership_claim)?))
+        let allowed_values = inner.membership_claim.extract(&token_data.claims)?;
+        Ok(Some(AuthContext { allowed_values }))
     }
 }
 
 fn token_validation_failed(err: jsonwebtoken::errors::Error) -> AuthError {
     warn!(message = "Token validation failed.", error = %err);
     AuthError::InvalidToken("invalid or expired token")
-}
-
-/// Extract the membership-claim array from validated token data into an
-/// [`AuthContext`]. Returns `InvalidToken` if the claim is missing or not
-/// a JSON array.
-fn extract_membership(
-    token_data: jsonwebtoken::TokenData<serde_json::Map<String, Value>>,
-    membership_claim: &str,
-) -> Result<AuthContext, AuthError> {
-    let allowed = token_data
-        .claims
-        .get(membership_claim)
-        .and_then(Value::as_array)
-        .ok_or(AuthError::InvalidToken("token missing membership claim"))?;
-
-    let allowed_values: HashSet<String> = allowed
-        .iter()
-        .filter_map(|v| v.as_str().map(str::to_owned))
-        .collect();
-
-    Ok(AuthContext { allowed_values })
 }
 
 /// Strip the `Bearer` auth scheme from a header value, case-insensitively and
@@ -1143,7 +1232,7 @@ mod tests {
             authority,
             issuer: None,
             audience: None,
-            membership_claim: "site_ids".to_string(),
+            membership_claim: MembershipClaimConfig::Identity("site_ids".to_string()),
             value_path: None,
             algorithms: None,
             require_token: false,
@@ -1375,7 +1464,7 @@ mod tests {
     #[tokio::test]
     async fn custom_membership_claim_is_checked() {
         let mut cfg = cfg_with(inline_public_key());
-        cfg.membership_claim = "allowed_tenants".to_string();
+        cfg.membership_claim = MembershipClaimConfig::Identity("allowed_tenants".to_string());
         let auth = cfg.build().await.unwrap();
 
         let mut extra = HashMap::new();
@@ -1385,6 +1474,79 @@ mod tests {
         let ctx = auth.authenticate(Some(&bearer(&token))).await.unwrap().unwrap();
         assert!(ctx.is_authorized("tenant-abc"));
         assert!(!ctx.is_authorized("site-123")); // site-123 is in site_ids, not allowed_tenants
+    }
+
+    #[tokio::test]
+    async fn invalid_regexp_pattern_fails_build() {
+        let mut cfg = cfg_with(inline_public_key());
+        cfg.membership_claim = MembershipClaimConfig::Regexp {
+            claim: "roles".to_string(),
+            pattern: "[unclosed".to_string(),
+        };
+        let err = cfg.build().await.unwrap_err().to_string();
+        assert!(
+            err.contains("auth.membership_claim pattern"),
+            "expected pattern compilation error, got: {err}",
+        );
+    }
+
+    #[tokio::test]
+    async fn regexp_membership_claim_admits_matching_values() {
+        let mut cfg = cfg_with(inline_public_key());
+        cfg.membership_claim = MembershipClaimConfig::Regexp {
+            claim: "roles".to_string(),
+            pattern: r"^tenant:[^:]+$".to_string(),
+        };
+        let auth = cfg.build().await.unwrap();
+
+        let mut extra = HashMap::new();
+        extra.insert("roles", serde_json::json!(["tenant:abc", "admin", "tenant:def"]));
+        let token = make_token(extra);
+
+        let ctx = auth.authenticate(Some(&bearer(&token))).await.unwrap().unwrap();
+        assert!(ctx.is_authorized("tenant:abc"));
+        assert!(ctx.is_authorized("tenant:def"));
+        assert!(!ctx.is_authorized("admin")); // doesn't match pattern
+    }
+
+    #[tokio::test]
+    async fn regexp_membership_claim_returns_matched_substring() {
+        // Pattern has no anchors — only the matched portion enters the set, not
+        // the full claim value.
+        let mut cfg = cfg_with(inline_public_key());
+        cfg.membership_claim = MembershipClaimConfig::Regexp {
+            claim: "roles".to_string(),
+            pattern: r"tenant:[^:]+".to_string(),
+        };
+        let auth = cfg.build().await.unwrap();
+
+        let mut extra = HashMap::new();
+        extra.insert("roles", serde_json::json!(["prefix:tenant:abc:suffix"]));
+        let token = make_token(extra);
+
+        let ctx = auth.authenticate(Some(&bearer(&token))).await.unwrap().unwrap();
+        assert!(ctx.is_authorized("tenant:abc")); // matched substring
+        assert!(!ctx.is_authorized("prefix:tenant:abc:suffix")); // full value not in set
+    }
+
+    #[tokio::test]
+    async fn regexp_membership_claim_no_match_yields_empty_context() {
+        // Token is valid and the claim exists, but no values match the pattern.
+        // authenticate() succeeds; the returned AuthContext simply admits nothing.
+        let mut cfg = cfg_with(inline_public_key());
+        cfg.membership_claim = MembershipClaimConfig::Regexp {
+            claim: "roles".to_string(),
+            pattern: r"^tenant:.+".to_string(),
+        };
+        let auth = cfg.build().await.unwrap();
+
+        let mut extra = HashMap::new();
+        extra.insert("roles", serde_json::json!(["admin", "viewer"]));
+        let token = make_token(extra);
+
+        let ctx = auth.authenticate(Some(&bearer(&token))).await.unwrap().unwrap();
+        assert!(!ctx.is_authorized("admin"));
+        assert!(!ctx.is_authorized("viewer"));
     }
 
     // ── algorithm allowlist ──────────────────────────────────────────────────
@@ -1801,9 +1963,164 @@ require_token     = false
             cfg.authority,
             Authority::PublicKey(AuthorityData::Inline { value }) if value == "pem"
         ));
-        assert_eq!(cfg.membership_claim, "tenants");
+        assert_eq!(cfg.membership_claim, MembershipClaimConfig::Identity("tenants".to_string()));
         assert_eq!(cfg.issuer.as_deref(), Some("https://issuer.example.com/"));
         assert!(!cfg.require_token);
+    }
+
+    // ── MembershipClaimConfig serde ──────────────────────────────────────────
+
+    #[test]
+    fn membership_claim_config_plain_string_deserializes_as_identity() {
+        let toml = r#"
+public_key.type  = "inline"
+public_key.value = "pem"
+membership_claim = "site_ids"
+"#;
+        let cfg: AuthConfig = toml::from_str(toml).unwrap();
+        assert_eq!(
+            cfg.membership_claim,
+            MembershipClaimConfig::Identity("site_ids".to_string()),
+        );
+    }
+
+    #[test]
+    fn membership_claim_config_inline_table_deserializes_as_regexp() {
+        let toml = r#"
+public_key.type  = "inline"
+public_key.value = "pem"
+membership_claim = { claim = "roles", pattern = "^tenant:[^:]+$" }
+"#;
+        let cfg: AuthConfig = toml::from_str(toml).unwrap();
+        assert_eq!(
+            cfg.membership_claim,
+            MembershipClaimConfig::Regexp {
+                claim: "roles".to_string(),
+                pattern: "^tenant:[^:]+$".to_string(),
+            },
+        );
+    }
+
+    #[test]
+    fn membership_claim_config_section_table_deserializes_as_regexp() {
+        let toml = r#"
+public_key.type       = "inline"
+public_key.value      = "pem"
+membership_claim.claim   = "roles"
+membership_claim.pattern = "^tenant:.+"
+"#;
+        let cfg: AuthConfig = toml::from_str(toml).unwrap();
+        assert_eq!(
+            cfg.membership_claim,
+            MembershipClaimConfig::Regexp {
+                claim: "roles".to_string(),
+                pattern: "^tenant:.+".to_string(),
+            },
+        );
+    }
+
+    #[test]
+    fn membership_claim_config_defaults_to_site_ids_identity() {
+        let toml = r#"
+public_key.type  = "inline"
+public_key.value = "pem"
+"#;
+        let cfg: AuthConfig = toml::from_str(toml).unwrap();
+        assert_eq!(
+            cfg.membership_claim,
+            MembershipClaimConfig::Identity("site_ids".to_string()),
+        );
+    }
+
+    // ── MembershipClaim::extract ─────────────────────────────────────────────
+
+    #[test]
+    fn extract_identity_returns_all_string_values() {
+        let claim = MembershipClaim::Identity("ids".to_string());
+        let mut claims = serde_json::Map::new();
+        claims.insert("ids".into(), serde_json::json!(["alpha", "beta"]));
+        let set = claim.extract(&claims).unwrap();
+        let expected: HashSet<String> = ["alpha", "beta"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(set, expected);
+    }
+
+    #[test]
+    fn extract_identity_skips_non_string_elements() {
+        let claim = MembershipClaim::Identity("ids".to_string());
+        let mut claims = serde_json::Map::new();
+        claims.insert("ids".into(), serde_json::json!(["alpha", 42, null, "beta"]));
+        let set = claim.extract(&claims).unwrap();
+        let expected: HashSet<String> = ["alpha", "beta"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(set, expected);
+    }
+
+    #[test]
+    fn extract_identity_missing_claim_is_error() {
+        let claim = MembershipClaim::Identity("ids".to_string());
+        let claims = serde_json::Map::new();
+        assert!(matches!(
+            claim.extract(&claims),
+            Err(AuthError::InvalidToken(_)),
+        ));
+    }
+
+    #[test]
+    fn extract_identity_non_array_claim_is_error() {
+        let claim = MembershipClaim::Identity("ids".to_string());
+        let mut claims = serde_json::Map::new();
+        claims.insert("ids".into(), serde_json::json!("not-an-array"));
+        assert!(matches!(
+            claim.extract(&claims),
+            Err(AuthError::InvalidToken(_)),
+        ));
+    }
+
+    #[test]
+    fn extract_regexp_admits_matching_values() {
+        let re = Regex::new(r"^tenant:[^:]+$").unwrap();
+        let claim = MembershipClaim::Regexp("roles".to_string(), re);
+        let mut claims = serde_json::Map::new();
+        claims.insert(
+            "roles".into(),
+            serde_json::json!(["tenant:abc", "admin", "tenant:def"]),
+        );
+        let set = claim.extract(&claims).unwrap();
+        let expected: HashSet<String> =
+            ["tenant:abc", "tenant:def"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(set, expected);
+    }
+
+    #[test]
+    fn extract_regexp_returns_matched_substring_not_full_value() {
+        // Pattern without anchors: only the portion that matches enters the set.
+        let re = Regex::new(r"tenant:[^:]+").unwrap();
+        let claim = MembershipClaim::Regexp("roles".to_string(), re);
+        let mut claims = serde_json::Map::new();
+        claims.insert("roles".into(), serde_json::json!(["prefix:tenant:abc:suffix"]));
+        let set = claim.extract(&claims).unwrap();
+        let expected: HashSet<String> = ["tenant:abc"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(set, expected);
+    }
+
+    #[test]
+    fn extract_regexp_no_matches_returns_empty_set() {
+        let re = Regex::new(r"^tenant:.+").unwrap();
+        let claim = MembershipClaim::Regexp("roles".to_string(), re);
+        let mut claims = serde_json::Map::new();
+        claims.insert("roles".into(), serde_json::json!(["admin", "viewer"]));
+        let set = claim.extract(&claims).unwrap();
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn extract_regexp_missing_claim_is_error() {
+        let re = Regex::new(r".*").unwrap();
+        let claim = MembershipClaim::Regexp("roles".to_string(), re);
+        let claims = serde_json::Map::new();
+        assert!(matches!(
+            claim.extract(&claims),
+            Err(AuthError::InvalidToken(_)),
+        ));
     }
 
     // ── JWKS / Keycloak authority ────────────────────────────────────────────
@@ -1862,7 +2179,7 @@ require_token     = false
             }),
             issuer: None,
             audience: None,
-            membership_claim: "site_ids".to_string(),
+            membership_claim: MembershipClaimConfig::Identity("site_ids".to_string()),
             value_path: None,
             algorithms: None,
             require_token: false,

@@ -75,6 +75,7 @@ pub use self::http::HttpSourceAuthConfig;
 pub use self::jwt_auth::{
     add_auth_metadata, Auth, AuthAlgorithm, AuthConfig, AuthContext, AuthError, AuthEventError,
     AuthValuePath, Authority, AuthorityData, CompiledValuePath, EventValidator, JwksAuthority,
+    MembershipClaim, MembershipClaimConfig,
 };
 #[cfg(any(
     feature = "sources-aws_sqs",
