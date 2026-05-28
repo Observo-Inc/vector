@@ -931,8 +931,8 @@ mod tests {
             let token = make_token(HashMap::new());
             let source_auth = format!(
                 r#"[auth]
-public_key.type  = "inline"
-public_key.value = "{}"
+pub_key.type  = "inline"
+pub_key.value = "{}"
 membership_claim = "site_ids""#,
                 TEST_PUBLIC_KEY.replace('\n', "\\n")
             );
@@ -979,8 +979,8 @@ value = "{token}""#
             // sink sends no token → request allowed through.
             let source_auth = format!(
                 r#"[auth]
-public_key.type  = "inline"
-public_key.value = "{}"
+pub_key.type  = "inline"
+pub_key.value = "{}"
 membership_claim = "site_ids"
 require_token    = false"#,
                 TEST_PUBLIC_KEY.replace('\n', "\\n")
@@ -995,8 +995,8 @@ require_token    = false"#,
         async fn invalid_token_is_rejected() {
             let source_auth = format!(
                 r#"[auth]
-public_key.type  = "inline"
-public_key.value = "{}"
+pub_key.type  = "inline"
+pub_key.value = "{}"
 membership_claim = "site_ids""#,
                 TEST_PUBLIC_KEY.replace('\n', "\\n")
             );
@@ -1023,8 +1023,8 @@ value = "not.a.valid.jwt""#;
             let token = make_token(HashMap::new());
             let source_auth = format!(
                 r#"[auth]
-public_key.type  = "inline"
-public_key.value = "{}"
+pub_key.type  = "inline"
+pub_key.value = "{}"
 membership_claim = "site_ids"
 [auth.value_path]
 default = "tenant_id""#,
@@ -1050,8 +1050,8 @@ value = "{token}""#
             // no token → per-event filtering is skipped entirely, all events pass through.
             let source_auth = format!(
                 r#"[auth]
-public_key.type  = "inline"
-public_key.value = "{}"
+pub_key.type  = "inline"
+pub_key.value = "{}"
 membership_claim = "site_ids"
 require_token    = false
 [auth.value_path]
@@ -1097,8 +1097,8 @@ default = "tenant_id""#,
             // Source: require_token = true (explicit); sink: no auth → rejected.
             let source_auth = format!(
                 r#"[auth]
-public_key.type  = "inline"
-public_key.value = "{}"
+pub_key.type  = "inline"
+pub_key.value = "{}"
 membership_claim = "site_ids"
 require_token    = true"#,
                 TEST_PUBLIC_KEY.replace('\n', "\\n")
@@ -1115,8 +1115,8 @@ require_token    = true"#,
             let token = make_token(HashMap::new());
             let source_auth = format!(
                 r#"[auth]
-public_key.type  = "inline"
-public_key.value = "{}"
+pub_key.type  = "inline"
+pub_key.value = "{}"
 membership_claim = "site_ids"
 require_token    = true"#,
                 TEST_PUBLIC_KEY.replace('\n', "\\n")
@@ -1139,8 +1139,8 @@ value = "{token}""#
             // so a sink with no token must be rejected.
             let source_auth = format!(
                 r#"[auth]
-public_key.type  = "inline"
-public_key.value = "{}"
+pub_key.type  = "inline"
+pub_key.value = "{}"
 membership_claim = "site_ids""#,
                 TEST_PUBLIC_KEY.replace('\n', "\\n")
             );
@@ -1157,8 +1157,8 @@ membership_claim = "site_ids""#,
             let token = make_token(HashMap::new());
             let source_auth = format!(
                 r#"[auth]
-public_key.type  = "inline"
-public_key.value = "{}"
+pub_key.type  = "inline"
+pub_key.value = "{}"
 membership_claim = "site_ids""#,
                 TEST_PUBLIC_KEY.replace('\n', "\\n")
             );
@@ -1179,8 +1179,8 @@ value = "{token}""#
             let token = make_token(HashMap::new());
             let source_auth = format!(
                 r#"[auth]
-public_key.type  = "inline"
-public_key.value = "{}"
+pub_key.type  = "inline"
+pub_key.value = "{}"
 membership_claim = "site_ids"
 require_token    = true"#,
                 TEST_PUBLIC_KEY.replace('\n', "\\n")
@@ -1198,8 +1198,8 @@ value = "{token}""#
         async fn healthcheck_fails_when_sink_omits_token_to_require_token_source() {
             let source_auth = format!(
                 r#"[auth]
-public_key.type  = "inline"
-public_key.value = "{}"
+pub_key.type  = "inline"
+pub_key.value = "{}"
 membership_claim = "site_ids"
 require_token    = true"#,
                 TEST_PUBLIC_KEY.replace('\n', "\\n")
